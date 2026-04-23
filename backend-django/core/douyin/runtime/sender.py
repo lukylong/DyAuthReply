@@ -138,16 +138,20 @@ async def _send_one(page, text: str) -> None:
     """在当前会话输入一条消息并点击发送按钮"""
     inp = await _locate_input(page)
     if inp is None:
+        logger.error("[sender] 未找到输入框 selectors 全部落空")
         raise RuntimeError("未找到输入框")
+    logger.debug(f"[sender] 输入框定位成功，开始输入 len={len(text)}")
 
     await human_type(inp, text)
     await random_sleep(0.3, 0.8)
 
     btn = await _locate_send_btn(page)
     if btn is not None:
+        logger.debug("[sender] 点击发送按钮")
         await human_click(btn)
     else:
         # 兜底：Enter 发送
+        logger.info("[sender] 未找到发送按钮，使用 Enter 兜底")
         try:
             await page.keyboard.press("Enter")
         except Exception:
@@ -212,11 +216,19 @@ async def send_reply(
     Returns:
         DouyinReplyLog.id
     """
+    account_id = str(account.id)
     t0 = datetime.utcnow().timestamp()
     segments = _build_segments(rule, peer_nickname)
+    logger.info(
+        f"[sender] ▶ 开始发送 account={account_id} peer={peer_nickname!r} "
+        f"rule={rule.name!r} send_mode={rule.send_mode} segments={len(segments)}"
+    )
     if not segments:
+        logger.warning(
+            f"[sender] ⏭ 渲染结果为空，跳过发送 account={account_id} rule={rule.name!r}"
+        )
         log_id = await _write_reply_log(
-            account_id=str(account.id),
+            account_id=account_id,
             conversation_id=conversation_id,
             trigger_message_id=trigger_message_id,
             rule_id=str(rule.id),
@@ -229,12 +241,18 @@ async def send_reply(
 
     try:
         for i, seg in enumerate(segments):
-            logger.info(f"[sender] 发送段 {i+1}/{len(segments)} len={len(seg)} account={account.id}")
+            preview = seg[:40].replace('\n', ' ')
+            logger.info(
+                f"[sender] 发送段 {i+1}/{len(segments)} account={account_id} "
+                f"len={len(seg)} preview={preview!r}"
+            )
             await _send_one(page, seg)
             # 随机间隔 1~3 秒
             if i < len(segments) - 1:
                 import random
-                await asyncio.sleep(random.uniform(1.0, 3.0))
+                gap = random.uniform(1.0, 3.0)
+                logger.debug(f"[sender] 段间等待 {gap:.2f}s")
+                await asyncio.sleep(gap)
 
         duration = int((datetime.utcnow().timestamp() - t0) * 1000)
         links_payload = []
@@ -242,8 +260,8 @@ async def send_reply(
         links_payload = (tpl.links if tpl else rule.links) or []
 
         first_text = segments[0]
-        return await _write_reply_log(
-            account_id=str(account.id),
+        log_id = await _write_reply_log(
+            account_id=account_id,
             conversation_id=conversation_id,
             trigger_message_id=trigger_message_id,
             rule_id=str(rule.id),
@@ -252,11 +270,19 @@ async def send_reply(
             result='success',
             duration_ms=duration,
         )
+        logger.info(
+            f"[sender] ✔ 发送成功 account={account_id} peer={peer_nickname!r} "
+            f"segments={len(segments)} duration_ms={duration} reply_log={log_id}"
+        )
+        return log_id
     except Exception as e:  # noqa: BLE001
         duration = int((datetime.utcnow().timestamp() - t0) * 1000)
-        logger.exception(f"[sender] 发送失败 account={account.id} err={e}")
-        return await _write_reply_log(
-            account_id=str(account.id),
+        logger.exception(
+            f"[sender] ✘ 发送失败 account={account_id} peer={peer_nickname!r} "
+            f"rule={rule.name!r} duration_ms={duration} err={type(e).__name__}: {e}"
+        )
+        log_id = await _write_reply_log(
+            account_id=account_id,
             conversation_id=conversation_id,
             trigger_message_id=trigger_message_id,
             rule_id=str(rule.id),
@@ -266,3 +292,5 @@ async def send_reply(
             error_message=f'{type(e).__name__}: {e}',
             duration_ms=duration,
         )
+        logger.info(f"[sender] 失败日志已落库 reply_log={log_id}")
+        return log_id

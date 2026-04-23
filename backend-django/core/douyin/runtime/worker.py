@@ -346,15 +346,22 @@ class DouyinWorker:
         if action == 'login':
             acc = await _fetch_account_orm(account_id)
             if acc is None:
+                logger.warning(f"[worker] login 命令忽略：账号不存在 account={account_id}")
                 return
+            logger.info(
+                f"[worker] 即时扫码登录任务派发 account={account_id} nickname={acc.nickname!r}"
+            )
             asyncio.create_task(scan_qrcode_login(acc))
         elif action == 'logout':
+            logger.info(f"[worker] logout 命令 account={account_id}")
             await self._stop_account(account_id)
             from core.douyin.runtime.storage import delete_storage_state
             delete_storage_state(account_id)
+            logger.info(f"[worker] logout 完成 account={account_id} storage 已清除")
         elif action == 'session':
             # channel 形如 douyin:cmd:session:<account_id>:pause  (payload.action 也可)
             sub = parts[4] if len(parts) > 4 else payload.get('action', '')
+            logger.info(f"[worker] session 命令 account={account_id} sub={sub}")
             if sub in ('stop', 'restart'):
                 await self._stop_account(account_id)
             # pause / resume 当前版本简单处理：只改 DB 状态；
@@ -373,28 +380,49 @@ class DouyinWorker:
     async def _account_loop(self, a: dict) -> None:
         account_id = a['id']
         owner_id = a['owner_id']
+        nickname = a.get('nickname') or account_id[:8]
         self._account_metrics[account_id] = {
             'messages_today': 0, 'replies_today': 0, 'errors_today': 0,
             'started_at': timezone.now(),
         }
+        logger.info(
+            f"[worker] ▶ 账号协程启动 account={account_id} nickname={nickname!r} "
+            f"status={a['status']} mode={a.get('work_mode')} "
+            f"interval=[{a.get('min_interval_seconds')},{a.get('max_interval_seconds')}]s "
+            f"quota={a.get('daily_reply_quota')} today={a.get('reply_today')}"
+        )
 
         # 若账号从未登录 / 登录失效 → 直接跑一次扫码登录
         try:
             if a['status'] in (0, 2):
+                logger.info(
+                    f"[worker] 账号需要扫码登录 account={account_id} status={a['status']}"
+                )
                 acc = await _fetch_account_orm(account_id)
                 if acc is not None:
                     ok = await scan_qrcode_login(acc)
                     if not ok:
-                        logger.warning(f"[worker] 账号 {account_id} 登录失败，稍后再试")
+                        logger.warning(
+                            f"[worker] 账号 {nickname} ({account_id}) 登录失败，30s 后重试"
+                        )
                         await asyncio.sleep(30)
                         return
+                    logger.info(
+                        f"[worker] 账号 {nickname} ({account_id}) 登录成功，进入扫描循环"
+                    )
         except Exception as e:  # noqa: BLE001
             logger.exception(f"[worker] 账号 {account_id} 登录异常: {e}")
 
+        loop_count = 0
         while not self._stop.is_set():
+            loop_count += 1
             try:
                 # 静默时段不扫描
                 if _in_silent_window(a.get('silent_start'), a.get('silent_end')):
+                    logger.info(
+                        f"[worker] ⏸ 账号处于静默时段 account={account_id} "
+                        f"window=[{a.get('silent_start')},{a.get('silent_end')}] 休眠 60s"
+                    )
                     await asyncio.sleep(60)
                     continue
                 # 达到日上限
@@ -403,22 +431,41 @@ class DouyinWorker:
                     logger.info(f"[worker] 账号 {account_id} 已删除，退出循环")
                     return
                 if acc_row.reply_today >= acc_row.daily_reply_quota:
+                    logger.info(
+                        f"[worker] ⏸ 账号已达日回复上限 account={account_id} "
+                        f"today={acc_row.reply_today}/{acc_row.daily_reply_quota} 休眠 120s"
+                    )
                     await asyncio.sleep(120)
                     continue
                 if acc_row.status != 1:
+                    logger.info(
+                        f"[worker] 账号非在线 account={account_id} status={acc_row.status} "
+                        f"休眠 30s 等待状态恢复"
+                    )
                     await asyncio.sleep(30)
                     continue
 
                 # 扫收件箱
+                logger.info(
+                    f"[worker] #{loop_count} 开始扫描收件箱 account={account_id} ({nickname})"
+                )
                 new_msgs: list[ScannedMessage] = await scan_inbox(acc_row)
                 self._account_metrics[account_id]['messages_today'] += len(new_msgs)
+                logger.info(
+                    f"[worker] #{loop_count} 扫描完成 account={account_id} "
+                    f"new_msgs={len(new_msgs)} messages_today={self._account_metrics[account_id]['messages_today']}"
+                )
 
                 if new_msgs:
                     rules = await _load_rules_for_account(account_id)
+                    logger.info(
+                        f"[worker] 加载规则 account={account_id} 启用中={len(rules)} 条"
+                    )
                     for m in new_msgs:
                         await self._handle_one_message(acc_row, m, rules, owner_id)
                 # 随机间隔
                 wait = random.uniform(self.idle_poll_min, self.idle_poll_max)
+                logger.debug(f"[worker] 账号 {account_id} 休眠 {wait:.1f}s 后继续")
                 await asyncio.sleep(wait)
             except asyncio.CancelledError:
                 logger.info(f"[worker] 账号协程被取消 {account_id}")
@@ -437,22 +484,44 @@ class DouyinWorker:
         rules: list,
         owner_id: str,
     ) -> None:
+        account_id = str(account.id)
+        peer = msg.peer_nickname or msg.peer_sec_uid or '?'
+        preview = (msg.text or '')[:40].replace('\n', ' ')
+        logger.info(
+            f"[reply] ▶ 处理入向消息 account={account_id} peer={peer!r} "
+            f"msg_id={msg.message_id} text={preview!r}"
+        )
+
         # 黑名单
-        reason = await _blacklist_hit(str(account.id), msg.peer_sec_uid, msg.peer_nickname or '', msg.text)
+        reason = await _blacklist_hit(account_id, msg.peer_sec_uid, msg.peer_nickname or '', msg.text)
         if reason:
-            await _log_event(str(account.id), 'blacklist_hit', 'info', '跳过：命中黑名单', reason, self.worker_id)
+            logger.info(f"[reply] ⏭ 跳过：命中黑名单 account={account_id} peer={peer!r} reason={reason}")
+            await _log_event(account_id, 'blacklist_hit', 'info', '跳过：命中黑名单', reason, self.worker_id)
             return
 
         # 规则匹配
         rule = match_rule(msg.text, rules, incoming_channel='dm', at=datetime.now())
         if rule is None:
-            await _log_event(str(account.id), 'reply_failed', 'info', '跳过：无命中规则',
+            logger.info(
+                f"[reply] ⏭ 跳过：无命中规则 account={account_id} peer={peer!r} "
+                f"text={preview!r} 候选规则={len(rules)}"
+            )
+            await _log_event(account_id, 'reply_failed', 'info', '跳过：无命中规则',
                              f"text={msg.text[:60]}", self.worker_id)
             return
+        logger.info(
+            f"[reply] ✔ 命中规则 account={account_id} rule={rule.name!r} "
+            f"match_type={rule.match_type} priority={rule.priority} "
+            f"cooldown={rule.cooldown_seconds}s send_mode={rule.send_mode}"
+        )
 
         # 冷却
         if await _is_in_cooldown(msg.conversation_id, str(rule.id), rule.cooldown_seconds):
-            await _log_event(str(account.id), 'rate_limit', 'info', '跳过：规则冷却中',
+            logger.info(
+                f"[reply] ⏭ 跳过：规则冷却中 account={account_id} "
+                f"rule={rule.name!r} conv={msg.conversation_id}"
+            )
+            await _log_event(account_id, 'rate_limit', 'info', '跳过：规则冷却中',
                              f"rule={rule.name}", self.worker_id)
             return
 
@@ -461,12 +530,16 @@ class DouyinWorker:
         page = await context.new_page()
         try:
             from core.douyin.runtime import selectors as S
+            logger.info(f"[reply] 打开 IM 页面 account={account_id}")
             await page.goto(S.CREATOR_IM, wait_until='domcontentloaded', timeout=30000)
             await asyncio.sleep(2)
 
             # 在会话列表里找到对应昵称并点进去
             items = page.locator(S.IM_CONVERSATION_ITEMS[0])
             count = await items.count()
+            logger.info(
+                f"[reply] 定位会话 account={account_id} peer={peer!r} 会话项数={count}"
+            )
             hit = False
             for i in range(min(count, 20)):
                 it = items.nth(i)
@@ -475,6 +548,7 @@ class DouyinWorker:
                     if await nick_loc.count() and (await nick_loc.inner_text()).strip() == (msg.peer_nickname or ''):
                         await it.click()
                         hit = True
+                        logger.info(f"[reply] 点击会话成功 account={account_id} peer={peer!r} idx={i}")
                         break
                 except Exception:
                     continue
@@ -482,26 +556,35 @@ class DouyinWorker:
                 raise RuntimeError(f"未找到对方会话：nickname={msg.peer_nickname}")
             await asyncio.sleep(1.5)
 
-            await send_reply(
+            log_id = await send_reply(
                 account, page,
                 conversation_id=msg.conversation_id,
                 trigger_message_id=msg.message_id,
                 rule=rule,
                 peer_nickname=msg.peer_nickname or '',
             )
-            self._account_metrics[str(account.id)]['replies_today'] += 1
+            self._account_metrics[account_id]['replies_today'] += 1
+            logger.info(
+                f"[reply] ✔ 回复成功 account={account_id} peer={peer!r} "
+                f"rule={rule.name!r} reply_log={log_id} "
+                f"replies_today={self._account_metrics[account_id]['replies_today']}"
+            )
             await push_to_user(owner_id, 'reply_sent', {
-                'account_id': str(account.id),
+                'account_id': account_id,
                 'peer_nickname': msg.peer_nickname,
                 'rule': rule.name,
                 'text_preview': (msg.text or '')[:60],
             })
         except Exception as e:  # noqa: BLE001
-            self._account_metrics[str(account.id)]['errors_today'] += 1
-            await _log_event(str(account.id), 'reply_failed', 'error', '回复失败',
+            self._account_metrics[account_id]['errors_today'] += 1
+            logger.exception(
+                f"[reply] ✘ 回复失败 account={account_id} peer={peer!r} "
+                f"rule={rule.name!r} err={type(e).__name__}: {e}"
+            )
+            await _log_event(account_id, 'reply_failed', 'error', '回复失败',
                              f"{type(e).__name__}: {e}", self.worker_id)
             await push_to_user(owner_id, 'reply_failed', {
-                'account_id': str(account.id),
+                'account_id': account_id,
                 'peer_nickname': msg.peer_nickname,
                 'error': str(e),
             })

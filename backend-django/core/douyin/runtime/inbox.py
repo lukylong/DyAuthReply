@@ -218,43 +218,61 @@ async def scan_inbox(account: "DouyinAccount", *, max_conversations: int = 15) -
     - 仅扫描有未读角标的会话，避免对所有会话逐个点击（降低被风控风险）
     - 若全无未读则直接返回 []
     """
+    account_id = str(account.id)
+    logger.info(
+        f"[inbox] ▶ 开始扫描 account={account_id} nickname={account.nickname!r} "
+        f"max_conversations={max_conversations}"
+    )
     context = await BrowserManager.get_or_create_context(account)
     page = await context.new_page()
     new_messages: list[ScannedMessage] = []
     try:
+        logger.info(f"[inbox] 打开 IM 页面 account={account_id} url={S.CREATOR_IM}")
         await page.goto(S.CREATOR_IM, wait_until="domcontentloaded", timeout=30000)
         await asyncio.sleep(2.5)
+        logger.info(f"[inbox] 页面加载完成 account={account_id} current_url={page.url}")
 
         items = await _list_conversation_items(page, max_items=max_conversations)
+        logger.info(f"[inbox] 会话列表项数 account={account_id} count={len(items)}")
         if not items:
-            logger.debug(f"[inbox] 未发现会话项 account={account.id}")
+            logger.info(f"[inbox] 未发现会话项，结束本轮扫描 account={account_id}")
             return new_messages
 
+        unread_total = 0
         for idx, item in enumerate(items):
             try:
                 unread = await _get_unread(item)
                 if unread <= 0:
                     continue
+                unread_total += 1
 
                 nickname = await _read_nested_text(item, S.IM_CONV_NICKNAME) or ''
                 preview = await _read_nested_text(item, S.IM_CONV_LAST_MESSAGE) or ''
-                logger.info(f"[inbox] 发现未读会话 #{idx} nickname={nickname!r} unread={unread}")
+                logger.info(
+                    f"[inbox] 发现未读会话 #{idx} account={account_id} "
+                    f"nickname={nickname!r} unread={unread} preview={preview[:40]!r}"
+                )
 
                 await human_click(item)
                 await random_sleep(0.8, 1.5)
+                logger.info(f"[inbox] 已进入会话 nickname={nickname!r} url={page.url}")
 
                 peer_sec_uid = await _extract_peer_sec_uid(page) or f"unknown_{idx}"
                 bubbles = await _read_conversation_messages(page, limit=max(unread, 1))
+                inbound = [b for b in bubbles if b['direction'] == 'in']
+                logger.info(
+                    f"[inbox] 采集消息气泡 nickname={nickname!r} "
+                    f"total={len(bubbles)} inbound={len(inbound)} peer_sec_uid={peer_sec_uid}"
+                )
                 now = timezone.now()
 
-                # 保留最新的 N 条"对方发来"消息
-                inbound = [b for b in bubbles if b['direction'] == 'in']
-                for b in inbound[-unread:] if unread <= len(inbound) else inbound:
+                picks = inbound[-unread:] if unread <= len(inbound) else inbound
+                for b in picks:
                     text = b.get('text') or ''
                     if not text:
                         continue
                     result = await _upsert_conversation_and_message(
-                        account_id=str(account.id),
+                        account_id=account_id,
                         peer_sec_uid=peer_sec_uid,
                         peer_nickname=nickname,
                         text=text,
@@ -262,8 +280,15 @@ async def scan_inbox(account: "DouyinAccount", *, max_conversations: int = 15) -
                         raw={'preview': preview, 'unread': unread, 'scan_idx': idx},
                     )
                     if result is None:
+                        logger.debug(
+                            f"[inbox] 消息已存在，跳过 nickname={nickname!r} text={text[:40]!r}"
+                        )
                         continue
                     conv_id, msg_id = result
+                    logger.info(
+                        f"[inbox] ✔ 新入向消息 account={account_id} nickname={nickname!r} "
+                        f"msg_id={msg_id} text={text[:60]!r}"
+                    )
                     new_messages.append(ScannedMessage(
                         message_id=msg_id,
                         conversation_id=conv_id,
@@ -274,13 +299,16 @@ async def scan_inbox(account: "DouyinAccount", *, max_conversations: int = 15) -
                         raw={'preview': preview, 'bubble_direction': b['direction']},
                     ))
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"[inbox] 处理会话 #{idx} 失败: {e}")
+                logger.warning(f"[inbox] 处理会话 #{idx} 失败 account={account_id}: {e}")
                 continue
 
-        logger.info(f"[inbox] 扫描完成 account={account.id} 新增入向={len(new_messages)}")
+        logger.info(
+            f"[inbox] ✔ 扫描完成 account={account_id} "
+            f"未读会话={unread_total} 新增入向={len(new_messages)}"
+        )
         return new_messages
     except Exception as e:  # noqa: BLE001
-        logger.exception(f"[inbox] scan_inbox 异常 account={account.id}: {e}")
+        logger.exception(f"[inbox] ✘ scan_inbox 异常 account={account_id}: {e}")
         return new_messages
     finally:
         try:

@@ -1,27 +1,35 @@
 # ************** 默认数据库 配置  ************** #
 # ================================================= #
 # 数据库类型 MYSQL/SQLSERVER/SQLITE3/POSTGRESQL
+#
+# 所有字段都支持从环境变量读取，便于 docker-compose / Kubernetes 等场景覆盖；
+# 未设置环境变量时回退到本地开发默认值。
 import os
 
-DATABASE_TYPE = "SQLITE3"
-# 数据库地址
-DATABASE_HOST = "django-ninja.zq-platform.cn"
-# 数据库端口
-DATABASE_PORT = 5323
-# 数据库用户名
-DATABASE_USER = os.environ.get('DEV_DB_USER', "")
-# 数据库密码
-DATABASE_PASSWORD = os.environ.get('DEV_DB_PASSWORD', "")
-# 数据库名
-DATABASE_NAME = "zq-platform"
+
+def _env(name: str, default: str = '') -> str:
+    return os.environ.get(name, default)
+
+
+DATABASE_TYPE = _env('DATABASE_TYPE', 'SQLITE3')
+DATABASE_HOST = _env('DATABASE_HOST', 'django-ninja.zq-platform.cn')
+DATABASE_PORT = int(_env('DATABASE_PORT', '5323'))
+DATABASE_USER = _env('DATABASE_USER', _env('DEV_DB_USER', ''))
+DATABASE_PASSWORD = _env('DATABASE_PASSWORD', _env('DEV_DB_PASSWORD', ''))
+DATABASE_NAME = _env('DATABASE_NAME', 'zq-platform')
 
 # ================================================= #
 # ******** redis配置  *********** #
 # ================================================= #
-REDIS_PASSWORD = ''
-REDIS_HOST = '127.0.0.1'
-REDIS_DB = '2'
-REDIS_URL = f'redis://:{REDIS_PASSWORD or ""}@{REDIS_HOST}:6379'
+REDIS_PASSWORD = _env('REDIS_PASSWORD', '')
+REDIS_HOST = _env('REDIS_HOST', '127.0.0.1')
+REDIS_PORT = int(_env('REDIS_PORT', '6379'))
+REDIS_DB = _env('REDIS_DB', '2')
+if REDIS_PASSWORD:
+    _default_redis_url = f'redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}'
+else:
+    _default_redis_url = f'redis://{REDIS_HOST}:{REDIS_PORT}'
+REDIS_URL = _env('REDIS_URL', _default_redis_url)
 
 # # ================================================= #
 # # ******************** JWT 配置 ***************** #
@@ -42,7 +50,7 @@ JWT_REFRESH_SECRET_KEY = os.environ.get(
 # ================================================= #
 IS_DEMO = False
 
-ENABLE_SCHEDULER = True
+ENABLE_SCHEDULER = _env('ENABLE_SCHEDULER', 'True').lower() == 'true'
 
 # ================================================= #
 # ******** OAuth 配置 *********** #
@@ -123,3 +131,11 @@ DASHSCOPE_API_KEY = os.environ.get('DASHSCOPE_API_KEY', 'sk-1c3799cb5acc455a9532
 
 # Ollama (本地)
 OLLAMA_HOST = os.environ.get('OLLAMA_HOST', 'http://localhost:11434')
+
+# ================================================= #
+# ******** 抖音私信自动回复（core.douyin / M2+） *********** #
+# ================================================= #
+DOUYIN_DATA_DIR = _env('DOUYIN_DATA_DIR', '/var/lib/zq-platform/douyin')
+DOUYIN_STORAGE_ENCRYPTION_KEY = _env('DOUYIN_STORAGE_ENCRYPTION_KEY', '')
+DOUYIN_WORKER_HEADLESS = _env('DOUYIN_WORKER_HEADLESS', 'False').lower() == 'true'
+DOUYIN_REDIS_CHANNEL_PREFIX = _env('DOUYIN_REDIS_CHANNEL_PREFIX', 'douyin')

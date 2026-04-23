@@ -28,8 +28,15 @@ from core.server_monitor.server_monitor_api import router as server_monitor_rout
 from core.user.user_api import router as user_router
 from core.data_source.data_source_api import router as data_source_router
 from core.douyin.douyin_account_api import router as douyin_account_router
+from core.douyin.douyin_account_group_api import router as douyin_account_group_router
+from core.douyin.douyin_blacklist_api import router as douyin_blacklist_router
+from core.douyin.douyin_event_api import router as douyin_event_router
+from core.douyin.douyin_quick_reply_api import router as douyin_quick_reply_router
 from core.douyin.douyin_reply_log_api import router as douyin_reply_log_router
 from core.douyin.douyin_rule_api import router as douyin_rule_router
+from core.douyin.douyin_session_api import router as douyin_session_router
+from core.douyin.douyin_stat_api import router as douyin_stat_router
+from core.douyin.douyin_template_api import router as douyin_template_router
 
 
 # 创建核心模块的总路由
@@ -58,5 +65,12 @@ core_router.add_router("/message", message_router, tags=["Core-Message"])
 core_router.add_router("/announcement", announcement_router, tags=["Core-Announcement"])
 core_router.add_router("/page", page_manager_router, tags=["Core-PageManager"])
 core_router.add_router("/douyin", douyin_account_router, tags=["Core-Douyin-Account"])
+core_router.add_router("/douyin", douyin_account_group_router, tags=["Core-Douyin-AccountGroup"])
 core_router.add_router("/douyin", douyin_rule_router, tags=["Core-Douyin-Rule"])
+core_router.add_router("/douyin", douyin_template_router, tags=["Core-Douyin-Template"])
+core_router.add_router("/douyin", douyin_session_router, tags=["Core-Douyin-Session"])
+core_router.add_router("/douyin", douyin_blacklist_router, tags=["Core-Douyin-Blacklist"])
+core_router.add_router("/douyin", douyin_quick_reply_router, tags=["Core-Douyin-QuickReply"])
+core_router.add_router("/douyin", douyin_event_router, tags=["Core-Douyin-Event"])
+core_router.add_router("/douyin", douyin_stat_router, tags=["Core-Douyin-Stat"])
 core_router.add_router("/douyin", douyin_reply_log_router, tags=["Core-Douyin-ReplyLog"])

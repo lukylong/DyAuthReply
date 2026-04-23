@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1.7
+#
+# zq-platform 前端开发镜像（Vite dev server）
+# 用于 docker-compose 开发环境，支持 HMR 热更新。
+# 生产部署请使用 `pnpm build:ele` + nginx，不在本镜像范畴内。
+
+FROM node:20-slim
+
+ENV PNPM_HOME="/pnpm" \
+    PATH="/pnpm:$PATH" \
+    NODE_OPTIONS="--max-old-space-size=4096"
+
+# 国内镜像源（构建期可临时启用）
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+
+RUN corepack enable && corepack prepare pnpm@10.14.0 --activate \
+    && pnpm config set registry "${NPM_REGISTRY}"
+
+WORKDIR /workspace
+
+# ---- 依赖安装（利用 BuildKit 缓存） ----
+# 仅复制 manifest 文件，避免源码变动击穿缓存
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc* ./
+COPY apps ./apps
+COPY packages ./packages
+COPY internal ./internal
+COPY scripts ./scripts
+COPY turbo.json eslint.config.mjs tsconfig.json* ./
+
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+    pnpm install --frozen-lockfile || pnpm install
+
+EXPOSE 5777
+
+# Vite 以 --host 0.0.0.0 监听容器外访问；compose 会把 5777 暴露出去
+CMD ["pnpm", "--filter", "@vben/web-ele", "dev", "--host", "0.0.0.0", "--port", "5777"]

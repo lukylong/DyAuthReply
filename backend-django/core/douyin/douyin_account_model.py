@@ -25,6 +25,12 @@ class DouyinAccount(RootModel):
         (3, '已禁用'),
     ]
 
+    WORK_MODE_CHOICES = [
+        ('auto', '全自动回复'),
+        ('manual', '仅人工介入'),
+        ('hybrid', '混合（命中规则自动回、其它人工）'),
+    ]
+
     nickname = models.CharField(
         max_length=64,
         help_text="抖音昵称",
@@ -113,6 +119,48 @@ class DouyinAccount(RootModel):
         help_text="备注",
     )
 
+    # ---------- 多账号托管增强字段 ----------
+    group = models.ForeignKey(
+        to='core.DouyinAccountGroup',
+        on_delete=models.SET_NULL,
+        db_constraint=False,
+        null=True, blank=True,
+        related_name='accounts',
+        help_text="所属分组",
+        db_index=True,
+    )
+
+    tags = models.JSONField(
+        default=list, blank=True,
+        help_text="账号标签，字符串数组（如 ['主号','教育','测试']）",
+    )
+
+    work_mode = models.CharField(
+        max_length=16,
+        choices=WORK_MODE_CHOICES,
+        default='auto',
+        db_index=True,
+        help_text="工作模式",
+    )
+
+    priority = models.IntegerField(
+        default=0,
+        help_text="并发调度优先级（越大越先分配 worker 资源）",
+        db_index=True,
+    )
+
+    proxy_url = models.CharField(
+        max_length=255, null=True, blank=True,
+        help_text="代理地址（http://user:pass@host:port，避免多账号同 IP 被风控）",
+    )
+
+    user_agent = models.CharField(
+        max_length=512, null=True, blank=True,
+        help_text="浏览器 UA（为空则使用默认 Chromium UA）",
+    )
+
+    reply_today = models.IntegerField(default=0, help_text="今日已回复数（每日 0 点由调度器重置）")
+
     class Meta:
         db_table = 'core_douyin_account'
         verbose_name = '抖音账号'
@@ -121,6 +169,8 @@ class DouyinAccount(RootModel):
         indexes = [
             models.Index(fields=['owner', 'status']),
             models.Index(fields=['status', 'last_heartbeat']),
+            models.Index(fields=['group', 'status']),
+            models.Index(fields=['work_mode', 'status', 'priority']),
         ]
 
     def __str__(self):

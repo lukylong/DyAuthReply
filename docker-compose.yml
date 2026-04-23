@@ -1,0 +1,203 @@
+# =============================================================================
+# zq-platform 本地一体化开发 / 联调环境
+#
+# 启动：  docker compose up -d --build
+# 停止：  docker compose down
+# 清库：  docker compose down -v   (慎用：会删除 PostgreSQL / Redis / 日志数据卷)
+#
+# 默认端口映射：
+#   - 5432 → postgres
+#   - 6379 → redis
+#   - 8000 → backend-django (uvicorn/ASGI)
+#   - 5777 → web-ele 前端 (Vite)
+#
+# 配置优先级：.env (compose 变量) > docker-compose.yml 默认值 > 镜像内默认值
+# =============================================================================
+
+name: zq-platform
+
+x-backend-env: &backend-env
+  ZQ_ENV: dev
+  # --- Database (PostgreSQL) ---
+  DATABASE_TYPE: POSTGRESQL
+  DATABASE_HOST: postgres
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: ${POSTGRES_DB:-zq_platform}
+  DATABASE_USER: ${POSTGRES_USER:-zq}
+  DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-zq_pass_change_me}
+  # --- Redis ---
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_DB: "2"
+  REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+  # --- Django ---
+  DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-dev-compose-secret-change-me}
+  JWT_ACCESS_SECRET_KEY: ${JWT_ACCESS_SECRET_KEY:-dev-compose-access-secret}
+  JWT_REFRESH_SECRET_KEY: ${JWT_REFRESH_SECRET_KEY:-dev-compose-refresh-secret}
+  # --- Douyin (M2+) ---
+  DOUYIN_DATA_DIR: /var/lib/zq-platform/douyin
+  DOUYIN_STORAGE_ENCRYPTION_KEY: ${DOUYIN_STORAGE_ENCRYPTION_KEY:-}
+  DOUYIN_WORKER_HEADLESS: ${DOUYIN_WORKER_HEADLESS:-True}
+  DOUYIN_REDIS_CHANNEL_PREFIX: douyin
+
+services:
+  # ---------------------------------------------------------------------------
+  # 基础设施
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: zq-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-zq_platform}
+      POSTGRES_USER: ${POSTGRES_USER:-zq}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-zq_pass_change_me}
+      PGDATA: /var/lib/postgresql/data/pgdata
+      TZ: Asia/Shanghai
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-zq} -d ${POSTGRES_DB:-zq_platform}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - zq-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: zq-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      ${REDIS_PASSWORD:+--requirepass $REDIS_PASSWORD}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - zq-net
+
+  # ---------------------------------------------------------------------------
+  # 应用服务
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend-django
+      dockerfile: Dockerfile
+    image: zq-platform/backend:dev
+    container_name: zq-backend
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      ROLE: web
+      AUTO_MIGRATE: "true"
+      AUTO_LOADDATA: ${AUTO_LOADDATA:-false}
+      UVICORN_RELOAD: ${UVICORN_RELOAD:-} # 设为 "1" 开启热重载（开发）
+    command: ["web"]
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      # 开发态挂载源码以支持热重载；如需固化可注释掉
+      - ./backend-django:/app
+      - backend-logs:/app/logs
+      - douyin-data:/var/lib/zq-platform/douyin
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - zq-net
+
+  scheduler:
+    image: zq-platform/backend:dev
+    container_name: zq-scheduler
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      ROLE: scheduler
+      AUTO_MIGRATE: "false"
+    command: ["scheduler"]
+    volumes:
+      - ./backend-django:/app
+      - backend-logs:/app/logs
+    depends_on:
+      backend:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - zq-net
+
+  # 抖音 worker：M2 里程碑之前以 idle 模式运行（入口脚本会自动降级为 tail -f）
+  # 实现完成后移除下面的 profiles 行即可随 compose up 默认启动。
+  douyin-worker:
+    image: zq-platform/backend:dev
+    container_name: zq-douyin-worker
+    restart: unless-stopped
+    profiles: ["douyin"]
+    environment:
+      <<: *backend-env
+      ROLE: douyin-worker
+      AUTO_MIGRATE: "false"
+    command: ["douyin-worker"]
+    volumes:
+      - ./backend-django:/app
+      - backend-logs:/app/logs
+      - douyin-data:/var/lib/zq-platform/douyin
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    networks:
+      - zq-net
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile.dev
+    image: zq-platform/web-ele:dev
+    container_name: zq-web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: development
+    ports:
+      - "${WEB_PORT:-5777}:5777"
+    volumes:
+      - ./web:/workspace
+      # 使用命名卷接管 node_modules，避免覆盖容器内已装依赖并解决跨平台二进制差异
+      - web-node-modules:/workspace/node_modules
+      - web-apps-node-modules:/workspace/apps/web-ele/node_modules
+    depends_on:
+      - backend
+    networks:
+      - zq-net
+
+# -----------------------------------------------------------------------------
+# 命名卷：PostgreSQL / Redis 数据、后端日志、抖音 storage_state、前端 node_modules
+# -----------------------------------------------------------------------------
+volumes:
+  postgres-data:
+  redis-data:
+  backend-logs:
+  douyin-data:
+  web-node-modules:
+  web-apps-node-modules:
+
+networks:
+  zq-net:
+    driver: bridge

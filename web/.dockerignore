@@ -1,7 +1,31 @@
+# Node
 node_modules
+**/node_modules
+.pnpm-store
+
+# Build outputs
+dist
+**/dist
+.turbo
+**/.turbo
+**/.vite
+coverage
+*.log
+
+# Editors / IDE
+.idea
+.vscode
+*.swp
+
+# Git
 .git
 .gitignore
+.github
+
+# Docker 自身
+Dockerfile*
+.dockerignore
+
+# 其它
 *.md
-dist
-.turbo
-dist.zip
+!README.md

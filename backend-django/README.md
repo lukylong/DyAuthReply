@@ -24,6 +24,27 @@ DATABASE_NAME = ""
 pip install -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple -r requirements.txt
 ```
 
+### 安装 Playwright 浏览器内核（抖音私信自动回复模块需要）
+
+`core.douyin` 模块依赖 Playwright 驱动 Chromium 接管创作者中心，首次部署需要执行：
+
+```bash
+# 安装 Chromium 内核（约 170MB）
+playwright install chromium
+
+# 如果在 Linux 服务器上运行且缺少系统依赖，再执行：
+playwright install-deps chromium
+```
+
+独立 worker 进程（M2 里程碑）需要额外在 `env/*.py` 中配置：
+
+```python
+DOUYIN_DATA_DIR = "/var/lib/zq-platform/douyin"   # storage_state 与 user_data_dir 根目录
+DOUYIN_STORAGE_ENCRYPTION_KEY = "<Fernet key>"    # 登录态加密密钥
+DOUYIN_WORKER_HEADLESS = False                    # 首次扫码登录需有头模式
+DOUYIN_REDIS_CHANNEL_PREFIX = "douyin"            # 指令频道前缀
+```
+
 ### 执行迁移命令
 
 ```bash

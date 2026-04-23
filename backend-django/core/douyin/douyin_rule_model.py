@@ -30,6 +30,12 @@ class DouyinRule(RootModel):
         ('card_fallback', '尝试卡片降级到纯文本'),
     ]
 
+    CHANNEL_CHOICES = [
+        ('dm', '私信'),
+        ('comment', '评论'),
+        ('all', '全部渠道'),
+    ]
+
     account = models.ForeignKey(
         to='core.DouyinAccount',
         on_delete=models.CASCADE,
@@ -111,6 +117,40 @@ class DouyinRule(RootModel):
         null=True,
         blank=True,
         help_text="备注",
+    )
+
+    # ---------- 增强字段 ----------
+    template = models.ForeignKey(
+        to='core.DouyinTemplate',
+        on_delete=models.SET_NULL,
+        db_constraint=False,
+        null=True, blank=True,
+        related_name='rules',
+        help_text="引用的回复模板（优先级高于 reply_text/links）",
+        db_index=True,
+    )
+
+    time_window_start = models.TimeField(
+        null=True, blank=True,
+        help_text="规则生效时段起点（为空则全天）",
+    )
+    time_window_end = models.TimeField(
+        null=True, blank=True,
+        help_text="规则生效时段终点",
+    )
+
+    weekday_mask = models.CharField(
+        max_length=8,
+        default='1111111',
+        help_text="周一到周日是否生效（7 位 0/1 字符串，默认 1111111 全周）",
+    )
+
+    channel = models.CharField(
+        max_length=8,
+        choices=CHANNEL_CHOICES,
+        default='dm',
+        help_text="适用渠道",
+        db_index=True,
     )
 
     class Meta:

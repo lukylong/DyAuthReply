@@ -154,7 +154,49 @@ zq-platform/
 
 ## 🚀 快速开始
 
-### 环境要求
+### 方式一：Docker Compose 一键启动（推荐）
+
+仓库根目录提供 [`docker-compose.yml`](docker-compose.yml)，一条命令拉起 PostgreSQL、Redis、Django 后端、APScheduler、抖音 worker（可选）与 Vue 前端 dev server：
+
+```bash
+# 1. 复制环境变量模板（首次使用）
+cp .env.example .env
+# 按需修改 .env 中的密码、JWT 密钥等
+
+# 2. 构建并启动所有服务（后台）
+docker compose up -d --build
+
+# 3. 查看日志
+docker compose logs -f backend
+
+# 4. 首次启动自动执行 migrate；如需初始化账号数据
+docker compose exec backend python manage.py loaddata db_init.json
+
+# 5. 启动抖音 worker 进程（M2 里程碑之后，可选 profile）
+docker compose --profile douyin up -d douyin-worker
+```
+
+启动完成后访问：
+
+| 服务 | 地址 |
+| ---- | ---- |
+| 前端 Web | http://localhost:5777 |
+| 后端 API | http://localhost:8000/api/docs |
+| PostgreSQL | `localhost:5432`（账号见 `.env`） |
+| Redis | `localhost:6379` |
+
+常用命令：
+
+```bash
+docker compose down          # 停止但保留数据卷
+docker compose down -v       # 同时清空 PostgreSQL/Redis/日志（慎用）
+docker compose restart backend
+docker compose exec backend python manage.py createsuperuser
+```
+
+### 方式二：本地原生部署
+
+#### 环境要求
 
 - **后端**
   - Python >= 3.10
@@ -347,6 +389,50 @@ pnpm build:ele
 - **文件上传**: 支持多文件上传
 - **文件预览**: 图片、文档在线预览
 - **文件下载**: 批量下载功能
+
+### 抖音私信自动回复（`core.douyin`）
+
+**基础能力**
+- **账号托管**: 扫码登录创作者中心，加密保存 Playwright `storage_state`，支持多账号并发多会话
+- **关键词规则**: 包含/正则/兜底三类匹配，可引用模板或直接配置文本 + 多链接、优先级与冷却时间
+- **风控策略**: 每日回复上限、最小/最大间隔、静默时段、失败熔断
+- **实时监控**: WebSocket 推送新消息 / 登录失效 / 心跳状态，前端实时展示
+- **审计日志**: 每次回复的命中规则、耗时、结果、失败原因完整留痕
+- **独立 worker**: Playwright 常驻进程（`start_douyin_worker.py`，M2 里程碑）消费 APScheduler 下发的扫描指令
+
+**多账号托管增强（已交付）**
+
+| 模块 | 说明 | 路径 |
+| --- | --- | --- |
+| 托管看板 | 今日实时概览（账号/会话/消息/成功率）、近 7 日趋势、账号排行、规则命中分布 | `/douyin/dashboard` |
+| 账号管理 | 多账号录入、扫码登录、状态切换、批量导入（JSON/CSV），支持标签、代理、UA、优先级、工作模式（全自动/人工/混合） | `/douyin/account` |
+| 账号分组 | 按业务线/团队分组，分组内统一下发默认策略（日上限、间隔、静默时段） | `/douyin/account-group` |
+| 会话监控 | 实时显示 worker 托管的每个浏览器会话（心跳、CPU、内存、今日消息/回复/错误），支持暂停/恢复/重启/停止 | `/douyin/session` |
+| 回复模板 | 可复用的"文本 + 链接 + 变量占位符（`{{nickname}}` 等）"，分类管理，支持预览渲染；规则与快捷回复均可引用 | `/douyin/template` |
+| 快捷回复 | 人工客服介入时的短语片段，带快捷键（`/hi`、`/price`） | `/douyin/quick-reply` |
+| 回复规则 | 关键词/正则匹配，引用模板，支持时间窗口、周规则、渠道（私信/评论） | `/douyin/rule` |
+| 黑名单 | sec_uid / 昵称关键词 / 内容关键词，作用范围可选全局/分组/账号 | `/douyin/blacklist` |
+| 运行事件 | 登录、掉线、风控告警、发送失败等事件流，支持级别筛选与已读 | `/douyin/event` |
+| 回复日志 | 每次自动回复的详细审计记录 | `/douyin/reply-log` |
+
+**关键接口（worker 对接）**
+
+```text
+POST /api/core/douyin/session/heartbeat        # worker 定期上报心跳 + 指标
+POST /api/core/douyin/session/{id}/control     # 后台下发 pause/resume/stop/restart
+POST /api/core/douyin/event/report             # worker 上报运行时事件
+POST /api/core/douyin/account/batch/import     # 批量导入账号（支持 skip_duplicate）
+POST /api/core/douyin/template/preview         # 模板变量渲染预览
+GET  /api/core/douyin/dashboard/overview       # 看板概览
+GET  /api/core/douyin/dashboard/trend          # 趋势数据
+GET  /api/core/douyin/dashboard/account-rank   # 账号排行
+```
+
+**数据模型一览**
+
+`DouyinAccount` · `DouyinAccountGroup` · `DouyinRule` · `DouyinTemplate` · `DouyinTemplateCategory` · `DouyinQuickReply` · `DouyinBlacklist` · `DouyinConversation` · `DouyinMessage` · `DouyinReplyLog` · `DouyinSession` · `DouyinEvent` · `DouyinDailyStat`
+
+> 菜单由 `core/migrations/0003_seed_douyin_menus.py` 自动注入，`migrate` 完成后登录后台即可看到"抖音托管"目录。
 
 ## 🔐 API 文档
 

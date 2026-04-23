@@ -1,0 +1,9 @@
+{
+  "title": "System Management",
+  "tool": "System Tool",
+  "user": {
+    "selectPost": "Select Post",
+    "selectDept": "Select Department",
+    "allDept": "All Departments"
+  }
+}

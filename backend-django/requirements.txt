@@ -1,0 +1,29 @@
+django-ninja==1.4.5
+Django==5.2.7
+uvicorn[standard]==0.38.0
+PyJWT==2.8.0
+orjson==3.10.1
+user-agents==2.2.0
+dashscope~=1.18.0
+requests~=2.32.5
+geoip2~=4.8.0
+psutil~=7.0.0
+openpyxl==3.0.10
+minio==7.2.20
+celery==5.4.0
+apscheduler==3.10.4
+django-redis==6.0.0
+psycopg2-binary==2.9.9
+# mysqlclient==2.2.4
+python-alipay-sdk==3.3.0
+cryptography>=42.0.5,<45.0.0
+channels~=4.2.2
+channels-redis~=4.3.0
+redis~=6.2.0
+# 数据库监控依赖
+pymysql>=1.1.0
+pyodbc>=4.0.39
+gunicorn==23.0.0
+httpx==0.28.1
+# 抖音私信自动回复模块（core.douyin）
+playwright==1.48.0  

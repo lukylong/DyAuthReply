@@ -1,0 +1,38 @@
+{
+  "title": "消息中心",
+  "type": "類型",
+  "msgTitle": "標題",
+  "content": "內容",
+  "time": "時間",
+  "actions": "操作",
+  "status": "狀態",
+  "typeMap": {
+    "all": "全部",
+    "system": "系統通知",
+    "workflow": "工作流",
+    "todo": "待辦",
+    "announcement": "公告"
+  },
+  "statusMap": {
+    "all": "全部",
+    "unread": "未讀",
+    "read": "已讀"
+  },
+  "unreadCount": "{count} 條未讀",
+  "markAllRead": "全部已讀",
+  "clearRead": "清空已讀",
+  "markRead": "已讀",
+  "delete": "刪除",
+  "markReadSuccess": "已標記為已讀",
+  "markAllReadSuccess": "已全部標記為已讀",
+  "markReadFailed": "標記已讀失敗",
+  "markAllReadConfirm": "確定將所有消息標記為已讀嗎？",
+  "markAllReadConfirmTitle": "全部已讀",
+  "deleteConfirm": "確定刪除該消息嗎？",
+  "deleteConfirmTitle": "刪除確認",
+  "deleteSuccess": "刪除成功",
+  "clearReadConfirm": "確定清空所有已讀消息嗎？",
+  "clearReadConfirmTitle": "清空確認",
+  "clearReadSuccess": "清空成功",
+  "loadUnreadFailed": "加載未讀數量失敗"
+}

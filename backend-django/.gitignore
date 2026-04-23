@@ -1,0 +1,8 @@
+
+venv
+.idea/
+static/
+.venv/
+logs/
+*/migrations/
+

@@ -1,0 +1,38 @@
+{
+  "title": "Message Center",
+  "type": "Type",
+  "msgTitle": "Title",
+  "content": "Content",
+  "time": "Time",
+  "actions": "Actions",
+  "status": "Status",
+  "typeMap": {
+    "all": "All",
+    "system": "System Notification",
+    "workflow": "Workflow",
+    "todo": "To-do",
+    "announcement": "Announcement"
+  },
+  "statusMap": {
+    "all": "All",
+    "unread": "Unread",
+    "read": "Read"
+  },
+  "unreadCount": "{count} unread",
+  "markAllRead": "Mark All as Read",
+  "clearRead": "Clear Read",
+  "markRead": "Mark as Read",
+  "delete": "Delete",
+  "markReadSuccess": "Marked as read",
+  "markAllReadSuccess": "All marked as read",
+  "markReadFailed": "Failed to mark as read",
+  "markAllReadConfirm": "Are you sure you want to mark all messages as read?",
+  "markAllReadConfirmTitle": "Mark All Read",
+  "deleteConfirm": "Are you sure you want to delete this message?",
+  "deleteConfirmTitle": "Delete Confirmation",
+  "deleteSuccess": "Deleted successfully",
+  "clearReadConfirm": "Are you sure you want to clear all read messages?",
+  "clearReadConfirmTitle": "Clear Confirmation",
+  "clearReadSuccess": "Cleared successfully",
+  "loadUnreadFailed": "Failed to load unread count"
+}

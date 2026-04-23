@@ -489,6 +489,59 @@ class RedisMonitorConsumer(TokenAuthWebSocketConsumer):
             await self.send_error(f'Redis连接测试失败: {str(e)}')
 
 
+class DouyinConsumer(TokenAuthWebSocketConsumer):
+    """抖音托管事件 WebSocket 消费者
+
+    前端连接 `ws://host/ws/douyin/?token=xxx` 后自动加入分组
+    `douyin_user_{user_id}`，由 worker 通过 channel_layer.group_send
+    推送如下事件：
+      - qr_image         扫码登录二维码（base64 图片）
+      - login_success    登录成功
+      - login_failed     登录失败 / 二维码过期
+      - new_message      收到入向消息
+      - reply_sent       已发送自动回复
+      - reply_failed     回复失败
+      - event            通用运行时事件（对应 DouyinEvent）
+    """
+
+    async def connect(self):
+        await super().connect()
+        if hasattr(self, 'user_id'):
+            await self.channel_layer.group_add(
+                f"douyin_user_{self.user_id}",
+                self.channel_name,
+            )
+            logger.info(f"[DouyinConsumer] 用户 {self.user_id} 已加入抖音事件推送组")
+
+    async def disconnect(self, close_code):
+        if hasattr(self, 'user_id'):
+            await self.channel_layer.group_discard(
+                f"douyin_user_{self.user_id}",
+                self.channel_name,
+            )
+        await super().disconnect(close_code)
+
+    async def handle_message(self, data: Dict[str, Any]):
+        """前端→后端的主动消息。目前仅保留 ping，其它预留给未来的"手动介入"指令"""
+        message_type = data.get('type', 'unknown')
+        if message_type == 'subscribe':
+            await self.send_message('subscribe_response', '已订阅抖音事件推送')
+        else:
+            await self.send_message('unknown', f'暂不支持的消息类型: {message_type}')
+
+    async def douyin_event(self, event: Dict[str, Any]):
+        """处理 group_send({'type': 'douyin.event', 'event': ..., 'payload': ...})"""
+        await self.send_message(
+            event.get('event', 'douyin_event'),
+            event.get('event', ''),
+            {
+                'event': event.get('event'),
+                'payload': event.get('payload', {}),
+                'timestamp': event.get('timestamp'),
+            },
+        )
+
+
 class DatabaseMonitorConsumer(TokenAuthWebSocketConsumer):
     """数据库监控WebSocket消费者"""
 

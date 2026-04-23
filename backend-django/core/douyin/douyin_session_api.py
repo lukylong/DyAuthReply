@@ -16,6 +16,7 @@ from common.fu_crud import retrieve
 from common.fu_pagination import MyPagination
 from core.douyin.douyin_account_model import DouyinAccount
 from core.douyin.douyin_session_model import DouyinSession
+from core.douyin.runtime import command_publisher
 from core.douyin.douyin_session_schema import (
     DouyinSessionBatchIdsIn,
     DouyinSessionControlIn,
@@ -97,7 +98,7 @@ def control_session(request, session_id: str, data: DouyinSessionControlIn):
         return DouyinSessionControlOut(success=False, message=f"未知指令 {data.action}")
     session.status = new_status
     session.save(update_fields=['status', 'sys_update_datetime'])
-    # TODO(M2): publish to Redis → 'douyin:session:{id}:ctrl' channel
+    command_publisher.send_session_control(str(session.account_id), data.action)
     return DouyinSessionControlOut(success=True, message=f"指令 {data.action} 已下发")
 
 

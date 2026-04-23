@@ -537,6 +537,15 @@ export class DatabaseMonitorWebSocketManager extends WebSocketManager {
 }
 
 /**
+ * 创建抖音托管事件 WebSocket 连接（接收扫码二维码 / 登录结果 / 回复事件）
+ */
+export function createDouyinWebSocket(
+  callbacks?: WebSocketApi.WebSocketCallbacks,
+): WebSocketManager {
+  return createWebSocket('/ws/douyin/', callbacks);
+}
+
+/**
  * 创建数据库监控WebSocket管理器
  */
 export function createDatabaseMonitorManager(

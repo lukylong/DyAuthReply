@@ -398,7 +398,7 @@ pnpm build:ele
 - **风控策略**: 每日回复上限、最小/最大间隔、静默时段、失败熔断
 - **实时监控**: WebSocket 推送新消息 / 登录失效 / 心跳状态，前端实时展示
 - **审计日志**: 每次回复的命中规则、耗时、结果、失败原因完整留痕
-- **独立 worker**: Playwright 常驻进程（`start_douyin_worker.py`，M2 里程碑）消费 APScheduler 下发的扫描指令
+- **独立 worker**: Playwright 常驻进程（`start_douyin_worker.py`）托管每个账号一个浏览器上下文，订阅 Redis 命令、扫描收件箱、匹配规则并人类化发送回复
 
 **多账号托管增强（已交付）**
 
@@ -433,6 +433,48 @@ GET  /api/core/douyin/dashboard/account-rank   # 账号排行
 `DouyinAccount` · `DouyinAccountGroup` · `DouyinRule` · `DouyinTemplate` · `DouyinTemplateCategory` · `DouyinQuickReply` · `DouyinBlacklist` · `DouyinConversation` · `DouyinMessage` · `DouyinReplyLog` · `DouyinSession` · `DouyinEvent` · `DouyinDailyStat`
 
 > 菜单由 `core/migrations/0003_seed_douyin_menus.py` 自动注入，`migrate` 完成后登录后台即可看到"抖音托管"目录。
+
+#### 启动抖音 Worker（业务引擎）
+
+`backend-django` 仅提供管理后台与 API，真正跑浏览器自动化的是独立进程 `start_douyin_worker.py`。它会：
+
+- 订阅 Redis `douyin:cmd:*` 频道接收登录/登出/会话控制指令
+- 每 15 秒扫描 DB，按账号 `status + work_mode + priority` 决定启停协程
+- 每账号一个 Playwright `BrowserContext`（独立 user_data_dir + storage_state）
+- 扫码登录时把二维码实时推送到前端的 `/ws/douyin/`
+- 循环扫描私信 → 规则匹配 → 冷却/黑名单/配额校验 → 人类化输入发送 → 写回复日志
+
+**本地启动（需先 `pip install -r requirements.txt` 并 `playwright install chromium`）：**
+
+```bash
+# 1. 生成 Fernet 登录态加密密钥，写入 .env
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# 把输出粘贴到 .env 的 DOUYIN_STORAGE_ENCRYPTION_KEY=...
+
+# 2. 首次扫码登录需要有头浏览器
+echo "DOUYIN_WORKER_HEADLESS=False" >> .env
+
+# 3. 启动 worker
+cd backend-django
+python start_douyin_worker.py
+```
+
+**前端扫码登录操作流程：**
+
+1. `/douyin/account` 页面点击"新增账号"录入一个抖音账号（昵称任意）
+2. 点击该账号行的"扫码登录"按钮
+3. 弹窗内会实时显示二维码（通过 WebSocket `/ws/douyin/` 推送），用抖音 APP 扫码即可
+4. 登录成功后 worker 自动保存加密登录态并开始托管
+5. 之后进入"会话监控"可看到账号的 CPU/内存/心跳等实时状态
+
+**调度任务（建议在 APScheduler 里配置）：**
+
+| 任务代码 | 建议 cron | 作用 |
+| --- | --- | --- |
+| `scheduler.tasks.douyin_reset_daily_quota` | `0 0 * * *` | 每日零点重置所有账号的 `reply_today` 与会话日计数 |
+| `scheduler.tasks.douyin_aggregate_daily_stats` | `5 * * * *` | 每小时聚合当日消息/回复/错误指标到 `DouyinDailyStat` |
+
+> 抖音创作者中心页面会改版，`core/douyin/runtime/selectors.py` 集中维护了所有 DOM 选择器，每类都给了多个候选；若扫描失败请优先更新此文件。
 
 ## 🔐 API 文档
 

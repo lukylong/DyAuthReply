@@ -24,10 +24,12 @@ class DouyinReplyLogSchemaOut(ModelSchema):
     """回复日志输出"""
     result_display: Optional[str] = None
     account_id: Optional[str] = None
+    account_nickname: Optional[str] = None
     conversation_id: Optional[str] = None
     matched_rule_id: Optional[str] = None
     rule_name: Optional[str] = None
     peer_nickname: Optional[str] = None
+    trigger_message_content: Optional[str] = None
 
     class Config:
         model = DouyinReplyLog
@@ -60,6 +62,20 @@ class DouyinReplyLogSchemaOut(ModelSchema):
     def resolve_peer_nickname(obj):
         try:
             return obj.conversation.peer_nickname if obj.conversation_id else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def resolve_account_nickname(obj):
+        try:
+            return obj.account.nickname if obj.account_id else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def resolve_trigger_message_content(obj):
+        try:
+            return obj.trigger_message.content if obj.trigger_message_id else None
         except Exception:
             return None
 

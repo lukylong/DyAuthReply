@@ -11,18 +11,23 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive \
     TZ=Asia/Shanghai \
     LANG=C.UTF-8
 
 WORKDIR /app
 
 # 系统依赖（psycopg2-binary 已含 C 库，无需 libpq-dev；保留 tzdata 用于正确时区）
-RUN apt-get update \
+# 换清华源加速 apt；tzdata 预置 debconf 完全无人值守
+RUN sed -i 's|http://archive.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g; s|http://security.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
+    && echo $TZ > /etc/timezone \
+    && echo "tzdata tzdata/Areas select Asia" | debconf-set-selections \
+    && echo "tzdata tzdata/Zones/Asia select Shanghai" | debconf-set-selections \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         tzdata \
         netcat-openbsd \
-    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
-    && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Python 依赖（利用 buildx 缓存） ----

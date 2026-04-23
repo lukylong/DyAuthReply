@@ -286,7 +286,7 @@ onMounted(async () => {
           <ElTableColumn label="变量" width="160">
             <template #default="{ row }">
               <ElTag v-for="v in row.variables" :key="v" size="small" class="mr-4">
-                {{ `{{${v}}}` }}
+                <span v-text="'{{' + v + '}}'" />
               </ElTag>
             </template>
           </ElTableColumn>

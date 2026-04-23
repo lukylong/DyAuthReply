@@ -16,8 +16,10 @@ export type DouyinReplyResult =
 export interface DouyinReplyLog {
   id: string;
   account_id: string;
+  account_nickname?: null | string;
   conversation_id?: null | string;
   trigger_message_id?: null | string;
+  trigger_message_content?: null | string;
   matched_rule_id?: null | string;
   rule_name?: null | string;
   peer_nickname?: null | string;

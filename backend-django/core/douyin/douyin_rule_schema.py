@@ -74,6 +74,7 @@ class DouyinRuleSchemaOut(ModelSchema):
     match_type_display: Optional[str] = None
     send_mode_display: Optional[str] = None
     account_id: Optional[str] = None
+    account_nickname: Optional[str] = None
 
     class Config:
         model = DouyinRule
@@ -90,6 +91,10 @@ class DouyinRuleSchemaOut(ModelSchema):
     @staticmethod
     def resolve_account_id(obj):
         return str(obj.account_id) if obj.account_id else None
+
+    @staticmethod
+    def resolve_account_nickname(obj):
+        return obj.account.nickname if obj.account_id else None
 
 
 class DouyinRuleBatchDeleteIn(Schema):

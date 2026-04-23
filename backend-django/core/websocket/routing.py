@@ -28,4 +28,7 @@ websocket_urlpatterns = [
 
     # 数据库监控连接
     re_path(r'ws/database-monitor/$', consumers.DatabaseMonitorConsumer.as_asgi()),
+
+    # 抖音托管事件推送（扫码二维码 / 登录结果 / 回复事件等）
+    re_path(r'ws/douyin/$', consumers.DouyinConsumer.as_asgi()),
 ]

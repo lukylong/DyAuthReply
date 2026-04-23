@@ -64,7 +64,9 @@ def dashboard_overview(request):
 
 @router.get("/dashboard/trend", response=DouyinDashboardTrendOut, summary="看板：近 N 日趋势")
 def dashboard_trend(request, query: DouyinStatQuery = Query(...)):
-    end = query.end_date or timezone.localdate()
+    # settings.USE_TZ=False 时 timezone.localdate() 会抛 ValueError（naive datetime），
+    # 统一改用 timezone.now().date() 以兼容两种模式。
+    end = query.end_date or timezone.now().date()
     start = query.start_date or (end - timedelta(days=6))
     qs = DouyinDailyStat.objects.filter(stat_date__gte=start, stat_date__lte=end)
     if query.account_id:
@@ -90,7 +92,7 @@ def dashboard_trend(request, query: DouyinStatQuery = Query(...)):
 
 @router.get("/dashboard/account-rank", response=DouyinDashboardRankOut, summary="看板：账号回复排行")
 def dashboard_account_rank(request, query: DouyinStatQuery = Query(...)):
-    end = query.end_date or timezone.localdate()
+    end = query.end_date or timezone.now().date()
     start = query.start_date or (end - timedelta(days=6))
     qs = DouyinDailyStat.objects.filter(stat_date__gte=start, stat_date__lte=end)
     if query.group_id:

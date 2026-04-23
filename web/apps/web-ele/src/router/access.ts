@@ -20,6 +20,8 @@ async function generateAccess(options: GenerateMenuAndRoutesOptions) {
   const layoutMap: ComponentRecordType = {
     BasicLayout,
     IFrameView,
+    // 兼容 db_init.json / 旧菜单数据中 component="Layout" 的一级目录
+    Layout: BasicLayout,
   };
 
   return await generateAccessible(preferences.app.accessMode, {

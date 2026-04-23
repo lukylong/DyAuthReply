@@ -4,12 +4,18 @@ import type {
   DouyinAccountCreateInput,
 } from '#/api/core/douyin';
 
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 
 import { Page } from '@vben/common-ui';
 
 import {
+  createDouyinWebSocket,
+  type WebSocketManager,
+} from '#/api/core/websocket';
+
+import {
   ElButton,
+  ElDialog,
   ElForm,
   ElFormItem,
   ElInput,
@@ -216,15 +222,94 @@ async function onBatchDelete() {
   }
 }
 
-async function onLogin(row: DouyinAccount) {
+// ---------------- 扫码登录弹窗 ----------------
+const qrDialogVisible = ref(false);
+const qrImage = ref('');
+const qrHint = ref('正在生成二维码，请稍候…');
+const qrAccountName = ref('');
+const qrLoading = ref(false);
+let douyinWs: null | WebSocketManager = null;
+
+async function ensureWsConnected() {
+  if (douyinWs && douyinWs.isConnected) return;
+  if (douyinWs) douyinWs.close();
+  douyinWs = createDouyinWebSocket({
+    onMessage: handleDouyinEvent,
+    onClose: () => {
+      // 重连由管理器自动处理
+    },
+  });
   try {
+    await douyinWs.connect();
+    douyinWs.send({ type: 'subscribe' });
+  } catch (error) {
+    console.error('连接抖音 WS 失败', error);
+    ElMessage.error('连接实时推送通道失败，请刷新页面重试');
+  }
+}
+
+function handleDouyinEvent(message: any) {
+  // 后端 DouyinConsumer 会把事件以 send_message(event, ...) 包装，
+  // 结构形如 { type: 'qr_image', data: { event, payload, ... } }
+  const eventType = message?.type || message?.data?.event;
+  const payload = message?.data?.payload || message?.data || {};
+  switch (eventType) {
+    case 'qr_image': {
+      if (payload.image_base64) {
+        qrImage.value = `data:image/png;base64,${payload.image_base64}`;
+        qrHint.value = payload.hint || '请使用抖音 APP 扫码登录';
+        qrLoading.value = false;
+      }
+      break;
+    }
+    case 'login_success': {
+      ElMessage.success(`账号 ${payload.nickname || ''} 登录成功`);
+      qrDialogVisible.value = false;
+      loadData();
+      break;
+    }
+    case 'login_failed': {
+      ElMessage.error(`登录失败：${payload.reason || '未知错误'}`);
+      qrHint.value = `登录失败：${payload.reason || '未知错误'}`;
+      break;
+    }
+    case 'reply_sent': {
+      ElMessage.info(
+        `已回复 ${payload.peer_nickname || ''}（规则：${payload.rule || '-'}）`,
+      );
+      break;
+    }
+  }
+}
+
+async function onLogin(row: DouyinAccount) {
+  qrAccountName.value = row.nickname;
+  qrImage.value = '';
+  qrHint.value = '正在生成二维码，请稍候…';
+  qrLoading.value = true;
+  qrDialogVisible.value = true;
+  try {
+    await ensureWsConnected();
     const res = await triggerDouyinLoginApi(row.id);
     ElMessage.success(res.message || '已下发扫码登录指令');
     loadData();
   } catch (error: any) {
+    qrDialogVisible.value = false;
     ElMessage.error(error?.response?.data?.detail || '登录指令下发失败');
   }
 }
+
+function onCloseQrDialog() {
+  qrDialogVisible.value = false;
+  qrImage.value = '';
+}
+
+onBeforeUnmount(() => {
+  if (douyinWs) {
+    douyinWs.close();
+    douyinWs = null;
+  }
+});
 
 async function onLogout(row: DouyinAccount) {
   try {
@@ -427,7 +512,7 @@ onMounted(loadData);
       </div>
 
       <!-- 新增 / 编辑 弹窗（自定义遮罩 Drawer 风格，简化版用内置 ElDialog 替代） -->
-      <el-dialog
+      <ElDialog
         v-model="dialogVisible"
         :title="dialogTitle"
         width="560px"
@@ -508,7 +593,41 @@ onMounted(loadData);
           <ElButton @click="dialogVisible = false">取消</ElButton>
           <ElButton type="primary" @click="onSubmit">确定</ElButton>
         </template>
-      </el-dialog>
+      </ElDialog>
+
+      <!-- 扫码登录弹窗：订阅 WebSocket 实时显示二维码与登录结果 -->
+      <ElDialog
+        v-model="qrDialogVisible"
+        :title="`扫码登录 · ${qrAccountName}`"
+        width="360px"
+        :close-on-click-modal="false"
+        destroy-on-close
+        @close="onCloseQrDialog"
+      >
+        <div class="flex flex-col items-center gap-3 py-2">
+          <div
+            v-loading="qrLoading"
+            class="flex size-56 items-center justify-center rounded border bg-white"
+          >
+            <img
+              v-if="qrImage"
+              :src="qrImage"
+              alt="扫码登录二维码"
+              class="size-56 object-contain"
+            />
+            <span v-else class="text-sm text-gray-400">二维码生成中…</span>
+          </div>
+          <div class="text-center text-sm text-gray-500">
+            {{ qrHint }}
+          </div>
+          <div class="text-xs text-gray-400">
+            二维码每 45 秒自动刷新；扫码后保持页面打开等待登录结果
+          </div>
+        </div>
+        <template #footer>
+          <ElButton @click="onCloseQrDialog">关闭</ElButton>
+        </template>
+      </ElDialog>
     </div>
   </Page>
 </template>

@@ -1,0 +1,72 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+@File: command_publisher.py
+@Desc: Command Publisher - 同步接口往 Redis 发布 worker 命令
+
+Django HTTP 视图是同步的，所以这里用 redis-py 的同步客户端
+（避免在请求线程里起 asyncio loop）。
+
+频道命名：
+    douyin:cmd:login:<account_id>
+    douyin:cmd:logout:<account_id>
+    douyin:cmd:session:<account_id>:<action>
+"""
+from __future__ import annotations
+
+import json
+import logging
+from typing import Optional
+
+from django.conf import settings
+
+logger = logging.getLogger(__name__)
+
+_redis = None
+
+
+def _client():
+    """延迟初始化 Redis 客户端"""
+    global _redis
+    if _redis is not None:
+        return _redis
+    try:
+        import redis
+        url = getattr(settings, 'REDIS_URL', None)
+        if not url:
+            logger.warning("REDIS_URL 未配置，抖音 worker 命令发布将回退为 DB-only 模式")
+            return None
+        _redis = redis.from_url(url, decode_responses=False, socket_connect_timeout=2)
+        _redis.ping()
+        return _redis
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Redis 连接失败: {e}；命令发布降级为 DB-only")
+        _redis = None
+        return None
+
+
+def publish(channel: str, payload: Optional[dict] = None) -> bool:
+    """发布一条命令。返回 True 表示成功；False 表示 Redis 不可用。"""
+    client = _client()
+    if client is None:
+        return False
+    try:
+        data = json.dumps(payload or {}, ensure_ascii=False).encode('utf-8')
+        client.publish(channel, data)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"publish 失败 channel={channel} err={e}")
+        return False
+
+
+def send_login(account_id: str) -> bool:
+    return publish(f"douyin:cmd:login:{account_id}", {"action": "login"})
+
+
+def send_logout(account_id: str) -> bool:
+    return publish(f"douyin:cmd:logout:{account_id}", {"action": "logout"})
+
+
+def send_session_control(account_id: str, action: str) -> bool:
+    assert action in ('pause', 'resume', 'stop', 'restart'), f"invalid action: {action}"
+    return publish(f"douyin:cmd:session:{account_id}:{action}", {"action": action})

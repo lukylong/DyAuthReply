@@ -165,28 +165,6 @@ services:
         condition: service_healthy
     networks:
       - zq-net
-
-  web:
-    build:
-      context: ./web
-      dockerfile: Dockerfile.dev
-    image: zq-platform/web-ele:dev
-    container_name: zq-web
-    restart: unless-stopped
-    environment:
-      NODE_ENV: development
-    ports:
-      - "${WEB_PORT:-5777}:5777"
-    volumes:
-      - ./web:/workspace
-      # 使用命名卷接管 node_modules，避免覆盖容器内已装依赖并解决跨平台二进制差异
-      - web-node-modules:/workspace/node_modules
-      - web-apps-node-modules:/workspace/apps/web-ele/node_modules
-    depends_on:
-      - backend
-    networks:
-      - zq-net
-
 # -----------------------------------------------------------------------------
 # 命名卷：PostgreSQL / Redis 数据、后端日志、抖音 storage_state、前端 node_modules
 # -----------------------------------------------------------------------------

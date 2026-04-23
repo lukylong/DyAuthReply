@@ -16,6 +16,7 @@ from ninja.pagination import paginate
 from common.fu_crud import create, delete, retrieve
 from common.fu_pagination import MyPagination
 from core.douyin.douyin_account_model import DouyinAccount
+from core.douyin.runtime import command_publisher
 from core.douyin.douyin_account_schema import (
     DouyinAccountActionOut,
     DouyinAccountBatchDeleteIn,
@@ -117,18 +118,24 @@ def batch_delete_douyin_account(request, data: DouyinAccountBatchDeleteIn):
 )
 def trigger_login(request, account_id: str):
     """
-    触发扫码登录：只写入意图，真正的浏览器动作由 douyin worker 在 M2 阶段实现。
-    这里只做前置校验并将账号置为"未登录"态，等待 worker 打开有头浏览器。
+    触发扫码登录：
+      1. 把账号置为"未登录"态
+      2. 通过 Redis pubsub 向 worker 进程发送登录命令
+      3. 前端需连接 WebSocket `/ws/douyin/` 以接收 qr_image / login_success 事件
+    若 Redis 不可用则只改 DB 状态（worker 启动时会自动轮询到本账号也能登录）。
     """
     account = get_object_or_404(DouyinAccount, id=account_id)
     if account.status == 3:
         raise HttpError(400, "该账号已禁用，无法登录")
     account.status = 0
     account.save(update_fields=['status', 'sys_update_datetime'])
-    return DouyinAccountActionOut(
-        success=True,
-        message="已下发扫码登录指令，请在弹出的浏览器窗口完成扫码",
-    )
+
+    ok = command_publisher.send_login(str(account_id))
+    if ok:
+        msg = "已下发扫码登录指令，请在前端扫码弹窗中用抖音 APP 扫描二维码"
+    else:
+        msg = "已标记账号待登录。Redis 不可用，worker 会在下次轮询到后执行登录"
+    return DouyinAccountActionOut(success=True, message=msg)
 
 
 @router.post(
@@ -137,9 +144,13 @@ def trigger_login(request, account_id: str):
     summary="登出抖音账号",
 )
 def trigger_logout(request, account_id: str):
-    """登出：清理 storage_state 并置为未登录。真正清理动作由 worker 完成。"""
+    """登出：
+    1. 清理 storage_state 并置为未登录
+    2. 通知 worker 关闭浏览器上下文并删除加密登录态文件
+    """
     account = get_object_or_404(DouyinAccount, id=account_id)
     account.status = 0
     account.storage_state_path = ''
     account.save(update_fields=['status', 'storage_state_path', 'sys_update_datetime'])
+    command_publisher.send_logout(str(account_id))
     return DouyinAccountActionOut(success=True, message="登出指令已下发")

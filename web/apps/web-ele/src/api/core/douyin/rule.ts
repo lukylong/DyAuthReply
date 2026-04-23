@@ -11,6 +11,7 @@ export type DouyinRuleSendMode = 'card_fallback' | 'merged' | 'multi_message';
 export interface DouyinRule {
   id: string;
   account_id: string;
+  account_nickname?: string;
   name: string;
   match_type: DouyinRuleMatchType;
   match_type_display?: string;

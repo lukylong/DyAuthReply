@@ -20,7 +20,7 @@ import asyncio
 import base64
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Optional
 
 from asgiref.sync import sync_to_async
@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from core.douyin.douyin_account_model import DouyinAccount
 
 logger = logging.getLogger(__name__)
+
+_VERIFICATION_PENDING_MINUTES = 20
 
 
 # -------------------- 工具 --------------------
@@ -54,6 +56,52 @@ _WEAK_SESSION_COOKIE_NAMES = (
     "uid_tt",
     "uid_tt_ss",
 )
+
+_VERIFICATION_HINTS = {
+    "sms": (
+        "短信验证",
+        "短信验证码",
+        "手机验证",
+        "手机号验证",
+        "短信校验",
+        "输入短信验证码",
+        "请输入短信验证码",
+    ),
+    "face": (
+        "人脸验证",
+        "刷脸",
+        "人脸识别",
+        "面容验证",
+        "身份核验",
+        "本人验证",
+    ),
+    "captcha": (
+        "安全验证",
+        "滑块",
+        "拖动滑块",
+        "拼图",
+        "图形验证码",
+        "请完成验证",
+        "点击完成验证",
+    ),
+    "security": (
+        "设备验证",
+        "登录保护",
+        "异常登录",
+        "风险校验",
+        "账号安全",
+        "安全校验",
+        "二次验证",
+    ),
+}
+
+_VERIFICATION_KIND_LABELS = {
+    "sms": "短信验证",
+    "face": "人脸验证",
+    "captcha": "验证码校验",
+    "security": "安全验证",
+    "unknown": "待人工确认",
+}
 
 
 def _is_login_success(url: str) -> bool:
@@ -98,6 +146,27 @@ async def _looks_like_login_gate(page) -> bool:
         return False
 
 
+async def _looks_like_business_shell(page) -> bool:
+    """识别创作者中心业务页骨架，用于放宽登录成功判定。"""
+    try:
+        text = await page.evaluate("() => (document.body?.innerText || '').slice(0, 2500)")
+        text = (text or "").replace("\n", "")
+        hints = (
+            "创作者中心",
+            "创作者服务中心",
+            "数据中心",
+            "内容管理",
+            "作品管理",
+            "私信管理",
+            "直播管理",
+            "电商带货",
+            "数据看板",
+        )
+        return any(h in text for h in hints)
+    except Exception:
+        return False
+
+
 async def _is_logged_in(page) -> bool:
     """
     综合判断当前是否已登录。
@@ -105,18 +174,26 @@ async def _is_logged_in(page) -> bool:
     注意顺序：扫码成功后中间态 URL 常仍带 ``login`` / ``passport``（OAuth 回调），
     若先判「登录页」会直接 return False，导致永远等不到登录。必须先认 cookie 再否定。
     """
-    url = page.url or ""
-    # 仅强会话 cookie 才视为登录成功，避免误判为“免扫码已登录”
-    if "douyin.com" in url and await _has_session_cookie(page.context):
+    has_strong_cookie = await _has_session_cookie(page.context)
+    if has_strong_cookie:
+        return not await _looks_like_login_gate(page)
+    if await _looks_like_login_gate(page):
+        return False
+    if _is_login_success(page.url) and await _looks_like_business_shell(page):
         return True
-    if _is_login_success(url):
-        # URL 命中成功路径，但页面仍可能是登录门面（风控/重定向失败）
+    return False
+
+
+async def _verify_im_ready(page) -> bool:
+    """登录后验活：进入 IM 页面且不是登录门面，才算业务可用。"""
+    try:
+        await page.goto(S.CREATOR_IM, wait_until="domcontentloaded", timeout=20000)
+        await asyncio.sleep(1.5)
         if await _looks_like_login_gate(page):
             return False
         return True
-    if _is_login_page(url):
+    except Exception:
         return False
-    return False
 
 
 async def _session_cookie_debug_names(context) -> list[str]:
@@ -132,6 +209,109 @@ async def _session_cookie_debug_names(context) -> list[str]:
         return []
 
 
+def _clean_text(text: str, limit: int = 200) -> str:
+    cleaned = " ".join((text or "").split())
+    return cleaned[:limit]
+
+
+def _looks_like_login_gate_text(text: str) -> bool:
+    hints = ("扫码登录", "验证码登录", "密码登录", "登录/注册", "我是创作者", "我是MCN机构")
+    return any(h in (text or "") for h in hints)
+
+
+def _infer_verification_kind(title: str, text: str, url: str) -> Optional[str]:
+    haystack = "\n".join(filter(None, [title, text, url]))
+    for kind, hints in _VERIFICATION_HINTS.items():
+        if any(hint in haystack for hint in hints):
+            return kind
+    return None
+
+
+async def _capture_page_base64(page) -> Optional[str]:
+    try:
+        buf = await page.screenshot(type="jpeg", quality=65, full_page=False)
+        return base64.b64encode(buf).decode("ascii")
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[login] 截取验证页截图失败: {e}")
+        return None
+
+
+async def _inspect_verification(page, *, allow_unknown: bool = False) -> Optional[dict]:
+    try:
+        title = await page.title()
+    except Exception:
+        title = ""
+    try:
+        body_text = await page.evaluate(
+            "() => (document.body?.innerText || '').slice(0, 4000)"
+        )
+    except Exception:
+        body_text = ""
+
+    title = _clean_text(title, 120)
+    body_text = _clean_text(body_text, 260)
+    if await _looks_like_login_gate(page):
+        return None
+    if _looks_like_login_gate_text(body_text):
+        return None
+    kind = _infer_verification_kind(title, body_text, page.url)
+    if kind is None and allow_unknown:
+        kind = "unknown"
+    if kind is None:
+        return None
+
+    screenshot_base64 = await _capture_page_base64(page)
+    return {
+        "kind": kind,
+        "kind_label": _VERIFICATION_KIND_LABELS.get(kind, "安全验证"),
+        "title": title,
+        "text_excerpt": body_text,
+        "current_url": page.url,
+        "image_base64": screenshot_base64,
+    }
+
+
+async def _push_verification_required(
+    owner_id: str,
+    account_id: str,
+    page,
+    *,
+    elapsed: int,
+    remain: int,
+    allow_unknown: bool = False,
+) -> Optional[str]:
+    verification = await _inspect_verification(page, allow_unknown=allow_unknown)
+    if verification is None:
+        return None
+
+    hint = (
+        f"检测到{verification['kind_label']}，请在浏览器窗口中手动完成；"
+        "完成后保持窗口打开，系统会继续等待强登录态 cookie。"
+    )
+    payload = {
+        "account_id": account_id,
+        "elapsed": elapsed,
+        "remain": remain,
+        "hint": hint,
+        **verification,
+    }
+    await _mark_pending_verification(account_id, verification["kind"])
+    await push_to_user(owner_id, "verification_required", payload)
+    logger.warning(
+        f"[login] 发现验证页 account={account_id} kind={verification['kind']} "
+        f"title={verification['title']!r} text={verification['text_excerpt']!r} "
+        f"url={verification['current_url']}"
+    )
+    return "|".join(
+        [
+            verification["kind"],
+            verification["title"],
+            verification["text_excerpt"],
+            verification["current_url"],
+        ]
+    )
+
+
 async def _push_login_progress(
     owner_id: str,
     account_id: str,
@@ -141,6 +321,7 @@ async def _push_login_progress(
     url: str,
     session_cookies: list[str],
     logged_in: bool,
+    status_hint: Optional[str] = None,
 ) -> None:
     """向前端推送扫码登录进度（仅用于可视化排查）。"""
     await push_to_user(owner_id, "login_progress", {
@@ -150,6 +331,7 @@ async def _push_login_progress(
         "url": url,
         "session_cookies": session_cookies,
         "is_logged_in": logged_in,
+        "status_hint": status_hint,
     })
 
 
@@ -246,6 +428,14 @@ def _update_account_after_login(account_id: str, profile: dict, storage_path: Op
     acc.status = 1
     acc.last_login_at = timezone.now()
     acc.last_heartbeat = timezone.now()
+    acc.pending_verification_type = None
+    acc.pending_verification_at = None
+    acc.pending_verification_until = None
+    update_fields.extend([
+        'pending_verification_type',
+        'pending_verification_at',
+        'pending_verification_until',
+    ])
     if profile.get('nickname'):
         acc.nickname = profile['nickname']
         update_fields.append('nickname')
@@ -272,7 +462,32 @@ def _update_account_after_login(account_id: str, profile: dict, storage_path: Op
 
 
 @sync_to_async
-def _mark_login_failed(account_id: str, reason: str) -> Optional[str]:
+def _mark_pending_verification(account_id: str, verification_type: str) -> Optional[str]:
+    from core.douyin.douyin_account_model import DouyinAccount
+
+    acc = DouyinAccount.objects.filter(id=account_id).first()
+    if acc is None:
+        return None
+    now = timezone.now()
+    acc.pending_verification_type = verification_type
+    acc.pending_verification_at = now
+    acc.pending_verification_until = now + timedelta(minutes=_VERIFICATION_PENDING_MINUTES)
+    acc.save(update_fields=[
+        'pending_verification_type',
+        'pending_verification_at',
+        'pending_verification_until',
+        'sys_update_datetime',
+    ])
+    return str(acc.owner_id)
+
+
+@sync_to_async
+def _mark_login_failed(
+    account_id: str,
+    reason: str,
+    *,
+    keep_pending_verification: bool = False,
+) -> Optional[str]:
     from core.douyin.douyin_account_model import DouyinAccount
     from core.douyin.douyin_event_model import DouyinEvent
 
@@ -280,7 +495,17 @@ def _mark_login_failed(account_id: str, reason: str) -> Optional[str]:
     if acc is None:
         return None
     acc.status = 2
-    acc.save(update_fields=['status', 'sys_update_datetime'])
+    update_fields = ['status', 'sys_update_datetime']
+    if not keep_pending_verification:
+        acc.pending_verification_type = None
+        acc.pending_verification_at = None
+        acc.pending_verification_until = None
+        update_fields.extend([
+            'pending_verification_type',
+            'pending_verification_at',
+            'pending_verification_until',
+        ])
+    acc.save(update_fields=update_fields)
     DouyinEvent.objects.create(
         account=acc,
         event_type='login_expired',
@@ -290,6 +515,20 @@ def _mark_login_failed(account_id: str, reason: str) -> Optional[str]:
         occurred_at=timezone.now(),
     )
     return str(acc.owner_id)
+
+
+async def mark_account_login_invalid(
+    account_id: str,
+    reason: str,
+    *,
+    keep_pending_verification: bool = False,
+) -> Optional[str]:
+    """供 worker 统一将账号打回重新登录。"""
+    return await _mark_login_failed(
+        account_id,
+        reason,
+        keep_pending_verification=keep_pending_verification,
+    )
 
 
 async def _finalize_login_success(page, account, owner_id: str, account_id: str) -> None:
@@ -313,6 +552,12 @@ async def _finalize_login_success(page, account, owner_id: str, account_id: str)
             logger.info(f"[login] 跳转完成 url={page.url}")
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[login] 跳转 creator-micro/home 失败（忽略）: {e}")
+
+    # 二次验活：必须能进入 IM 且非登录门面
+    im_ready = await _verify_im_ready(page)
+    logger.info(f"[login] IM 验活 account={account_id} ready={im_ready} url={page.url}")
+    if not im_ready:
+        raise RuntimeError("登录态验活失败：IM 页面仍为登录门面")
 
     # 页面还处于 loading 时再等 1 秒
     await asyncio.sleep(1)
@@ -353,7 +598,8 @@ async def scan_qrcode_login(account: "DouyinAccount", *, timeout: int = 180) -> 
     account_id = str(account.id)
     lock = _login_lock_for(account_id)
     if lock.locked():
-        logger.info(f"[login] 已有扫码流程在执行，本调用将排队等待 account={account_id}")
+        logger.warning(f"[login] 已有扫码流程在执行，拒绝重入 account={account_id}")
+        return False
     async with lock:
         return await _scan_qrcode_login_locked(account, timeout=timeout)
 
@@ -411,6 +657,7 @@ async def _scan_qrcode_login_locked(account: "DouyinAccount", *, timeout: int) -
         last_heartbeat = now_ts    # 30s 后打第一条心跳
         last_weak_recheck = now_ts
         last_url = page.url
+        last_verification_fingerprint: Optional[str] = None
         while datetime.utcnow().timestamp() < deadline:
             await asyncio.sleep(1.0)
             now = datetime.utcnow().timestamp()
@@ -424,6 +671,12 @@ async def _scan_qrcode_login_locked(account: "DouyinAccount", *, timeout: int) -
                 )
                 elapsed = int(now - t_start)
                 remain = int(deadline - now)
+                status_hint = None
+                if hits and not logged_in and await _looks_like_login_gate(page):
+                    status_hint = (
+                        "已扫码确认，但页面仍停留在登录门面，抖音尚未下发强登录态。"
+                        "请先检查手机端是否还有继续确认步骤；若没有，通常是风控未放行。"
+                    )
                 await _push_login_progress(
                     owner_id,
                     account_id,
@@ -432,6 +685,7 @@ async def _scan_qrcode_login_locked(account: "DouyinAccount", *, timeout: int) -
                     url=page.url,
                     session_cookies=hits,
                     logged_in=False,
+                    status_hint=status_hint,
                 )
                 last_url = page.url
 
@@ -461,6 +715,20 @@ async def _scan_qrcode_login_locked(account: "DouyinAccount", *, timeout: int) -
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"[login] 弱态复检跳转失败 account={account_id} err={e}")
                 last_weak_recheck = now
+                elapsed = int(now - t_start)
+                remain = int(deadline - now)
+                verification_fingerprint = await _push_verification_required(
+                    owner_id,
+                    account_id,
+                    page,
+                    elapsed=elapsed,
+                    remain=max(0, remain),
+                )
+                if (
+                    verification_fingerprint
+                    and verification_fingerprint != last_verification_fingerprint
+                ):
+                    last_verification_fingerprint = verification_fingerprint
 
             # 每 30 秒心跳一次（便于实时观察是否卡死）
             if now - last_heartbeat >= 30:
@@ -468,6 +736,12 @@ async def _scan_qrcode_login_locked(account: "DouyinAccount", *, timeout: int) -
                 remain = int(deadline - now)
                 hits = await _session_cookie_debug_names(page.context)
                 logged_in = await _is_logged_in(page)
+                status_hint = None
+                if hits and not logged_in and await _looks_like_login_gate(page):
+                    status_hint = (
+                        "已扫码确认，但页面仍停留在登录门面，抖音尚未下发强登录态。"
+                        "请先检查手机端是否还有继续确认步骤；若没有，通常是风控未放行。"
+                    )
                 logger.info(
                     f"[login] 等待扫码中… account={account_id} "
                     f"elapsed={elapsed}s remain={remain}s url={page.url} "
@@ -481,7 +755,22 @@ async def _scan_qrcode_login_locked(account: "DouyinAccount", *, timeout: int) -
                     url=page.url,
                     session_cookies=hits,
                     logged_in=logged_in,
+                    status_hint=status_hint,
                 )
+                if not logged_in and hits:
+                    verification_fingerprint = await _push_verification_required(
+                        owner_id,
+                        account_id,
+                        page,
+                        elapsed=elapsed,
+                        remain=max(0, remain),
+                        allow_unknown=elapsed >= 30,
+                    )
+                    if (
+                        verification_fingerprint
+                        and verification_fingerprint != last_verification_fingerprint
+                    ):
+                        last_verification_fingerprint = verification_fingerprint
                 last_heartbeat = now
 
             # 每 45 秒重新截取一次二维码（抖音二维码 60 秒过期）
@@ -503,12 +792,28 @@ async def _scan_qrcode_login_locked(account: "DouyinAccount", *, timeout: int) -
                 cookie_names = sorted({c.get("name") for c in await page.context.cookies()})
             except Exception:
                 cookie_names = []
-            reason = "扫码超时或被拒绝"
+            weak_hits = [n for n in cookie_names if n in _WEAK_SESSION_COOKIE_NAMES]
+            strong_hits = [n for n in cookie_names if n in _SESSION_COOKIE_NAMES]
+            if weak_hits and not strong_hits:
+                verification = await _inspect_verification(page, allow_unknown=True)
+                if verification:
+                    reason = (
+                        "扫码已确认但验证未完成"
+                        f"（{verification['kind_label']}，仅弱登录态，未下发强会话）"
+                    )
+                else:
+                    reason = "扫码已确认但被风控拦截（仅弱登录态，未下发强会话）"
+            else:
+                reason = "扫码超时或被拒绝"
             logger.warning(
                 f"[login] ✘ {reason} account={account_id} "
                 f"current_url={page.url} cookies={cookie_names[:30]}"
             )
-            await _mark_login_failed(account_id, reason)
+            await _mark_login_failed(
+                account_id,
+                reason,
+                keep_pending_verification=bool(weak_hits and not strong_hits),
+            )
             await push_to_user(owner_id, "login_failed", {
                 "account_id": account_id, "reason": reason,
             })
@@ -533,13 +838,15 @@ async def _scan_qrcode_login_locked(account: "DouyinAccount", *, timeout: int) -
 
 
 async def is_login_valid(account: "DouyinAccount") -> bool:
-    """打开创作者中心首页，检查是否仍处于登录态"""
+    """打开创作者中心首页与 IM 页面，检查是否仍处于业务可用登录态。"""
     context = await BrowserManager.get_or_create_context(account)
     page = await context.new_page()
     try:
         await page.goto(S.CREATOR_HOME, wait_until="domcontentloaded", timeout=20000)
         await asyncio.sleep(1.5)
-        return await _is_logged_in(page)
+        if not await _is_logged_in(page):
+            return False
+        return await _verify_im_ready(page)
     except Exception:
         return False
     finally:

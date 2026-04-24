@@ -38,6 +38,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class LoginGateDetected(RuntimeError):
+    """IM 页面仍是登录门面，需要 worker 将账号打回重新登录。"""
+
+
 async def _looks_like_login_gate(page) -> bool:
     try:
         text = await page.evaluate("() => (document.body?.innerText || '').slice(0, 2000)")
@@ -247,7 +251,7 @@ async def scan_inbox(account: "DouyinAccount", *, max_conversations: int = 15) -
                 f"[inbox] IM 页面显示登录门面，跳过本轮扫描（不立即判失效） "
                 f"account={account_id} url={page.url}"
             )
-            return new_messages
+            raise LoginGateDetected(f"IM 页面仍为登录门面: {page.url}")
 
         items = await _list_conversation_items(page, max_items=max_conversations)
         logger.info(f"[inbox] 会话列表项数 account={account_id} count={len(items)}")

@@ -35,6 +35,7 @@ import {
 
 import {
   batchDeleteDouyinAccountApi,
+  cancelDouyinLoginApi,
   createDouyinAccountApi,
   deleteDouyinAccountApi,
   getDouyinAccountListApi,
@@ -226,11 +227,17 @@ async function onBatchDelete() {
 const qrDialogVisible = ref(false);
 const qrImage = ref('');
 const qrHint = ref('正在生成二维码，请稍候…');
+const qrStage = ref<'qr' | 'verification'>('qr');
 const qrAccountName = ref('');
 const qrLoading = ref(false);
 const loginPendingAccountId = ref<string>('');
 let douyinWs: null | WebSocketManager = null;
 const isLoginFlowActive = computed(() => !!loginPendingAccountId.value);
+const qrFootnote = computed(() =>
+  qrStage.value === 'verification'
+    ? '检测到安全校验，请在浏览器窗口中手动完成验证；完成后保持页面打开等待系统自动放行'
+    : '二维码每 45 秒自动刷新；扫码后保持页面打开等待登录结果',
+);
 
 async function ensureWsConnected() {
   if (douyinWs && douyinWs.isConnected) return;
@@ -257,11 +264,30 @@ function handleDouyinEvent(message: any) {
   const payload = message?.data?.payload || message?.data || {};
   switch (eventType) {
     case 'qr_image': {
+      if (qrStage.value === 'verification') {
+        break;
+      }
       if (payload.image_base64) {
         qrImage.value = `data:image/png;base64,${payload.image_base64}`;
         qrHint.value = payload.hint || '请使用抖音 APP 扫码登录';
+        qrStage.value = 'qr';
         qrLoading.value = false;
       }
+      break;
+    }
+    case 'verification_required': {
+      qrDialogVisible.value = true;
+      qrLoading.value = false;
+      qrStage.value = 'verification';
+      if (payload.image_base64) {
+        qrImage.value = `data:image/jpeg;base64,${payload.image_base64}`;
+      }
+      const title = payload.title ? `页面：${payload.title}` : '';
+      const text = payload.text_excerpt ? `线索：${payload.text_excerpt}` : '';
+      qrHint.value = [payload.hint, title, text].filter(Boolean).join(' ');
+      ElMessage.warning(
+        `检测到${payload.kind_label || '安全验证'}，请在浏览器窗口中手动完成后等待自动登录`,
+      );
       break;
     }
     case 'login_success': {
@@ -272,8 +298,14 @@ function handleDouyinEvent(message: any) {
       break;
     }
     case 'login_failed': {
-      ElMessage.error(`登录失败：${payload.reason || '未知错误'}`);
-      qrHint.value = `登录失败：${payload.reason || '未知错误'}`;
+      const reason = payload.reason || '未知错误';
+      ElMessage.error(`登录失败：${reason}`);
+      if (reason.includes('弱登录态') || reason.includes('风控')) {
+        qrHint.value =
+          '登录失败：当前被抖音风控拦截（仅弱登录态）。请等待 10-30 分钟后重试，避免频繁点登录。';
+      } else {
+        qrHint.value = `登录失败：${reason}`;
+      }
       loginPendingAccountId.value = '';
       break;
     }
@@ -284,7 +316,9 @@ function handleDouyinEvent(message: any) {
         ? payload.session_cookies
         : [];
       const cookiesText = cookies.length > 0 ? cookies.join(', ') : '无';
-      qrHint.value = `等待扫码确认中… 已等待 ${elapsed}s，剩余 ${remain}s，cookie=${cookiesText}`;
+      qrHint.value =
+        payload.status_hint ||
+        `等待扫码确认中… 已等待 ${elapsed}s，剩余 ${remain}s，cookie=${cookiesText}`;
       break;
     }
     case 'reply_sent': {
@@ -305,6 +339,7 @@ async function onLogin(row: DouyinAccount) {
   qrAccountName.value = row.nickname;
   qrImage.value = '';
   qrHint.value = '正在生成二维码，请稍候…';
+  qrStage.value = 'qr';
   qrLoading.value = true;
   qrDialogVisible.value = true;
   try {
@@ -319,10 +354,19 @@ async function onLogin(row: DouyinAccount) {
   }
 }
 
-function onCloseQrDialog() {
+async function onCloseQrDialog() {
+  const accountId = loginPendingAccountId.value;
   qrDialogVisible.value = false;
   qrImage.value = '';
+  qrStage.value = 'qr';
   loginPendingAccountId.value = '';
+  if (accountId) {
+    try {
+      await cancelDouyinLoginApi(accountId);
+    } catch (error) {
+      console.error('取消扫码登录失败', error);
+    }
+  }
 }
 
 onBeforeUnmount(() => {
@@ -646,7 +690,7 @@ onMounted(loadData);
             {{ qrHint }}
           </div>
           <div class="text-xs text-gray-400">
-            二维码每 45 秒自动刷新；扫码后保持页面打开等待登录结果
+            {{ qrFootnote }}
           </div>
         </div>
         <template #footer>

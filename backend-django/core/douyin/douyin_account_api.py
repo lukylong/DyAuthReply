@@ -128,7 +128,16 @@ def trigger_login(request, account_id: str):
     if account.status == 3:
         raise HttpError(400, "该账号已禁用，无法登录")
     account.status = 0
-    account.save(update_fields=['status', 'sys_update_datetime'])
+    account.pending_verification_type = None
+    account.pending_verification_at = None
+    account.pending_verification_until = None
+    account.save(update_fields=[
+        'status',
+        'pending_verification_type',
+        'pending_verification_at',
+        'pending_verification_until',
+        'sys_update_datetime',
+    ])
 
     ok = command_publisher.send_login(str(account_id))
     if ok:
@@ -151,6 +160,32 @@ def trigger_logout(request, account_id: str):
     account = get_object_or_404(DouyinAccount, id=account_id)
     account.status = 0
     account.storage_state_path = ''
-    account.save(update_fields=['status', 'storage_state_path', 'sys_update_datetime'])
+    account.pending_verification_type = None
+    account.pending_verification_at = None
+    account.pending_verification_until = None
+    account.save(update_fields=[
+        'status',
+        'storage_state_path',
+        'pending_verification_type',
+        'pending_verification_at',
+        'pending_verification_until',
+        'sys_update_datetime',
+    ])
     command_publisher.send_logout(str(account_id))
     return DouyinAccountActionOut(success=True, message="登出指令已下发")
+
+
+@router.post(
+    "/account/{account_id}/login/cancel",
+    response=DouyinAccountActionOut,
+    summary="取消扫码登录",
+)
+def cancel_login(request, account_id: str):
+    """取消当前账号的扫码登录流程（若存在）"""
+    account = get_object_or_404(DouyinAccount, id=account_id)
+    ok = command_publisher.send_cancel_login(str(account_id))
+    if ok:
+        msg = f"已请求取消账号 {account.nickname} 的扫码登录流程"
+    else:
+        msg = f"Redis 不可用，未能取消账号 {account.nickname} 的扫码登录流程"
+    return DouyinAccountActionOut(success=ok, message=msg)

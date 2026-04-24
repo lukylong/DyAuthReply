@@ -34,6 +34,9 @@ class DouyinAccountSchemaIn(ModelSchema):
             'owner',
             'last_heartbeat',
             'last_login_at',
+            'pending_verification_type',
+            'pending_verification_at',
+            'pending_verification_until',
             'storage_state_path',
         )
 

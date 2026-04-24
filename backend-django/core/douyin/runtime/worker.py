@@ -38,8 +38,8 @@ from django.conf import settings
 from django.utils import timezone
 
 from core.douyin.runtime.browser import BrowserManager
-from core.douyin.runtime.inbox import ScannedMessage, scan_inbox
-from core.douyin.runtime.login import scan_qrcode_login
+from core.douyin.runtime.inbox import LoginGateDetected, ScannedMessage, scan_inbox
+from core.douyin.runtime.login import is_login_valid, mark_account_login_invalid, scan_qrcode_login
 from core.douyin.runtime.matcher import match as match_rule
 from core.douyin.runtime.sender import send_reply
 from core.douyin.runtime.ws_notify import push_event_log, push_to_user
@@ -83,6 +83,11 @@ def _load_managed_accounts() -> list[dict]:
             'silent_end': a.silent_end.isoformat() if a.silent_end else None,
             'daily_reply_quota': a.daily_reply_quota,
             'reply_today': a.reply_today,
+            'pending_verification_type': a.pending_verification_type,
+            'pending_verification_until': (
+                a.pending_verification_until.isoformat()
+                if a.pending_verification_until else None
+            ),
         })
     return rows
 
@@ -228,6 +233,7 @@ class DouyinWorker:
         self.idle_poll_max = idle_poll_max
 
         self._tasks: dict[str, asyncio.Task] = {}
+        self._login_tasks: dict[str, asyncio.Task] = {}
         self._account_metrics: dict[str, dict] = {}
         self._redis = None
         self._stop = asyncio.Event()
@@ -355,9 +361,20 @@ class DouyinWorker:
             logger.info(
                 f"[worker] 即时扫码登录任务派发 account={account_id} nickname={acc.nickname!r}"
             )
-            asyncio.create_task(scan_qrcode_login(acc))
+            if account_id in self._login_tasks:
+                logger.warning(f"[worker] 已存在扫码登录任务，忽略重复派发 account={account_id}")
+                return
+            task = asyncio.create_task(
+                self._run_login_task(account_id, acc),
+                name=f"dy-login-{account_id[:8]}",
+            )
+            self._login_tasks[account_id] = task
+        elif action == 'login_cancel':
+            logger.info(f"[worker] login_cancel 命令 account={account_id}")
+            await self._cancel_login_task(account_id)
         elif action == 'logout':
             logger.info(f"[worker] logout 命令 account={account_id}")
+            await self._cancel_login_task(account_id)
             await self._stop_account(account_id)
             from core.douyin.runtime.storage import delete_storage_state
             delete_storage_state(account_id)
@@ -380,6 +397,25 @@ class DouyinWorker:
         await BrowserManager.close_context(account_id)
         logger.info(f"[worker] 已停止账号协程 {account_id}")
 
+    async def _run_login_task(self, account_id: str, account) -> None:
+        try:
+            await scan_qrcode_login(account)
+        except asyncio.CancelledError:
+            logger.info(f"[worker] 已取消扫码登录任务 account={account_id}")
+            raise
+        finally:
+            self._login_tasks.pop(account_id, None)
+
+    async def _cancel_login_task(self, account_id: str) -> None:
+        task = self._login_tasks.pop(account_id, None)
+        if task is None:
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await task
+        await BrowserManager.close_context(account_id)
+        logger.info(f"[worker] 扫码登录任务已取消并关闭上下文 account={account_id}")
+
     # ---------------- 单账号循环 ----------------
     async def _account_loop(self, a: dict) -> None:
         account_id = a['id']
@@ -388,6 +424,8 @@ class DouyinWorker:
         self._account_metrics[account_id] = {
             'messages_today': 0, 'replies_today': 0, 'errors_today': 0,
             'started_at': timezone.now(),
+            'login_failures': 0,
+            'login_retry_not_before': None,
         }
         logger.info(
             f"[worker] ▶ 账号协程启动 account={account_id} nickname={nickname!r} "
@@ -399,18 +437,54 @@ class DouyinWorker:
         # 若账号从未登录 / 登录失效 → 直接跑一次扫码登录
         try:
             if a['status'] in (0, 2):
+                acc = await _fetch_account_orm(account_id)
+                if (
+                    acc is not None
+                    and acc.pending_verification_until
+                    and timezone.now() < acc.pending_verification_until
+                ):
+                    wait_seconds = int((acc.pending_verification_until - timezone.now()).total_seconds())
+                    logger.warning(
+                        f"[worker] 账号待人工验证，暂停自动重登 account={account_id} "
+                        f"type={acc.pending_verification_type or 'unknown'} "
+                        f"wait={max(wait_seconds, 1)}s"
+                    )
+                    await asyncio.sleep(min(max(wait_seconds, 1), 60))
+                    return
+                retry_not_before = self._account_metrics[account_id].get('login_retry_not_before')
+                if retry_not_before and timezone.now() < retry_not_before:
+                    wait_seconds = int((retry_not_before - timezone.now()).total_seconds())
+                    logger.warning(
+                        f"[worker] 登录熔断中，跳过本轮 account={account_id} wait={max(wait_seconds, 1)}s"
+                    )
+                    await asyncio.sleep(max(wait_seconds, 1))
+                    return
                 logger.info(
                     f"[worker] 账号需要扫码登录 account={account_id} status={a['status']}"
                 )
-                acc = await _fetch_account_orm(account_id)
                 if acc is not None:
                     ok = await scan_qrcode_login(acc)
                     if not ok:
+                        metrics = self._account_metrics[account_id]
+                        failures = int(metrics.get('login_failures') or 0) + 1
+                        metrics['login_failures'] = failures
+                        # 连续失败 3 次后，进入 10 分钟冷却，降低风控触发概率
+                        if failures >= 3:
+                            cooldown_until = timezone.now() + timedelta(minutes=10)
+                            metrics['login_retry_not_before'] = cooldown_until
+                            logger.warning(
+                                f"[worker] 登录连续失败触发熔断 account={account_id} "
+                                f"failures={failures} cooldown_until={cooldown_until.isoformat()}"
+                            )
+                        else:
+                            metrics['login_retry_not_before'] = None
                         logger.warning(
                             f"[worker] 账号 {nickname} ({account_id}) 登录失败，30s 后重试"
                         )
                         await asyncio.sleep(30)
                         return
+                    self._account_metrics[account_id]['login_failures'] = 0
+                    self._account_metrics[account_id]['login_retry_not_before'] = None
                     logger.info(
                         f"[worker] 账号 {nickname} ({account_id}) 登录成功，进入扫描循环"
                     )
@@ -448,6 +522,22 @@ class DouyinWorker:
                     )
                     await asyncio.sleep(30)
                     continue
+                if loop_count == 1 or loop_count % 10 == 0:
+                    valid = await is_login_valid(acc_row)
+                    if not valid:
+                        logger.warning(
+                            f"[worker] 检测到在线账号登录态不可用，打回重新登录 account={account_id}"
+                        )
+                        await mark_account_login_invalid(
+                            account_id,
+                            "在线校验失败：业务页面不可用",
+                            keep_pending_verification=bool(
+                                acc_row.pending_verification_until
+                                and timezone.now() < acc_row.pending_verification_until
+                            ),
+                        )
+                        await asyncio.sleep(15)
+                        return
 
                 # 扫收件箱
                 logger.info(
@@ -471,6 +561,22 @@ class DouyinWorker:
                 wait = random.uniform(self.idle_poll_min, self.idle_poll_max)
                 logger.debug(f"[worker] 账号 {account_id} 休眠 {wait:.1f}s 后继续")
                 await asyncio.sleep(wait)
+            except LoginGateDetected as e:
+                acc_row = await _fetch_account_orm(account_id)
+                keep_pending = bool(
+                    acc_row and acc_row.pending_verification_until
+                    and timezone.now() < acc_row.pending_verification_until
+                )
+                logger.warning(
+                    f"[worker] IM 页面进入登录门面，账号打回重新登录 account={account_id} err={e}"
+                )
+                await mark_account_login_invalid(
+                    account_id,
+                    f"IM 页面仍为登录门面: {e}",
+                    keep_pending_verification=keep_pending,
+                )
+                await asyncio.sleep(15)
+                return
             except asyncio.CancelledError:
                 logger.info(f"[worker] 账号协程被取消 {account_id}")
                 raise

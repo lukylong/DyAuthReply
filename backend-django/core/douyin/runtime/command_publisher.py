@@ -63,6 +63,10 @@ def send_login(account_id: str) -> bool:
     return publish(f"douyin:cmd:login:{account_id}", {"action": "login"})
 
 
+def send_cancel_login(account_id: str) -> bool:
+    return publish(f"douyin:cmd:login_cancel:{account_id}", {"action": "login_cancel"})
+
+
 def send_logout(account_id: str) -> bool:
     return publish(f"douyin:cmd:logout:{account_id}", {"action": "logout"})
 

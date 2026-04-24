@@ -1,0 +1,5 @@
+id,task,status,acceptance_criteria,validation_command,completed_at,retry_count,notes
+1,Inspect model schema worker and migration touchpoints,DONE,All integration points identified,echo ok,2026-04-24T11:15:00,0,Completed before implementation
+2,Add account verification state fields and migration,DONE,Model schema and migration are in place,python3 -m py_compile backend-django/core/douyin/douyin_account_model.py backend-django/core/douyin/douyin_account_schema.py,2026-04-24T11:43:00,0,Added pending verification fields and migration
+3,Wire verification cooldown and state transitions into login and worker,DONE,Pending-verification state affects relogin flow,python3 -m py_compile backend-django/core/douyin/runtime/login.py backend-django/core/douyin/runtime/worker.py,2026-04-24T11:43:00,0,Worker now pauses relogin and demotes online accounts on invalid session
+4,Relax login validity checks and verify end-to-end build health,DONE,Focused validation completed,python3 -m py_compile backend-django/core/douyin/runtime/login.py,2026-04-24T11:43:00,0,Relaxed business-shell detection and revalidated Python modules

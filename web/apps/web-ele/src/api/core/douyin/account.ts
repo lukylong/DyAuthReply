@@ -20,6 +20,9 @@ export interface DouyinAccount {
   silent_end: string;
   last_heartbeat?: null | string;
   last_login_at?: null | string;
+  pending_verification_type?: null | string;
+  pending_verification_at?: null | string;
+  pending_verification_until?: null | string;
   remark?: null | string;
   sort?: number;
   sys_create_datetime?: string;
@@ -154,6 +157,15 @@ export async function batchDeleteDouyinAccountApi(ids: string[]) {
 export async function triggerDouyinLoginApi(accountId: string) {
   return requestClient.post<DouyinAccountActionResponse>(
     `/api/core/douyin/account/${accountId}/login`,
+  );
+}
+
+/**
+ * 取消扫码登录
+ */
+export async function cancelDouyinLoginApi(accountId: string) {
+  return requestClient.post<DouyinAccountActionResponse>(
+    `/api/core/douyin/account/${accountId}/login/cancel`,
   );
 }
 

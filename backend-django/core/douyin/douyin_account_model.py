@@ -31,6 +31,14 @@ class DouyinAccount(RootModel):
         ('hybrid', '混合（命中规则自动回、其它人工）'),
     ]
 
+    VERIFICATION_TYPE_CHOICES = [
+        ('sms', '短信验证'),
+        ('face', '人脸验证'),
+        ('captcha', '验证码校验'),
+        ('security', '安全验证'),
+        ('unknown', '待人工确认'),
+    ]
+
     nickname = models.CharField(
         max_length=64,
         help_text="抖音昵称",
@@ -112,6 +120,28 @@ class DouyinAccount(RootModel):
         help_text="最近登录成功时间",
     )
 
+    pending_verification_type = models.CharField(
+        max_length=16,
+        choices=VERIFICATION_TYPE_CHOICES,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="待人工完成的验证类型",
+    )
+
+    pending_verification_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="最近一次识别到验证页的时间",
+    )
+
+    pending_verification_until = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="人工验证冷却截止时间；在此之前 worker 不自动重登",
+    )
+
     remark = models.CharField(
         max_length=255,
         null=True,
@@ -183,3 +213,10 @@ class DouyinAccount(RootModel):
     def can_reply(self) -> bool:
         """判断账号当前是否处于可自动回复状态"""
         return self.status == 1
+
+    def has_pending_verification(self) -> bool:
+        """判断账号当前是否处于待人工验证冷却中。"""
+        if not self.pending_verification_until:
+            return False
+        from django.utils import timezone
+        return timezone.now() < self.pending_verification_until

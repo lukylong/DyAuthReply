@@ -38,6 +38,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+async def _looks_like_login_gate(page) -> bool:
+    try:
+        text = await page.evaluate("() => (document.body?.innerText || '').slice(0, 2000)")
+        text = (text or "").replace("\n", "")
+        hints = ("扫码登录", "验证码登录", "登录/注册", "创作者登录", "我是创作者")
+        return any(h in text for h in hints)
+    except Exception:
+        return False
+
+
 # -------------------- 数据结构 --------------------
 @dataclass
 class ScannedMessage:
@@ -231,6 +241,13 @@ async def scan_inbox(account: "DouyinAccount", *, max_conversations: int = 15) -
         await page.goto(S.CREATOR_IM, wait_until="domcontentloaded", timeout=30000)
         await asyncio.sleep(2.5)
         logger.info(f"[inbox] 页面加载完成 account={account_id} current_url={page.url}")
+
+        if await _looks_like_login_gate(page):
+            logger.warning(
+                f"[inbox] IM 页面显示登录门面，跳过本轮扫描（不立即判失效） "
+                f"account={account_id} url={page.url}"
+            )
+            return new_messages
 
         items = await _list_conversation_items(page, max_items=max_conversations)
         logger.info(f"[inbox] 会话列表项数 account={account_id} count={len(items)}")

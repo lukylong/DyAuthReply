@@ -26,11 +26,13 @@ LOGIN_QR_SELECTORS = [
     "img[class*='qrcode']",           # 旧版 img
     "canvas[class*='qrcode']",
 ]
-# 扫码成功后会跳转到这些页面之一
+# 扫码成功后会跳转到这些页面之一（路径会改版，宁可多写几个 hint）
 LOGIN_SUCCESS_URL_HINTS = (
     "creator.douyin.com/creator-micro/home",
     "creator.douyin.com/creator-micro/content",
     "creator.douyin.com/creator-micro/data-center",
+    "creator.douyin.com/creator-micro/im",
+    "creator.douyin.com/creator-micro/message",
 )
 
 # ---------------- 私信相关 ----------------

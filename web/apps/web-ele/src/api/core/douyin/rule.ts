@@ -58,6 +58,19 @@ export interface DouyinRuleListParams {
   status?: boolean;
 }
 
+export interface DouyinRuleQuickEnableInput {
+  account_id: string;
+  reply_text: string;
+  cooldown_seconds?: number;
+  send_mode?: DouyinRuleSendMode;
+}
+
+export interface DouyinRuleQuickEnableResult {
+  created: boolean;
+  message: string;
+  rule_id: string;
+}
+
 /**
  * 获取规则列表（分页）
  */
@@ -131,5 +144,15 @@ export async function batchDeleteDouyinRuleApi(ids: string[]) {
   return requestClient.post<{ count: number }>(
     '/api/core/douyin/rule/batch/delete',
     { ids },
+  );
+}
+
+/**
+ * 一键开启陌生人自动回复（创建/更新快捷兜底规则）
+ */
+export async function quickEnableDouyinRuleApi(data: DouyinRuleQuickEnableInput) {
+  return requestClient.post<DouyinRuleQuickEnableResult>(
+    '/api/core/douyin/rule/quick-enable',
+    data,
   );
 }

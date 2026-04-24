@@ -228,7 +228,9 @@ const qrImage = ref('');
 const qrHint = ref('正在生成二维码，请稍候…');
 const qrAccountName = ref('');
 const qrLoading = ref(false);
+const loginPendingAccountId = ref<string>('');
 let douyinWs: null | WebSocketManager = null;
+const isLoginFlowActive = computed(() => !!loginPendingAccountId.value);
 
 async function ensureWsConnected() {
   if (douyinWs && douyinWs.isConnected) return;
@@ -265,12 +267,24 @@ function handleDouyinEvent(message: any) {
     case 'login_success': {
       ElMessage.success(`账号 ${payload.nickname || ''} 登录成功`);
       qrDialogVisible.value = false;
+      loginPendingAccountId.value = '';
       loadData();
       break;
     }
     case 'login_failed': {
       ElMessage.error(`登录失败：${payload.reason || '未知错误'}`);
       qrHint.value = `登录失败：${payload.reason || '未知错误'}`;
+      loginPendingAccountId.value = '';
+      break;
+    }
+    case 'login_progress': {
+      const elapsed = Number(payload.elapsed || 0);
+      const remain = Number(payload.remain || 0);
+      const cookies = Array.isArray(payload.session_cookies)
+        ? payload.session_cookies
+        : [];
+      const cookiesText = cookies.length > 0 ? cookies.join(', ') : '无';
+      qrHint.value = `等待扫码确认中… 已等待 ${elapsed}s，剩余 ${remain}s，cookie=${cookiesText}`;
       break;
     }
     case 'reply_sent': {
@@ -283,6 +297,11 @@ function handleDouyinEvent(message: any) {
 }
 
 async function onLogin(row: DouyinAccount) {
+  if (isLoginFlowActive.value) {
+    ElMessage.warning('已有扫码流程进行中，请先完成当前流程');
+    return;
+  }
+  loginPendingAccountId.value = row.id;
   qrAccountName.value = row.nickname;
   qrImage.value = '';
   qrHint.value = '正在生成二维码，请稍候…';
@@ -295,6 +314,7 @@ async function onLogin(row: DouyinAccount) {
     loadData();
   } catch (error: any) {
     qrDialogVisible.value = false;
+    loginPendingAccountId.value = '';
     ElMessage.error(error?.response?.data?.detail || '登录指令下发失败');
   }
 }
@@ -302,6 +322,7 @@ async function onLogin(row: DouyinAccount) {
 function onCloseQrDialog() {
   qrDialogVisible.value = false;
   qrImage.value = '';
+  loginPendingAccountId.value = '';
 }
 
 onBeforeUnmount(() => {
@@ -312,6 +333,10 @@ onBeforeUnmount(() => {
 });
 
 async function onLogout(row: DouyinAccount) {
+  if (isLoginFlowActive.value) {
+    ElMessage.warning('扫码登录进行中，暂不可登出');
+    return;
+  }
   try {
     await ElMessageBox.confirm(
       `确定要登出账号「${row.nickname}」吗？`,
@@ -463,16 +488,16 @@ onMounted(loadData);
                 link
                 type="primary"
                 size="small"
-                :disabled="row.status === 1"
+                :disabled="isLoginFlowActive"
                 @click="onLogin(row)"
               >
-                扫码登录
+                {{ isLoginFlowActive ? '登录中…' : '扫码登录' }}
               </ElButton>
               <ElButton
                 link
                 type="warning"
                 size="small"
-                :disabled="row.status !== 1"
+                :disabled="row.status !== 1 || isLoginFlowActive"
                 @click="onLogout(row)"
               >
                 登出

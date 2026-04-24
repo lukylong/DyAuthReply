@@ -37,13 +37,22 @@ logger = logging.getLogger(__name__)
 
 
 # -------------------- 工具 --------------------
-# 抖音登录后会下发这些 cookie 里至少一个，存在即视为已登录态
+# 抖音登录后会下发这些 cookie 里至少一个，存在即视为已登录态（会随版本增减）
 _SESSION_COOKIE_NAMES = (
     "sessionid_ss",
     "sessionid",
     "sid_guard",
     "sid_tt",
+    "sid_ucp_v1",
+)
+
+# 这些 cookie 在未完全登录时也可能出现，只作为辅助观察，不用于判定登录成功
+_WEAK_SESSION_COOKIE_NAMES = (
     "passport_auth_status",
+    "passport_auth_status_ss",
+    "passport_auth_mix_state",
+    "uid_tt",
+    "uid_tt_ss",
 )
 
 
@@ -65,21 +74,95 @@ async def _has_session_cookie(context) -> bool:
         return False
 
 
+async def _has_weak_session_cookie(context) -> bool:
+    """弱登录态 cookie（仅用于触发主动跳转复检，不直接判成功）。"""
+    try:
+        cookies = await context.cookies()
+        names = {c.get("name") for c in cookies}
+        return any(n in names for n in _WEAK_SESSION_COOKIE_NAMES)
+    except Exception:
+        return False
+
+
+async def _looks_like_login_gate(page) -> bool:
+    """
+    通过页面文本识别“登录门面”。
+    说明：抖音有时 URL 在 creator-micro/*，但页面主体仍是扫码登录页。
+    """
+    try:
+        text = await page.evaluate("() => (document.body?.innerText || '').slice(0, 2000)")
+        text = (text or "").replace("\n", "")
+        hints = ("扫码登录", "验证码登录", "登录/注册", "创作者登录", "我是创作者")
+        return any(h in text for h in hints)
+    except Exception:
+        return False
+
+
 async def _is_logged_in(page) -> bool:
     """
-    综合判断当前是否已登录：
-      1. URL 已进入创作者后台子路径 → 确认登录；
-      2. 否则只要不在登录/passport 页、cookie 里有 sessionid → 视为已登录（抖音
-         新版本扫码后可能把页面停在根路径 https://creator.douyin.com/ 而不主动跳转）。
+    综合判断当前是否已登录。
+
+    注意顺序：扫码成功后中间态 URL 常仍带 ``login`` / ``passport``（OAuth 回调），
+    若先判「登录页」会直接 return False，导致永远等不到登录。必须先认 cookie 再否定。
     """
     url = page.url or ""
+    # 仅强会话 cookie 才视为登录成功，避免误判为“免扫码已登录”
+    if "douyin.com" in url and await _has_session_cookie(page.context):
+        return True
     if _is_login_success(url):
+        # URL 命中成功路径，但页面仍可能是登录门面（风控/重定向失败）
+        if await _looks_like_login_gate(page):
+            return False
         return True
     if _is_login_page(url):
         return False
-    if "creator.douyin.com" in url and await _has_session_cookie(page.context):
-        return True
     return False
+
+
+async def _session_cookie_debug_names(context) -> list[str]:
+    """返回当前上下文中与登录相关的 cookie 名（用于心跳日志，便于线上排查）。"""
+    try:
+        cookies = await context.cookies()
+        names = {c.get("name") for c in cookies}
+        hit = sorted(
+            n for n in names if n in (_SESSION_COOKIE_NAMES + _WEAK_SESSION_COOKIE_NAMES)
+        )
+        return hit
+    except Exception:
+        return []
+
+
+async def _push_login_progress(
+    owner_id: str,
+    account_id: str,
+    *,
+    elapsed: int,
+    remain: int,
+    url: str,
+    session_cookies: list[str],
+    logged_in: bool,
+) -> None:
+    """向前端推送扫码登录进度（仅用于可视化排查）。"""
+    await push_to_user(owner_id, "login_progress", {
+        "account_id": account_id,
+        "elapsed": elapsed,
+        "remain": remain,
+        "url": url,
+        "session_cookies": session_cookies,
+        "is_logged_in": logged_in,
+    })
+
+
+# 同一账号只允许一条扫码登录协程，避免 account_loop 与 API 即时指令并发抢浏览器
+_login_locks: dict[str, asyncio.Lock] = {}
+
+
+def _login_lock_for(account_id: str) -> asyncio.Lock:
+    lock = _login_locks.get(account_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _login_locks[account_id] = lock
+    return lock
 
 
 async def _capture_qr_base64(page) -> Optional[str]:
@@ -267,6 +350,16 @@ async def scan_qrcode_login(account: "DouyinAccount", *, timeout: int = 180) -> 
         True  登录成功且已持久化
         False 失败 / 超时 / 取消
     """
+    account_id = str(account.id)
+    lock = _login_lock_for(account_id)
+    if lock.locked():
+        logger.info(f"[login] 已有扫码流程在执行，本调用将排队等待 account={account_id}")
+    async with lock:
+        return await _scan_qrcode_login_locked(account, timeout=timeout)
+
+
+async def _scan_qrcode_login_locked(account: "DouyinAccount", *, timeout: int) -> bool:
+    """在账号互斥锁内执行扫码（避免 worker 主循环与 API 即时指令并发）。"""
     owner_id = str(account.owner_id)
     account_id = str(account.id)
     t_start = datetime.utcnow().timestamp()
@@ -316,6 +409,7 @@ async def scan_qrcode_login(account: "DouyinAccount", *, timeout: int = 180) -> 
         now_ts = datetime.utcnow().timestamp()
         last_refresh = now_ts      # 刚推送过二维码，45s 后再刷新
         last_heartbeat = now_ts    # 30s 后打第一条心跳
+        last_weak_recheck = now_ts
         last_url = page.url
         while datetime.utcnow().timestamp() < deadline:
             await asyncio.sleep(1.0)
@@ -323,9 +417,21 @@ async def scan_qrcode_login(account: "DouyinAccount", *, timeout: int = 180) -> 
 
             # URL 变化立刻记一条
             if page.url != last_url:
+                hits = await _session_cookie_debug_names(page.context)
                 logger.info(
                     f"[login] URL 变化 account={account_id} "
-                    f"{last_url!r} -> {page.url!r}"
+                    f"{last_url!r} -> {page.url!r} session_cookies={hits or '无'}"
+                )
+                elapsed = int(now - t_start)
+                remain = int(deadline - now)
+                await _push_login_progress(
+                    owner_id,
+                    account_id,
+                    elapsed=elapsed,
+                    remain=max(0, remain),
+                    url=page.url,
+                    session_cookies=hits,
+                    logged_in=False,
                 )
                 last_url = page.url
 
@@ -337,13 +443,44 @@ async def scan_qrcode_login(account: "DouyinAccount", *, timeout: int = 180) -> 
                 )
                 break
 
+            # 抖音常见中间态：仅出现 weak cookie，URL 仍停留在根路径
+            # 触发一次主动跳转复检，避免“扫码已确认但页面不跳”导致永远超时
+            if now - last_weak_recheck >= 20 and await _has_weak_session_cookie(page.context):
+                logger.info(
+                    f"[login] 检测到弱登录态 cookie，主动跳转复检 account={account_id} "
+                    f"url={page.url}"
+                )
+                try:
+                    await page.goto(
+                        "https://creator.douyin.com/creator-micro/home",
+                        wait_until="domcontentloaded",
+                        timeout=20000,
+                    )
+                    await asyncio.sleep(1.5)
+                    logger.info(f"[login] 弱态复检跳转完成 account={account_id} url={page.url}")
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[login] 弱态复检跳转失败 account={account_id} err={e}")
+                last_weak_recheck = now
+
             # 每 30 秒心跳一次（便于实时观察是否卡死）
             if now - last_heartbeat >= 30:
                 elapsed = int(now - t_start)
                 remain = int(deadline - now)
+                hits = await _session_cookie_debug_names(page.context)
+                logged_in = await _is_logged_in(page)
                 logger.info(
                     f"[login] 等待扫码中… account={account_id} "
-                    f"elapsed={elapsed}s remain={remain}s url={page.url}"
+                    f"elapsed={elapsed}s remain={remain}s url={page.url} "
+                    f"session_cookies={hits or '无'} _is_logged_in={logged_in}"
+                )
+                await _push_login_progress(
+                    owner_id,
+                    account_id,
+                    elapsed=elapsed,
+                    remain=max(0, remain),
+                    url=page.url,
+                    session_cookies=hits,
+                    logged_in=logged_in,
                 )
                 last_heartbeat = now
 
@@ -357,8 +494,9 @@ async def scan_qrcode_login(account: "DouyinAccount", *, timeout: int = 180) -> 
                         "image_base64": new_qr,
                         "hint": "二维码已刷新，请重新扫码",
                     })
-                    last_refresh = now
                     logger.info(f"[login] 二维码已刷新并推送 account={account_id}")
+                # 无论刷新是否成功，都更新节流时间，避免每秒重复刷新干扰扫码状态
+                last_refresh = now
 
         if not await _is_logged_in(page):
             try:

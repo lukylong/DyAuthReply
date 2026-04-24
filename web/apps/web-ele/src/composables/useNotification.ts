@@ -19,6 +19,7 @@ import {
   markAllAsReadApi,
   markAsReadApi,
 } from '#/api/core/message';
+import { createNotificationWebSocket } from '#/api/core/websocket';
 
 // 通知项类型
 export interface NotificationItem {
@@ -49,7 +50,7 @@ export interface AnnouncementItem {
 
 // WebSocket 连接状态
 const wsConnected = ref(false);
-const wsInstance = ref<null | WebSocket>(null);
+const wsInstance = ref<any>(null);
 
 // 消息数据
 const notifications = ref<NotificationItem[]>([]);
@@ -255,46 +256,28 @@ export function useNotification() {
 
   // 连接 WebSocket
   function connectWebSocket() {
-    const token = accessStore.accessToken;
-    if (!token) return;
-
-    // 构建 WebSocket URL
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
-    const wsUrl = `${protocol}//${host}/ws/notification/?token=${token}`;
-
-    try {
-      wsInstance.value = new WebSocket(wsUrl);
-
-      wsInstance.value.addEventListener('open', () => {
+    if (!accessStore.accessToken) return;
+    disconnectWebSocket();
+    wsInstance.value = createNotificationWebSocket({
+      onOpen: () => {
         wsConnected.value = true;
         console.log('WebSocket 已连接');
-        // 发送订阅消息
-        wsInstance.value?.send(JSON.stringify({ type: 'subscribe' }));
-      });
-
-      wsInstance.value.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          handleWebSocketMessage(data);
-        } catch (error) {
-          console.error('解析 WebSocket 消息失败:', error);
-        }
-      };
-
-      wsInstance.value.addEventListener('close', () => {
+        wsInstance.value?.send({ type: 'subscribe' });
+      },
+      onMessage: (data) => {
+        handleWebSocketMessage(data);
+      },
+      onClose: () => {
         wsConnected.value = false;
         console.log('WebSocket 已断开');
-        // 5秒后重连
-        setTimeout(connectWebSocket, 5000);
-      });
-
-      wsInstance.value.onerror = (error) => {
+      },
+      onError: (error) => {
         console.error('WebSocket 错误:', error);
-      };
-    } catch (error) {
+      },
+    });
+    wsInstance.value.connect().catch((error: unknown) => {
       console.error('WebSocket 连接失败:', error);
-    }
+    });
   }
 
   // 处理 WebSocket 消息
@@ -330,6 +313,7 @@ export function useNotification() {
       wsInstance.value.close();
       wsInstance.value = null;
     }
+    wsConnected.value = false;
   }
 
   // 格式化日期

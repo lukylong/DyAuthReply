@@ -79,10 +79,11 @@ const [Grid, gridApi] = useVbenVxeGrid({
         },
       },
     },
+    rowConfig: { keyField: 'id' },
     toolbarConfig: {
       custom: true,
       export: false,
-      refresh: { code: 'query' },
+      refresh: true,
       search: true,
       zoom: true,
     },

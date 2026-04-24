@@ -103,3 +103,16 @@ class DouyinRuleBatchDeleteIn(Schema):
 
 class DouyinRuleBatchDeleteOut(Schema):
     count: int
+
+
+class DouyinRuleQuickEnableIn(Schema):
+    account_id: str = Field(..., description="所属抖音账号ID")
+    reply_text: str = Field(..., description="自动回复文案")
+    cooldown_seconds: int = Field(300, description="同会话冷却秒数")
+    send_mode: str = Field("merged", description="发送模式：merged/multi_message/card_fallback")
+
+
+class DouyinRuleQuickEnableOut(Schema):
+    created: bool
+    message: str
+    rule_id: str

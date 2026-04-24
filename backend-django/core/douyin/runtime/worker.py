@@ -49,6 +49,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _normalize_nickname(name: Optional[str]) -> str:
+    return (name or "").strip().lower().replace(" ", "")
+
 # 命令频道（与 API 侧保持一致）
 CMD_CHANNEL_PATTERN = "douyin:cmd:*"
 
@@ -541,14 +545,36 @@ class DouyinWorker:
                 f"[reply] 定位会话 account={account_id} peer={peer!r} 会话项数={count}"
             )
             hit = False
+            target_nick = _normalize_nickname(msg.peer_nickname)
+            target_preview = (msg.text or "").strip()[:12]
             for i in range(min(count, 20)):
                 it = items.nth(i)
                 try:
                     nick_loc = it.locator(S.IM_CONV_NICKNAME[0]).first
-                    if await nick_loc.count() and (await nick_loc.inner_text()).strip() == (msg.peer_nickname or ''):
+                    nick_txt = ""
+                    if await nick_loc.count():
+                        nick_txt = (await nick_loc.inner_text()).strip()
+                    nick_norm = _normalize_nickname(nick_txt)
+                    nick_exact = bool(target_nick) and nick_norm == target_nick
+                    nick_fuzzy = bool(target_nick) and (target_nick in nick_norm or nick_norm in target_nick)
+
+                    preview_hit = False
+                    if target_preview:
+                        try:
+                            preview_loc = it.locator(S.IM_CONV_LAST_MESSAGE[0]).first
+                            if await preview_loc.count():
+                                preview_txt = (await preview_loc.inner_text()).strip()
+                                preview_hit = target_preview in preview_txt
+                        except Exception:
+                            preview_hit = False
+
+                    if nick_exact or nick_fuzzy or preview_hit:
                         await it.click()
                         hit = True
-                        logger.info(f"[reply] 点击会话成功 account={account_id} peer={peer!r} idx={i}")
+                        logger.info(
+                            f"[reply] 点击会话成功 account={account_id} peer={peer!r} idx={i} "
+                            f"nick_exact={nick_exact} nick_fuzzy={nick_fuzzy} preview_hit={preview_hit}"
+                        )
                         break
                 except Exception:
                     continue

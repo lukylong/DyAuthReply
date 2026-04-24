@@ -22,9 +22,12 @@ from core.douyin.douyin_rule_schema import (
     DouyinRuleSchemaIn,
     DouyinRuleSchemaOut,
     DouyinRuleSchemaPatch,
+    DouyinRuleQuickEnableIn,
+    DouyinRuleQuickEnableOut,
 )
 
 router = Router()
+_QUICK_RULE_REMARK = "__quick_stranger_auto_reply__"
 
 
 @router.get("/rule", response=List[DouyinRuleSchemaOut], summary="获取回复规则列表（分页）")
@@ -93,6 +96,60 @@ def delete_rule(request, rule_id: str):
 def batch_delete_rule(request, data: DouyinRuleBatchDeleteIn):
     count = DouyinRule.objects.filter(id__in=data.ids).delete()[0]
     return DouyinRuleBatchDeleteOut(count=count)
+
+
+@router.post(
+    "/rule/quick-enable",
+    response=DouyinRuleQuickEnableOut,
+    summary="一键开启陌生人消息自动回复",
+)
+def quick_enable_rule(request, data: DouyinRuleQuickEnableIn):
+    account = DouyinAccount.objects.filter(id=data.account_id).first()
+    if not account:
+        raise HttpError(400, "所属抖音账号不存在")
+
+    reply_text = (data.reply_text or "").strip()
+    if not reply_text:
+        raise HttpError(400, "回复文案不能为空")
+
+    if data.send_mode not in ("merged", "multi_message", "card_fallback"):
+        raise HttpError(400, "send_mode 仅支持 merged/multi_message/card_fallback")
+
+    cooldown = max(0, int(data.cooldown_seconds or 0))
+
+    rule = DouyinRule.objects.filter(
+        account_id=data.account_id,
+        remark=_QUICK_RULE_REMARK,
+        is_deleted=False,
+    ).first()
+
+    created = False
+    if not rule:
+        created = True
+        rule = DouyinRule(
+            account_id=data.account_id,
+            name="陌生人自动回复（快捷）",
+            match_type="default",
+            keywords=[],
+            regex_pattern=None,
+            channel="dm",
+            weekday_mask="1111111",
+            priority=0,
+            remark=_QUICK_RULE_REMARK,
+        )
+
+    rule.reply_text = reply_text
+    rule.links = []
+    rule.send_mode = data.send_mode
+    rule.cooldown_seconds = cooldown
+    rule.status = True
+    rule.save()
+
+    return DouyinRuleQuickEnableOut(
+        created=created,
+        message="已开启陌生人消息自动回复",
+        rule_id=str(rule.id),
+    )
 
 
 def _validate_rule_payload(payload: dict) -> None:

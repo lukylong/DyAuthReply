@@ -15,9 +15,15 @@ from ninja.pagination import paginate
 from common.fu_crud import retrieve
 from common.fu_pagination import MyPagination
 from core.douyin.douyin_account_model import DouyinAccount
+from core.douyin.douyin_conversation_model import DouyinConversation
+from core.douyin.douyin_message_model import DouyinMessage
 from core.douyin.douyin_session_model import DouyinSession
 from core.douyin.runtime import command_publisher
 from core.douyin.douyin_session_schema import (
+    DouyinAutoReplyTestIn,
+    DouyinConversationItemOut,
+    DouyinManualReplyIn,
+    DouyinMessageItemOut,
     DouyinSessionBatchIdsIn,
     DouyinSessionControlIn,
     DouyinSessionControlOut,
@@ -50,6 +56,81 @@ def list_live_session(request):
 @router.get("/session/{session_id}", response=DouyinSessionSchemaOut, summary="会话详情")
 def get_session(request, session_id: str):
     return get_object_or_404(DouyinSession, id=session_id)
+
+
+@router.get(
+    "/session/{session_id}/conversations",
+    response=List[DouyinConversationItemOut],
+    summary="获取该账号最近会话列表",
+)
+def list_session_conversations(request, session_id: str):
+    session = get_object_or_404(DouyinSession, id=session_id)
+    rows = list(
+        DouyinConversation.objects
+        .filter(account_id=session.account_id)
+        .order_by('-last_message_at', '-sys_create_datetime')[:100]
+    )
+    deduped: list[DouyinConversation] = []
+    seen: set[str] = set()
+    for row in rows:
+        if row.peer_sec_uid.startswith('fallback_') and row.peer_nickname:
+            key = f"nick:{row.peer_nickname}"
+        else:
+            key = f"uid:{row.peer_sec_uid}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped[:50]
+
+
+@router.get(
+    "/session/{session_id}/conversation/{conversation_id}/messages",
+    response=List[DouyinMessageItemOut],
+    summary="获取某会话最近消息",
+)
+def list_session_messages(request, session_id: str, conversation_id: str):
+    session = get_object_or_404(DouyinSession, id=session_id)
+    conv = get_object_or_404(DouyinConversation, id=conversation_id, account_id=session.account_id)
+    return (
+        DouyinMessage.objects
+        .filter(conversation_id=conv.id)
+        .order_by('-received_at', '-sys_create_datetime')[:100]
+    )
+
+
+@router.post(
+    "/session/{session_id}/manual-reply",
+    response=DouyinSessionControlOut,
+    summary="手动发送一条测试回复",
+)
+def manual_reply(request, session_id: str, data: DouyinManualReplyIn):
+    session = get_object_or_404(DouyinSession, id=session_id)
+    conv = get_object_or_404(DouyinConversation, id=data.conversation_id, account_id=session.account_id)
+    text = (data.text or '').strip()
+    if not text:
+        return DouyinSessionControlOut(success=False, message="回复内容不能为空")
+    ok = command_publisher.send_manual_reply(str(session.account_id), str(conv.id), text)
+    if not ok:
+        return DouyinSessionControlOut(success=False, message="Redis 不可用，未能下发手动回复指令")
+    return DouyinSessionControlOut(success=True, message="手动回复指令已下发")
+
+
+@router.post(
+    "/session/{session_id}/auto-reply-test",
+    response=DouyinSessionControlOut,
+    summary="手动触发一条自动回复测试",
+)
+def auto_reply_test(request, session_id: str, data: DouyinAutoReplyTestIn):
+    session = get_object_or_404(DouyinSession, id=session_id)
+    conv = get_object_or_404(DouyinConversation, id=data.conversation_id, account_id=session.account_id)
+    text = (data.text or '').strip()
+    if not text:
+        return DouyinSessionControlOut(success=False, message="模拟消息不能为空")
+    ok = command_publisher.send_manual_auto_reply_test(str(session.account_id), str(conv.id), text)
+    if not ok:
+        return DouyinSessionControlOut(success=False, message="Redis 不可用，未能下发自动回复测试指令")
+    return DouyinSessionControlOut(success=True, message=f"已下发自动回复测试指令（会话：{conv.peer_nickname or conv.peer_sec_uid}）")
 
 
 @router.post("/session/heartbeat", response=DouyinSessionControlOut, summary="worker 心跳上报")

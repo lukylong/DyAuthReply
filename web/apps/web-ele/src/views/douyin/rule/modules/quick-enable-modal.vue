@@ -45,6 +45,17 @@ const [Form, formApi] = useVbenForm({
       },
     },
     {
+      component: 'Textarea',
+      fieldName: 'keyword_text',
+      label: '触发关键词（可选）',
+      componentProps: {
+        rows: 3,
+        maxlength: 200,
+        showWordLimit: true,
+        placeholder: '每行一个关键词；填了后会创建关键词规则，便于快速调试',
+      },
+    },
+    {
       component: 'InputNumber',
       fieldName: 'cooldown_seconds',
       label: '同会话冷却时间（秒）',
@@ -61,6 +72,7 @@ function open() {
   visible.value = true;
   formApi.setValues({
     cooldown_seconds: 300,
+    keyword_text: '',
   });
 }
 
@@ -69,11 +81,16 @@ async function onSubmit() {
   if (!valid) return;
 
   const values = await formApi.getValues();
+  const keywords = String(values.keyword_text || '')
+    .split(/\n|,|，/)
+    .map((item) => item.trim())
+    .filter(Boolean);
   confirmLoading.value = true;
   try {
     const res = await quickEnableDouyinRuleApi({
       account_id: values.account_id,
       reply_text: values.reply_text,
+      keywords,
       cooldown_seconds: values.cooldown_seconds,
       send_mode: 'merged',
     });

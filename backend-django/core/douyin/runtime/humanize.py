@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from contextlib import suppress
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +25,8 @@ async def human_type(locator, text: str, *, per_char_min: float = 0.04, per_char
     """
     模拟人类逐字输入：
     - 先 click 获得焦点
-    - 再 press_sequentially 按字符输入，每字符 40~120ms 随机延迟
-    - 每 8~14 个字符会插入一个额外 200~450ms 停顿模拟"想一下"
+    - 再按“分行 + 逐段输入”写入内容，避免 URL / 标点在 contenteditable 中丢失
+    - 每段之间插入短暂停顿，模拟人工输入节奏
 
     tips:
       Playwright 的 `press_sequentially(delay=...)` 本身已支持固定延迟，但固定延迟过于规律。
@@ -38,11 +39,9 @@ async def human_type(locator, text: str, *, per_char_min: float = 0.04, per_char
     except Exception as e:  # noqa: BLE001
         logger.debug(f"[humanize] click before type failed (非致命): {e}")
 
-    buffer_count = 0
-    pause_budget = random.randint(8, 14)
-    for ch in text:
-        # Playwright press 不接受换行；换行用 Shift+Enter 模拟
-        if ch == '\n':
+    lines = text.split('\n')
+    for idx, line in enumerate(lines):
+        if idx > 0:
             try:
                 await locator.page.keyboard.press("Shift+Enter")
             except Exception:
@@ -51,36 +50,55 @@ async def human_type(locator, text: str, *, per_char_min: float = 0.04, per_char
                 except Exception:
                     pass
             await asyncio.sleep(random.uniform(0.08, 0.18))
+        if not line:
             continue
         try:
-            await locator.press(ch)
-        except Exception:
-            # 某些 IME 字符 press 不了，fallback 用 type
+            await locator.type(
+                line,
+                delay=random.uniform(per_char_min * 1000, per_char_max * 1000),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[humanize] line type failed, fallback insert_text: {e}")
             try:
-                await locator.type(ch)
-            except Exception as e:  # noqa: BLE001
-                logger.debug(f"[humanize] type char '{ch}' failed: {e}")
-        await asyncio.sleep(random.uniform(per_char_min, per_char_max))
-        buffer_count += 1
-        if buffer_count >= pause_budget:
-            await asyncio.sleep(random.uniform(0.2, 0.45))
-            buffer_count = 0
-            pause_budget = random.randint(8, 14)
+                await locator.page.keyboard.insert_text(line)
+            except Exception as inner_e:  # noqa: BLE001
+                logger.debug(f"[humanize] insert_text failed: {inner_e}")
+        await asyncio.sleep(random.uniform(0.15, 0.35))
 
 
 async def human_click(locator) -> None:
     """
     模拟人类点击：
     - 先 hover（让 bbox 与内部元素稳定）
+    - 尝试滚动到可视区域
     - 随机延迟
     - click
     """
+    last_error: Exception | None = None
+    with suppress(Exception):
+        await locator.scroll_into_view_if_needed(timeout=5000)
+    with suppress(Exception):
+        await locator.wait_for(state="visible", timeout=5000)
     try:
         await locator.hover()
     except Exception:
         pass
     await asyncio.sleep(random.uniform(0.08, 0.24))
-    await locator.click()
+    for kwargs in ({}, {"force": True}):
+        try:
+            await locator.click(timeout=8000, **kwargs)
+            return
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+            logger.debug(f"[humanize] click failed kwargs={kwargs}: {e}")
+    try:
+        await locator.evaluate("(el) => el.click()")
+        return
+    except Exception as e:  # noqa: BLE001
+        last_error = e
+        logger.debug(f"[humanize] js click failed: {e}")
+    if last_error is not None:
+        raise last_error
 
 
 async def human_scroll(page, distance: int = 400) -> None:

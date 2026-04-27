@@ -20,20 +20,14 @@ import {
 
 import { useRuleTableColumns, useSearchFormSchema } from './data';
 import RuleFormModal from './modules/rule-form-modal.vue';
-import QuickEnableModal from './modules/quick-enable-modal.vue';
 
 defineOptions({ name: 'DouyinRule' });
 
 const selectedRows = ref<DouyinRule[]>([]);
 const formModalRef = ref<InstanceType<typeof RuleFormModal>>();
-const quickEnableModalRef = ref<InstanceType<typeof QuickEnableModal>>();
 
 function onAdd() {
   formModalRef.value?.open();
-}
-
-function onQuickEnable() {
-  quickEnableModalRef.value?.open();
 }
 
 function onEdit(row: DouyinRule) {
@@ -137,13 +131,9 @@ const [Grid, gridApi] = useVbenVxeGrid({
 <template>
   <Page auto-content-height>
     <RuleFormModal ref="formModalRef" @success="onFormSuccess" />
-    <QuickEnableModal ref="quickEnableModalRef" @success="onFormSuccess" />
 
     <Grid>
       <template #table-title>
-        <ElButton type="success" plain @click="onQuickEnable">
-          一键开启陌生人自动回复
-        </ElButton>
         <ElButton type="primary" @click="onAdd">新增规则</ElButton>
         <ElButton
           type="danger"

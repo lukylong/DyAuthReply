@@ -67,6 +67,37 @@ def send_cancel_login(account_id: str) -> bool:
     return publish(f"douyin:cmd:login_cancel:{account_id}", {"action": "login_cancel"})
 
 
+def send_manual_reply(account_id: str, conversation_id: str, text: str) -> bool:
+    return publish(
+        f"douyin:cmd:manual_reply:{account_id}",
+        {
+            "action": "manual_reply",
+            "conversation_id": conversation_id,
+            "text": text,
+        },
+    )
+
+
+def send_manual_auto_reply_test(account_id: str, conversation_id: str, text: str) -> bool:
+    return publish(
+        f"douyin:cmd:manual_auto_reply:{account_id}",
+        {
+            "action": "manual_auto_reply",
+            "conversation_id": conversation_id,
+            "text": text,
+        },
+    )
+
+
+def send_focus_account(account_id: str) -> bool:
+    return publish(
+        f"douyin:cmd:focus:{account_id}",
+        {
+            "action": "focus",
+        },
+    )
+
+
 def send_logout(account_id: str) -> bool:
     return publish(f"douyin:cmd:logout:{account_id}", {"action": "logout"})
 

@@ -9,6 +9,7 @@ export interface DouyinAccount {
   sec_uid?: null | string;
   avatar?: null | string;
   status: number;
+  auto_reply_enabled: boolean;
   status_display?: string;
   storage_state_path?: string;
   owner_id?: null | string;
@@ -34,6 +35,7 @@ export interface DouyinAccountCreateInput {
   sec_uid?: null | string;
   avatar?: null | string;
   status?: number;
+  auto_reply_enabled?: boolean;
   owner_id?: null | string;
   daily_reply_quota?: number;
   min_interval_seconds?: number;
@@ -166,6 +168,15 @@ export async function triggerDouyinLoginApi(accountId: string) {
 export async function cancelDouyinLoginApi(accountId: string) {
   return requestClient.post<DouyinAccountActionResponse>(
     `/api/core/douyin/account/${accountId}/login/cancel`,
+  );
+}
+
+/**
+ * 聚焦账号监管页
+ */
+export async function focusDouyinAccountApi(accountId: string) {
+  return requestClient.post<DouyinAccountActionResponse>(
+    `/api/core/douyin/account/${accountId}/focus`,
   );
 }
 

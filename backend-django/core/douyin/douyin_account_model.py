@@ -88,6 +88,12 @@ class DouyinAccount(RootModel):
         help_text="单日回复上限（风控）",
     )
 
+    auto_reply_enabled = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text="是否启用自动回复",
+    )
+
     min_interval_seconds = models.IntegerField(
         default=8,
         help_text="两次回复最小间隔（秒）",
@@ -118,6 +124,12 @@ class DouyinAccount(RootModel):
         null=True,
         blank=True,
         help_text="最近登录成功时间",
+    )
+
+    last_history_sync_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="最近一次历史会话补扫完成时间",
     )
 
     pending_verification_type = models.CharField(
@@ -212,7 +224,7 @@ class DouyinAccount(RootModel):
 
     def can_reply(self) -> bool:
         """判断账号当前是否处于可自动回复状态"""
-        return self.status == 1
+        return self.status == 1 and self.auto_reply_enabled
 
     def has_pending_verification(self) -> bool:
         """判断账号当前是否处于待人工验证冷却中。"""

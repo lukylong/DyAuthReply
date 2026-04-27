@@ -70,3 +70,32 @@ class DouyinSessionControlOut(Schema):
 
 class DouyinSessionBatchIdsIn(Schema):
     ids: List[str]
+
+
+class DouyinConversationItemOut(Schema):
+    id: str
+    peer_sec_uid: str
+    peer_nickname: Optional[str] = None
+    peer_avatar: Optional[str] = None
+    last_message_at: Optional[datetime] = None
+    last_message_preview: Optional[str] = None
+    unread_count: int = 0
+
+
+class DouyinMessageItemOut(Schema):
+    id: str
+    direction: str
+    content_type: str
+    content: str
+    received_at: Optional[datetime] = None
+    processed: bool = False
+
+
+class DouyinManualReplyIn(Schema):
+    conversation_id: str
+    text: str = Field(..., description="手动回复内容")
+
+
+class DouyinAutoReplyTestIn(Schema):
+    conversation_id: str
+    text: str = Field(..., description="模拟用户输入，用于触发自动回复规则测试")

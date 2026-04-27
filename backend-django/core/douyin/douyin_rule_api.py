@@ -15,6 +15,7 @@ from common.fu_crud import create, delete, retrieve
 from common.fu_pagination import MyPagination
 from core.douyin.douyin_account_model import DouyinAccount
 from core.douyin.douyin_rule_model import DouyinRule
+from core.douyin.douyin_template_model import DouyinTemplate
 from core.douyin.douyin_rule_schema import (
     DouyinRuleBatchDeleteIn,
     DouyinRuleBatchDeleteOut,
@@ -28,6 +29,45 @@ from core.douyin.douyin_rule_schema import (
 
 router = Router()
 _QUICK_RULE_REMARK = "__quick_stranger_auto_reply__"
+
+
+def _normalize_rule_payload(payload: dict) -> dict:
+    normalized = dict(payload)
+    template_id = normalized.pop('template_id', None)
+    if template_id == '':
+        template_id = None
+    normalized['template_id'] = template_id
+    return normalized
+
+
+def _normalize_keywords(keywords: list[str] | None) -> list[str]:
+    return [
+        item.strip()
+        for item in (keywords or [])
+        if isinstance(item, str) and item.strip()
+    ]
+
+
+def _build_quick_enable_rule_payload(data: DouyinRuleQuickEnableIn) -> dict:
+    keywords = _normalize_keywords(data.keywords)
+    match_type = 'contains' if keywords else 'default'
+    return {
+        'account_id': data.account_id,
+        'name': "陌生人自动回复（快捷）" if not keywords else "关键词自动回复（快捷）",
+        'match_type': match_type,
+        'keywords': keywords,
+        'regex_pattern': None,
+        'reply_text': (data.reply_text or '').strip(),
+        'links': [],
+        'send_mode': data.send_mode,
+        'priority': 0,
+        'status': True,
+        'cooldown_seconds': max(0, int(data.cooldown_seconds or 0)),
+        'remark': _QUICK_RULE_REMARK,
+        'template_id': None,
+        'channel': 'dm',
+        'weekday_mask': '1111111',
+    }
 
 
 @router.get("/rule", response=List[DouyinRuleSchemaOut], summary="获取回复规则列表（分页）")
@@ -49,9 +89,11 @@ def get_rule(request, rule_id: str):
 
 @router.post("/rule", response=DouyinRuleSchemaOut, summary="创建回复规则")
 def create_rule(request, data: DouyinRuleSchemaIn):
-    payload = data.dict()
+    payload = _normalize_rule_payload(data.dict())
     if not DouyinAccount.objects.filter(id=payload['account_id']).exists():
         raise HttpError(400, "所属抖音账号不存在")
+    if payload.get('template_id') and not DouyinTemplate.objects.filter(id=payload['template_id']).exists():
+        raise HttpError(400, "引用模板不存在")
     _validate_rule_payload(payload)
     return create(request, payload, DouyinRule)
 
@@ -59,7 +101,9 @@ def create_rule(request, data: DouyinRuleSchemaIn):
 @router.put("/rule/{rule_id}", response=DouyinRuleSchemaOut, summary="更新规则（完全替换）")
 def update_rule(request, rule_id: str, data: DouyinRuleSchemaIn):
     rule = get_object_or_404(DouyinRule, id=rule_id)
-    payload = data.dict()
+    payload = _normalize_rule_payload(data.dict())
+    if payload.get('template_id') and not DouyinTemplate.objects.filter(id=payload['template_id']).exists():
+        raise HttpError(400, "引用模板不存在")
     _validate_rule_payload(payload)
     for attr, value in payload.items():
         setattr(rule, attr, value)
@@ -70,12 +114,14 @@ def update_rule(request, rule_id: str, data: DouyinRuleSchemaIn):
 @router.patch("/rule/{rule_id}", response=DouyinRuleSchemaOut, summary="部分更新规则")
 def patch_rule(request, rule_id: str, data: DouyinRuleSchemaPatch):
     rule = get_object_or_404(DouyinRule, id=rule_id)
-    updates = data.dict(exclude_unset=True)
+    updates = _normalize_rule_payload(data.dict(exclude_unset=True))
     merged = {
         'match_type': updates.get('match_type', rule.match_type),
         'keywords': updates.get('keywords', rule.keywords),
         'regex_pattern': updates.get('regex_pattern', rule.regex_pattern),
     }
+    if updates.get('template_id') and not DouyinTemplate.objects.filter(id=updates['template_id']).exists():
+        raise HttpError(400, "引用模板不存在")
     _validate_rule_payload(merged)
     for attr, value in updates.items():
         setattr(rule, attr, value)
@@ -115,7 +161,7 @@ def quick_enable_rule(request, data: DouyinRuleQuickEnableIn):
     if data.send_mode not in ("merged", "multi_message", "card_fallback"):
         raise HttpError(400, "send_mode 仅支持 merged/multi_message/card_fallback")
 
-    cooldown = max(0, int(data.cooldown_seconds or 0))
+    payload = _build_quick_enable_rule_payload(data)
 
     rule = DouyinRule.objects.filter(
         account_id=data.account_id,
@@ -126,28 +172,15 @@ def quick_enable_rule(request, data: DouyinRuleQuickEnableIn):
     created = False
     if not rule:
         created = True
-        rule = DouyinRule(
-            account_id=data.account_id,
-            name="陌生人自动回复（快捷）",
-            match_type="default",
-            keywords=[],
-            regex_pattern=None,
-            channel="dm",
-            weekday_mask="1111111",
-            priority=0,
-            remark=_QUICK_RULE_REMARK,
-        )
-
-    rule.reply_text = reply_text
-    rule.links = []
-    rule.send_mode = data.send_mode
-    rule.cooldown_seconds = cooldown
-    rule.status = True
+        rule = DouyinRule(**payload)
+    else:
+        for attr, value in payload.items():
+            setattr(rule, attr, value)
     rule.save()
 
     return DouyinRuleQuickEnableOut(
         created=created,
-        message="已开启陌生人消息自动回复",
+        message="已开启自动回复" if not payload['keywords'] else "已开启关键词自动回复",
         rule_id=str(rule.id),
     )
 

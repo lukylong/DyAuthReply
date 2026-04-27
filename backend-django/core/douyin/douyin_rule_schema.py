@@ -5,6 +5,7 @@
 @Desc: Douyin Rule Schema - 抖音回复规则数据验证模式
 """
 import re
+from datetime import time as dtime
 from typing import List, Optional
 
 from ninja import Field, ModelSchema, Schema
@@ -26,10 +27,11 @@ class DouyinRuleFilters(FuFilters):
 class DouyinRuleSchemaIn(ModelSchema):
     """规则输入模式"""
     account_id: str = Field(..., description="所属抖音账号ID")
+    template_id: Optional[str] = Field(None, description="引用模板ID")
 
     class Config:
         model = DouyinRule
-        model_exclude = (*exclude_fields, 'account', 'hit_count')
+        model_exclude = (*exclude_fields, 'account', 'hit_count', 'template')
 
     @field_validator('regex_pattern', check_fields=False)
     @classmethod
@@ -51,7 +53,12 @@ class DouyinRuleSchemaPatch(Schema):
     regex_pattern: Optional[str] = None
     reply_text: Optional[str] = None
     links: Optional[List[str]] = None
+    template_id: Optional[str] = None
     send_mode: Optional[str] = None
+    channel: Optional[str] = None
+    time_window_start: Optional[dtime] = None
+    time_window_end: Optional[dtime] = None
+    weekday_mask: Optional[str] = None
     priority: Optional[int] = None
     status: Optional[bool] = None
     cooldown_seconds: Optional[int] = None
@@ -75,6 +82,8 @@ class DouyinRuleSchemaOut(ModelSchema):
     send_mode_display: Optional[str] = None
     account_id: Optional[str] = None
     account_nickname: Optional[str] = None
+    template_id: Optional[str] = None
+    template_name: Optional[str] = None
 
     class Config:
         model = DouyinRule
@@ -96,6 +105,17 @@ class DouyinRuleSchemaOut(ModelSchema):
     def resolve_account_nickname(obj):
         return obj.account.nickname if obj.account_id else None
 
+    @staticmethod
+    def resolve_template_id(obj):
+        return str(obj.template_id) if obj.template_id else None
+
+    @staticmethod
+    def resolve_template_name(obj):
+        try:
+            return obj.template.name if obj.template_id else None
+        except Exception:
+            return None
+
 
 class DouyinRuleBatchDeleteIn(Schema):
     ids: List[str] = Field(..., description="规则ID列表")
@@ -108,6 +128,7 @@ class DouyinRuleBatchDeleteOut(Schema):
 class DouyinRuleQuickEnableIn(Schema):
     account_id: str = Field(..., description="所属抖音账号ID")
     reply_text: str = Field(..., description="自动回复文案")
+    keywords: Optional[List[str]] = Field(default=None, description="可选关键词列表；填写后创建关键词规则")
     cooldown_seconds: int = Field(300, description="同会话冷却秒数")
     send_mode: str = Field("merged", description="发送模式：merged/multi_message/card_fallback")
 

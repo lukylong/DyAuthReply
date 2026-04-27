@@ -128,11 +128,13 @@ def trigger_login(request, account_id: str):
     if account.status == 3:
         raise HttpError(400, "该账号已禁用，无法登录")
     account.status = 0
+    account.storage_state_path = ''
     account.pending_verification_type = None
     account.pending_verification_at = None
     account.pending_verification_until = None
     account.save(update_fields=[
         'status',
+        'storage_state_path',
         'pending_verification_type',
         'pending_verification_at',
         'pending_verification_until',
@@ -188,4 +190,19 @@ def cancel_login(request, account_id: str):
         msg = f"已请求取消账号 {account.nickname} 的扫码登录流程"
     else:
         msg = f"Redis 不可用，未能取消账号 {account.nickname} 的扫码登录流程"
+    return DouyinAccountActionOut(success=ok, message=msg)
+
+
+@router.post(
+    "/account/{account_id}/focus",
+    response=DouyinAccountActionOut,
+    summary="聚焦抖音账号监管页",
+)
+def focus_account(request, account_id: str):
+    account = get_object_or_404(DouyinAccount, id=account_id)
+    ok = command_publisher.send_focus_account(str(account_id))
+    if ok:
+        msg = f"已请求聚焦账号 {account.nickname} 的监管页"
+    else:
+        msg = f"Redis 不可用，无法立即聚焦账号 {account.nickname} 的监管页"
     return DouyinAccountActionOut(success=ok, message=msg)

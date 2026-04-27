@@ -5,6 +5,7 @@ import type {
 } from '#/api/core/douyin';
 
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { useRouter } from 'vue-router';
 
 import { Page } from '@vben/common-ui';
 
@@ -26,6 +27,7 @@ import {
   ElPagination,
   ElSelect,
   ElSpace,
+  ElSwitch,
   ElTable,
   ElTableColumn,
   ElTag,
@@ -35,12 +37,14 @@ import {
 
 import {
   batchDeleteDouyinAccountApi,
-  cancelDouyinLoginApi,
   createDouyinAccountApi,
   deleteDouyinAccountApi,
+  focusDouyinAccountApi,
   getDouyinAccountListApi,
+  patchDouyinAccountApi,
   triggerDouyinLoginApi,
   triggerDouyinLogoutApi,
+  cancelDouyinLoginApi,
   updateDouyinAccountApi,
 } from '#/api/core/douyin';
 
@@ -52,6 +56,7 @@ const STATUS_OPTIONS = [
   { label: '登录失效', value: 2 },
   { label: '已禁用', value: 3 },
 ];
+const router = useRouter();
 
 const STATUS_TAG_TYPE: Record<number, string> = {
   0: 'info',
@@ -78,11 +83,13 @@ const dialogMode = ref<'create' | 'edit'>('create');
 const currentId = ref<string | null>(null);
 const formRef = ref();
 const form = reactive<DouyinAccountCreateInput>(createEmptyForm());
+const autoReplyLoading = reactive<Record<string, boolean>>({});
 
 function createEmptyForm(): DouyinAccountCreateInput {
   return {
     nickname: '',
     status: 0,
+    auto_reply_enabled: true,
     daily_reply_quota: 200,
     min_interval_seconds: 8,
     max_interval_seconds: 25,
@@ -145,6 +152,7 @@ function openEdit(row: DouyinAccount) {
     sec_uid: row.sec_uid ?? '',
     avatar: row.avatar ?? '',
     status: row.status,
+    auto_reply_enabled: row.auto_reply_enabled,
     daily_reply_quota: row.daily_reply_quota,
     min_interval_seconds: row.min_interval_seconds,
     max_interval_seconds: row.max_interval_seconds,
@@ -223,21 +231,78 @@ async function onBatchDelete() {
   }
 }
 
+async function onToggleAutoReply(row: DouyinAccount, enabled: boolean) {
+  const prev = row.auto_reply_enabled;
+  row.auto_reply_enabled = enabled;
+  autoReplyLoading[row.id] = true;
+  try {
+    await patchDouyinAccountApi(row.id, { auto_reply_enabled: enabled });
+    ElMessage.success(enabled ? '已开启自动回复' : '已关闭自动回复');
+  } catch (error: any) {
+    row.auto_reply_enabled = prev;
+    ElMessage.error(error?.response?.data?.detail || '更新自动回复开关失败');
+  } finally {
+    autoReplyLoading[row.id] = false;
+  }
+}
+
+function openReplyHistory(row: DouyinAccount) {
+  router.push({
+    path: '/douyin/reply-log',
+    query: {
+      account_id: row.id,
+    },
+  });
+}
+
 // ---------------- 扫码登录弹窗 ----------------
 const qrDialogVisible = ref(false);
 const qrImage = ref('');
-const qrHint = ref('正在生成二维码，请稍候…');
-const qrStage = ref<'qr' | 'verification'>('qr');
+const qrHint = ref('正在打开监管页面，请稍候…');
+const qrStage = ref<'supervise' | 'verification'>('supervise');
 const qrAccountName = ref('');
 const qrLoading = ref(false);
 const loginPendingAccountId = ref<string>('');
 let douyinWs: null | WebSocketManager = null;
+let supervisionWindow: null | Window = null;
 const isLoginFlowActive = computed(() => !!loginPendingAccountId.value);
+const supervisionUrl = computed(() => {
+  const url = new URL(window.location.href);
+  url.protocol = 'http:';
+  url.port = '6080';
+  url.pathname = '/vnc.html';
+  url.search = 'autoconnect=1&resize=scale&path=websockify';
+  url.hash = '';
+  return url.toString();
+});
 const qrFootnote = computed(() =>
   qrStage.value === 'verification'
     ? '检测到安全校验，请在浏览器窗口中手动完成验证；完成后保持页面打开等待系统自动放行'
-    : '二维码每 45 秒自动刷新；扫码后保持页面打开等待登录结果',
+    : '系统将打开监管页面并自动连线到 Docker 内浏览器；请在该页面完成扫码和验证码操作',
 );
+
+function openSupervisionPage(accountId?: string) {
+  const targetAccountId = accountId || loginPendingAccountId.value || '';
+  supervisionWindow = window.open(
+    supervisionUrl.value,
+    `douyin-supervision-${targetAccountId || 'pending'}`,
+  );
+  if (targetAccountId) {
+    void focusAccountPage(targetAccountId);
+  }
+}
+
+async function focusAccountPage(accountId: string) {
+  try {
+    await focusDouyinAccountApi(accountId);
+  } catch (error) {
+    console.error('聚焦账号监管页失败', error);
+  }
+}
+
+function openSupervisionPageDirect(row: DouyinAccount) {
+  openSupervisionPage(row.id);
+}
 
 async function ensureWsConnected() {
   if (douyinWs && douyinWs.isConnected) return;
@@ -264,15 +329,10 @@ function handleDouyinEvent(message: any) {
   const payload = message?.data?.payload || message?.data || {};
   switch (eventType) {
     case 'qr_image': {
-      if (qrStage.value === 'verification') {
-        break;
-      }
-      if (payload.image_base64) {
-        qrImage.value = `data:image/png;base64,${payload.image_base64}`;
-        qrHint.value = payload.hint || '请使用抖音 APP 扫码登录';
-        qrStage.value = 'qr';
-        qrLoading.value = false;
-      }
+      qrLoading.value = false;
+      qrImage.value = '';
+      qrHint.value =
+        '监管页中的 Docker 浏览器已打开登录页，请直接在监管页完成扫码，不再在后台弹窗内展示二维码。';
       break;
     }
     case 'verification_required': {
@@ -294,6 +354,8 @@ function handleDouyinEvent(message: any) {
       ElMessage.success(`账号 ${payload.nickname || ''} 登录成功`);
       qrDialogVisible.value = false;
       loginPendingAccountId.value = '';
+      supervisionWindow?.close();
+      supervisionWindow = null;
       loadData();
       break;
     }
@@ -307,6 +369,8 @@ function handleDouyinEvent(message: any) {
         qrHint.value = `登录失败：${reason}`;
       }
       loginPendingAccountId.value = '';
+      supervisionWindow?.close();
+      supervisionWindow = null;
       break;
     }
     case 'login_progress': {
@@ -338,18 +402,24 @@ async function onLogin(row: DouyinAccount) {
   loginPendingAccountId.value = row.id;
   qrAccountName.value = row.nickname;
   qrImage.value = '';
-  qrHint.value = '正在生成二维码，请稍候…';
-  qrStage.value = 'qr';
+  qrHint.value = '正在打开监管页面，请稍候…';
+  qrStage.value = 'supervise';
   qrLoading.value = true;
   qrDialogVisible.value = true;
   try {
+    openSupervisionPage(row.id);
     await ensureWsConnected();
     const res = await triggerDouyinLoginApi(row.id);
     ElMessage.success(res.message || '已下发扫码登录指令');
+    qrLoading.value = false;
+    qrHint.value =
+      '请在新打开的监管页面中操作 Docker 浏览器完成扫码/验证码；本页将实时显示登录状态。';
     loadData();
   } catch (error: any) {
     qrDialogVisible.value = false;
     loginPendingAccountId.value = '';
+    supervisionWindow?.close();
+    supervisionWindow = null;
     ElMessage.error(error?.response?.data?.detail || '登录指令下发失败');
   }
 }
@@ -358,8 +428,10 @@ async function onCloseQrDialog() {
   const accountId = loginPendingAccountId.value;
   qrDialogVisible.value = false;
   qrImage.value = '';
-  qrStage.value = 'qr';
+  qrStage.value = 'supervise';
   loginPendingAccountId.value = '';
+  supervisionWindow?.close();
+  supervisionWindow = null;
   if (accountId) {
     try {
       await cancelDouyinLoginApi(accountId);
@@ -370,6 +442,8 @@ async function onCloseQrDialog() {
 }
 
 onBeforeUnmount(() => {
+  supervisionWindow?.close();
+  supervisionWindow = null;
   if (douyinWs) {
     douyinWs.close();
     douyinWs = null;
@@ -456,9 +530,9 @@ onMounted(loadData);
 
       <!-- 操作区 + 表格 -->
       <div class="rounded bg-white p-3 shadow-sm dark:bg-gray-800">
-        <div class="mb-3 flex items-center justify-between">
-          <ElSpace>
-            <ElButton type="primary" @click="openCreate">新增账号</ElButton>
+      <div class="mb-3 flex items-center justify-between">
+        <ElSpace>
+          <ElButton type="primary" @click="openCreate">新增账号</ElButton>
             <ElButton
               type="danger"
               plain
@@ -469,10 +543,10 @@ onMounted(loadData);
             </ElButton>
           </ElSpace>
           <ElTooltip
-            content="触发扫码登录后，worker 进程（M2 里程碑）将打开有头浏览器窗口完成登录"
+            content="扫码登录走 docker 内 worker；监管页会打开当前账号对应的 Docker 浏览器窗口"
             placement="top"
           >
-            <ElTag type="info">提示：登录/登出真正动作由 douyin worker 进程执行</ElTag>
+            <ElTag type="info">提示：请在对应账号的监管页中完成扫码和验证</ElTag>
           </ElTooltip>
         </div>
 
@@ -491,6 +565,18 @@ onMounted(loadData);
               <ElTag :type="STATUS_TAG_TYPE[row.status] as any">
                 {{ row.status_display }}
               </ElTag>
+            </template>
+          </ElTableColumn>
+          <ElTableColumn label="自动回复" width="110" align="center">
+            <template #default="{ row }">
+              <ElSwitch
+                :model-value="row.auto_reply_enabled"
+                :loading="!!autoReplyLoading[row.id]"
+                inline-prompt
+                active-text="开"
+                inactive-text="关"
+                @change="(value) => onToggleAutoReply(row, Boolean(value))"
+              />
             </template>
           </ElTableColumn>
           <ElTableColumn
@@ -526,8 +612,16 @@ onMounted(loadData);
             min-width="160"
             show-overflow-tooltip
           />
-          <ElTableColumn label="操作" width="280" fixed="right">
+          <ElTableColumn label="操作" width="430" fixed="right">
             <template #default="{ row }">
+              <ElButton
+                link
+                type="info"
+                size="small"
+                @click="openSupervisionPageDirect(row)"
+              >
+                监管页
+              </ElButton>
               <ElButton
                 link
                 type="primary"
@@ -545,6 +639,14 @@ onMounted(loadData);
                 @click="onLogout(row)"
               >
                 登出
+              </ElButton>
+              <ElButton
+                link
+                type="success"
+                size="small"
+                @click="openReplyHistory(row)"
+              >
+                回复历史
               </ElButton>
               <ElButton
                 link
@@ -610,6 +712,9 @@ onMounted(loadData);
               />
             </ElSelect>
           </ElFormItem>
+          <ElFormItem label="自动回复">
+            <ElSwitch v-model="form.auto_reply_enabled" />
+          </ElFormItem>
           <ElFormItem label="日回复上限">
             <ElInputNumber
               v-model="form.daily_reply_quota"
@@ -664,11 +769,11 @@ onMounted(loadData);
         </template>
       </ElDialog>
 
-      <!-- 扫码登录弹窗：订阅 WebSocket 实时显示二维码与登录结果 -->
+      <!-- 监管式扫码登录弹窗：引导用户前往 noVNC 监管页完成登录 -->
       <ElDialog
         v-model="qrDialogVisible"
-        :title="`扫码登录 · ${qrAccountName}`"
-        width="360px"
+        :title="`监管登录 · ${qrAccountName}`"
+        width="420px"
         :close-on-click-modal="false"
         destroy-on-close
         @close="onCloseQrDialog"
@@ -676,18 +781,19 @@ onMounted(loadData);
         <div class="flex flex-col items-center gap-3 py-2">
           <div
             v-loading="qrLoading"
-            class="flex size-56 items-center justify-center rounded border bg-white"
+            class="flex min-h-40 w-full items-center justify-center rounded border bg-white px-4 py-6"
           >
-            <img
-              v-if="qrImage"
-              :src="qrImage"
-              alt="扫码登录二维码"
-              class="size-56 object-contain"
-            />
-            <span v-else class="text-sm text-gray-400">二维码生成中…</span>
-          </div>
-          <div class="text-center text-sm text-gray-500">
-            {{ qrHint }}
+            <div class="space-y-3 text-center">
+              <div class="text-sm text-gray-500">
+                {{ qrHint }}
+              </div>
+              <div class="text-xs text-gray-400 break-all">
+                {{ supervisionUrl }}
+              </div>
+              <ElButton type="primary" @click="() => openSupervisionPage()">
+                打开监管页面
+              </ElButton>
+            </div>
           </div>
           <div class="text-xs text-gray-400">
             {{ qrFootnote }}

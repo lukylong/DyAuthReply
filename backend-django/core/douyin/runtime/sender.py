@@ -23,6 +23,7 @@ import asyncio
 import logging
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from asgiref.sync import sync_to_async
@@ -33,10 +34,54 @@ from core.douyin.runtime.humanize import human_click, human_type, random_sleep
 
 if TYPE_CHECKING:
     from core.douyin.douyin_account_model import DouyinAccount
+    from core.douyin.douyin_conversation_model import DouyinConversation
     from core.douyin.douyin_rule_model import DouyinRule
     from core.douyin.douyin_message_model import DouyinMessage
 
 logger = logging.getLogger(__name__)
+
+
+def _manual_debug_dir(account_id: str) -> Path:
+    root = Path("/app/tmp/douyin-manual-debug") / str(account_id)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+async def dump_manual_reply_debug(
+    page,
+    *,
+    account_id: str,
+    conversation_id: str,
+    phase: str,
+    text: str,
+) -> Path:
+    """
+    保存手动回复调试证据：
+    - 页面截图
+    - 最近消息气泡摘要
+    """
+    ts = timezone.now().strftime("%Y%m%d_%H%M%S")
+    base = _manual_debug_dir(account_id) / f"{conversation_id}_{phase}_{ts}"
+    shot = base.with_suffix(".png")
+    meta = base.with_suffix(".txt")
+    try:
+        await page.screenshot(path=str(shot), full_page=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[sender] 手动回复调试截图失败 account={account_id} phase={phase} err={e}")
+    bubbles = await _read_recent_bubbles(page, limit=8)
+    lines = [
+        f"phase={phase}",
+        f"text={text}",
+        f"url={page.url}",
+        "bubbles:",
+    ]
+    for item in bubbles:
+        lines.append(f"- {item.get('direction')} | {item.get('text')}")
+    try:
+        meta.write_text("\n".join(lines), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[sender] 手动回复调试摘要写入失败 account={account_id} phase={phase} err={e}")
+    return base
 
 
 # -------------------- 模板渲染 --------------------
@@ -87,7 +132,7 @@ def _build_segments(rule: "DouyinRule", peer_nickname: str) -> list[str]:
     if template is not None:
         base = template.content or ''
         links = template.links or []
-        send_mode = rule.send_mode or template.send_mode
+        send_mode = template.send_mode
     else:
         base = rule.reply_text or ''
         links = rule.links or []
@@ -109,6 +154,32 @@ def _build_segments(rule: "DouyinRule", peer_nickname: str) -> list[str]:
         segs.append(text)
     segs.extend(urls)
     return segs
+
+
+@sync_to_async
+def write_manual_out_message(
+    account_id: str,
+    conversation_id: str,
+    text: str,
+) -> str:
+    from core.douyin.douyin_conversation_model import DouyinConversation
+    from core.douyin.douyin_message_model import DouyinMessage
+
+    conv = DouyinConversation.objects.get(id=conversation_id, account_id=account_id)
+    msg = DouyinMessage.objects.create(
+        conversation=conv,
+        external_msg_id=f"manual_out_{timezone.now().timestamp()}",
+        direction='out',
+        content_type='text',
+        content=text,
+        raw_payload={'manual': True},
+        received_at=timezone.now(),
+        processed=True,
+    )
+    conv.last_message_at = timezone.now()
+    conv.last_message_preview = text[:200]
+    conv.save(update_fields=['last_message_at', 'last_message_preview', 'sys_update_datetime'])
+    return str(msg.id)
 
 
 # -------------------- Playwright 发送 --------------------
@@ -134,28 +205,248 @@ async def _locate_send_btn(page):
     return None
 
 
+async def _read_input_text(locator) -> str:
+    try:
+        return await locator.evaluate(
+            """(el) => {
+                if (!el) return '';
+                const value = typeof el.value === 'string' ? el.value : '';
+                const text = typeof el.innerText === 'string' ? el.innerText : '';
+                return value || text || '';
+            }"""
+        )
+    except Exception:
+        return ""
+
+
+async def _is_input_cleared(locator) -> bool:
+    return not _normalize_message_text(await _read_input_text(locator))
+
+
+async def _read_page_body_text(page) -> str:
+    try:
+        return await page.evaluate("() => document.body?.innerText || ''")
+    except Exception:
+        return ""
+
+
+async def _set_editor_text(locator, text: str) -> None:
+    """针对新版 contenteditable 编辑器，直接写入文本并派发 input/change 事件。"""
+    await locator.evaluate(
+        """(el, value) => {
+            const text = String(value || '');
+            const isContentEditable = el.getAttribute('contenteditable') === 'true';
+            if (isContentEditable) {
+                el.focus();
+                el.innerHTML = '';
+                const lines = text.split('\\n');
+                lines.forEach((line, index) => {
+                    if (index > 0) el.appendChild(document.createElement('br'));
+                    el.appendChild(document.createTextNode(line));
+                });
+            } else {
+                el.value = text;
+            }
+            el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text, inputType: 'insertText' }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+        }""",
+        text,
+    )
+
+
 async def _send_one(page, text: str) -> None:
-    """在当前会话输入一条消息并点击发送按钮"""
+    """在当前会话输入一条消息并发送。
+
+    优先模拟真实用户：聚焦输入框 -> 输入文本 -> 按 Enter。
+    若 Enter 失败，再回退到点击发送按钮。
+    """
     inp = await _locate_input(page)
     if inp is None:
         logger.error("[sender] 未找到输入框 selectors 全部落空")
         raise RuntimeError("未找到输入框")
     logger.debug(f"[sender] 输入框定位成功，开始输入 len={len(text)}")
 
-    await human_type(inp, text)
+    try:
+        await inp.click()
+        try:
+            await page.keyboard.press("Control+A")
+            await page.keyboard.press("Backspace")
+        except Exception:
+            pass
+        await human_type(inp, text)
+    except Exception:
+        # 极少数情况下 contenteditable 可能拒绝逐段输入，退回到直接写 DOM。
+        await _set_editor_text(inp, text)
     await random_sleep(0.3, 0.8)
 
-    btn = await _locate_send_btn(page)
-    if btn is not None:
-        logger.debug("[sender] 点击发送按钮")
-        await human_click(btn)
-    else:
-        # 兜底：Enter 发送
-        logger.info("[sender] 未找到发送按钮，使用 Enter 兜底")
+    try:
+        await inp.press("Enter")
+    except Exception:
         try:
             await page.keyboard.press("Enter")
         except Exception:
-            raise RuntimeError("未找到发送按钮且 Enter 发送失败")
+            pass
+
+    await asyncio.sleep(0.5)
+    if await _is_input_cleared(inp):
+        return
+
+    btn = await _locate_send_btn(page)
+    if btn is not None:
+        try:
+            if await btn.is_visible() and await btn.is_enabled():
+                logger.debug("[sender] 点击发送按钮")
+                await human_click(btn)
+                await asyncio.sleep(0.5)
+                if await _is_input_cleared(inp):
+                    return
+        except Exception:
+            pass
+        logger.info("[sender] Enter 发送失败后发送按钮不可见或不可用，跳过点击兜底")
+    else:
+        logger.info("[sender] 未找到发送按钮，且 Enter 发送失败")
+    raise RuntimeError("Enter 发送失败且未找到可用发送按钮")
+
+
+def _normalize_message_text(text: str) -> str:
+    return " ".join((text or "").split())
+
+
+def _split_expected_parts(text: str) -> list[str]:
+    parts = []
+    for part in re.split(r"\n+", text or ""):
+        part = part.strip()
+        if part:
+            parts.append(part)
+    return parts
+
+
+async def confirm_text_present_in_recent_messages(
+    page,
+    text: str,
+    *,
+    links: Optional[list] = None,
+    limit: int = 6,
+) -> bool:
+    """
+    发送后再读一遍最近消息，确认文本已经出现在页面里。
+    这是平台侧成功的更强证据，避免“代码以为点了发送”。
+    """
+    await asyncio.sleep(1.2)
+    bubbles = await _read_recent_bubbles(page, limit=limit)
+    target_parts = _split_expected_parts(text)
+    target_links = []
+    for lk in links or []:
+        if isinstance(lk, dict):
+            url = (lk.get('url') or '').strip()
+        else:
+            url = str(lk).strip()
+        if url:
+            target_links.append(url)
+    for msg in bubbles:
+        if msg.get('direction') != 'out':
+            continue
+        bubble_text = _normalize_message_text(msg.get('text') or '')
+        if target_parts and all(part in bubble_text for part in target_parts):
+            if all(url in bubble_text for url in target_links):
+                return True
+        elif not target_parts and target_links and all(url in bubble_text for url in target_links):
+            return True
+        elif not target_parts and not target_links and bubble_text:
+            return True
+    input_loc = await _locate_input(page)
+    input_cleared = True
+    if input_loc is not None:
+        input_cleared = await _is_input_cleared(input_loc)
+    if input_cleared:
+        body_text = _normalize_message_text(await _read_page_body_text(page))
+        if target_parts and all(part in body_text for part in target_parts):
+            if all(url in body_text for url in target_links):
+                return True
+        elif not target_parts and target_links and all(url in body_text for url in target_links):
+            return True
+        elif not target_parts and not target_links and body_text:
+            return True
+    return await _confirm_text_present_in_conversation_preview(page, _normalize_message_text(text))
+
+
+async def _read_recent_bubbles(page, limit: int = 6) -> list[dict]:
+    results: list[dict] = []
+    for sel in S.IM_MESSAGE_BUBBLES:
+        try:
+            loc = page.locator(sel)
+            count = await loc.count()
+            if count == 0:
+                continue
+            start = max(0, count - limit)
+            for i in range(start, count):
+                bubble = loc.nth(i)
+                cls = (await bubble.get_attribute('class') or '').lower()
+                is_self = any(h in cls for h in S.IM_MESSAGE_SELF_HINT)
+                text: Optional[str] = None
+                for tsel in S.IM_MESSAGE_TEXT:
+                    try:
+                        tl = bubble.locator(tsel).first
+                        if await tl.count():
+                            text = (await tl.inner_text()).strip()
+                            if text:
+                                break
+                    except Exception:
+                        continue
+                if text is None:
+                    try:
+                        text = (await bubble.inner_text()).strip()
+                    except Exception:
+                        text = ''
+                results.append({'direction': 'out' if is_self else 'in', 'text': text})
+            return results
+        except Exception:
+            continue
+    return results
+
+
+async def _confirm_text_present_in_conversation_preview(page, target: str) -> bool:
+    """
+    新版私信页有时发送后不会立刻在右侧消息气泡区稳定渲染，但左侧当前会话预览会先更新为“刚刚 + 文本”。
+    这里把它作为次一级成功证据。
+    """
+    preview_selectors = [
+        "div.item-content-BSDfEh",
+        "div.text-W2RFz4",
+        "div[class*='item-content']",
+    ]
+    time_selectors = [
+        "span.item-header-time-XtnnBd",
+        "span[class*='item-header-time']",
+    ]
+    preview_text = ""
+    for sel in preview_selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count():
+                preview_text = ((await loc.inner_text()) or "").strip()
+                if preview_text:
+                    break
+        except Exception:
+            continue
+
+    preview_time = ""
+    for sel in time_selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count():
+                preview_time = ((await loc.inner_text()) or "").strip()
+                if preview_time:
+                    break
+        except Exception:
+            continue
+
+    if preview_text == target and preview_time in ("刚刚", "刚刚发送"):
+        logger.info(
+            f"[sender] 通过会话预览确认发送成功 preview={preview_text!r} time={preview_time!r}"
+        )
+        return True
+    return False
 
 
 # -------------------- DB 落库 --------------------
@@ -247,6 +538,12 @@ async def send_reply(
                 f"len={len(seg)} preview={preview!r}"
             )
             await _send_one(page, seg)
+            if not await confirm_text_present_in_recent_messages(
+                page,
+                seg,
+                links=getattr(getattr(rule, 'template', None), 'links', None) if getattr(rule, 'template', None) else rule.links,
+            ):
+                raise RuntimeError(f"平台侧未确认发送成功：第 {i+1}/{len(segments)} 段未出现在最近消息列表")
             # 随机间隔 1~3 秒
             if i < len(segments) - 1:
                 import random
@@ -293,4 +590,4 @@ async def send_reply(
             duration_ms=duration,
         )
         logger.info(f"[sender] 失败日志已落库 reply_log={log_id}")
-        return log_id
+        raise RuntimeError(f"发送失败，reply_log={log_id}: {type(e).__name__}: {e}") from e

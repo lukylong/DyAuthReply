@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -112,3 +113,20 @@ def delete_storage_state(account_id: str) -> None:
             logger.info(f"[storage] 登录态已删除: account={account_id}")
         except OSError as e:
             logger.warning(f"[storage] 删除登录态失败: account={account_id} err={e}")
+
+
+def delete_user_data_dir(account_id: str) -> None:
+    """删除账号 Chromium 持久化 profile 目录，彻底清掉本地 cookie / localStorage / SW。"""
+    path = _data_dir() / 'contexts' / str(account_id)
+    if path.exists():
+        try:
+            shutil.rmtree(path)
+            logger.info(f"[storage] 浏览器 profile 已删除: account={account_id} path={path}")
+        except OSError as e:
+            logger.warning(f"[storage] 删除浏览器 profile 失败: account={account_id} err={e}")
+
+
+def delete_account_runtime_state(account_id: str) -> None:
+    """删除账号所有持久化登录痕迹。"""
+    delete_storage_state(account_id)
+    delete_user_data_dir(account_id)

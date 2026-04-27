@@ -4,6 +4,7 @@ import type { PaginatedResponse } from './account';
 
 export type DouyinRuleMatchType = 'contains' | 'default' | 'regex';
 export type DouyinRuleSendMode = 'card_fallback' | 'merged' | 'multi_message';
+export type DouyinRuleChannel = 'all' | 'comment' | 'dm';
 
 /**
  * 抖音回复规则
@@ -19,8 +20,14 @@ export interface DouyinRule {
   regex_pattern?: null | string;
   reply_text: string;
   links: string[];
+  template_id?: null | string;
+  template_name?: null | string;
   send_mode: DouyinRuleSendMode;
   send_mode_display?: string;
+  channel?: DouyinRuleChannel;
+  time_window_start?: null | string;
+  time_window_end?: null | string;
+  weekday_mask?: string;
   priority: number;
   status: boolean;
   cooldown_seconds: number;
@@ -39,7 +46,12 @@ export interface DouyinRuleCreateInput {
   regex_pattern?: null | string;
   reply_text?: string;
   links?: string[];
+  template_id?: null | string;
   send_mode?: DouyinRuleSendMode;
+  channel?: DouyinRuleChannel;
+  time_window_start?: null | string;
+  time_window_end?: null | string;
+  weekday_mask?: string;
   priority?: number;
   status?: boolean;
   cooldown_seconds?: number;
@@ -61,6 +73,7 @@ export interface DouyinRuleListParams {
 export interface DouyinRuleQuickEnableInput {
   account_id: string;
   reply_text: string;
+  keywords?: string[];
   cooldown_seconds?: number;
   send_mode?: DouyinRuleSendMode;
 }

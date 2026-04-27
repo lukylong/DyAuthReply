@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _VERIFICATION_PENDING_MINUTES = 20
+_WEAK_SESSION_HOLD_SECONDS = 90
 
 
 # -------------------- 工具 --------------------
@@ -186,14 +187,18 @@ async def _is_logged_in(page) -> bool:
 
 async def _verify_im_ready(page) -> bool:
     """登录后验活：进入 IM 页面且不是登录门面，才算业务可用。"""
-    try:
-        await page.goto(S.CREATOR_IM, wait_until="domcontentloaded", timeout=20000)
-        await asyncio.sleep(1.5)
-        if await _looks_like_login_gate(page):
-            return False
-        return True
-    except Exception:
-        return False
+    for im_url in getattr(S, "CREATOR_IM_CANDIDATES", [S.CREATOR_IM]):
+        try:
+            await page.goto(im_url, wait_until="domcontentloaded", timeout=20000)
+            await asyncio.sleep(1.5)
+            if await _looks_like_login_gate(page):
+                continue
+            if page.url != im_url:
+                logger.info(f"[login] IM 入口发生重定向 from={im_url} to={page.url}")
+            return True
+        except Exception:
+            continue
+    return False
 
 
 async def _session_cookie_debug_names(context) -> list[str]:
@@ -305,6 +310,7 @@ async def _push_verification_required(
     return "|".join(
         [
             verification["kind"],
+            verification["kind_label"],
             verification["title"],
             verification["text_excerpt"],
             verification["current_url"],
@@ -428,10 +434,12 @@ def _update_account_after_login(account_id: str, profile: dict, storage_path: Op
     acc.status = 1
     acc.last_login_at = timezone.now()
     acc.last_heartbeat = timezone.now()
+    acc.last_history_sync_at = None
     acc.pending_verification_type = None
     acc.pending_verification_at = None
     acc.pending_verification_until = None
     update_fields.extend([
+        'last_history_sync_at',
         'pending_verification_type',
         'pending_verification_at',
         'pending_verification_until',
@@ -658,9 +666,22 @@ async def _scan_qrcode_login_locked(account: "DouyinAccount", *, timeout: int) -
         last_weak_recheck = now_ts
         last_url = page.url
         last_verification_fingerprint: Optional[str] = None
+        manual_verification_active = False
+        manual_verification_kind_label = "人工验证"
+        weak_session_hold_until: Optional[float] = None
         while datetime.utcnow().timestamp() < deadline:
             await asyncio.sleep(1.0)
             now = datetime.utcnow().timestamp()
+            weak_cookie_present = await _has_weak_session_cookie(page.context)
+            if weak_cookie_present:
+                if weak_session_hold_until is None:
+                    weak_session_hold_until = now + _WEAK_SESSION_HOLD_SECONDS
+                    logger.info(
+                        f"[login] 进入弱态人工处理窗口 account={account_id} "
+                        f"hold={_WEAK_SESSION_HOLD_SECONDS}s url={page.url}"
+                    )
+            else:
+                weak_session_hold_until = None
 
             # URL 变化立刻记一条
             if page.url != last_url:
@@ -672,10 +693,30 @@ async def _scan_qrcode_login_locked(account: "DouyinAccount", *, timeout: int) -
                 elapsed = int(now - t_start)
                 remain = int(deadline - now)
                 status_hint = None
-                if hits and not logged_in and await _looks_like_login_gate(page):
+                if manual_verification_active:
+                    verification = await _inspect_verification(page)
+                    if verification is None:
+                        manual_verification_active = False
+                        manual_verification_kind_label = "人工验证"
+                        logger.info(
+                            f"[login] 人工验证页面已退出，恢复自动检测 account={account_id} url={page.url}"
+                        )
+                    else:
+                        manual_verification_kind_label = verification["kind_label"]
+                if manual_verification_active:
+                    status_hint = (
+                        f"检测到{manual_verification_kind_label}，已暂停自动跳转和二维码刷新。"
+                        "请在当前浏览器窗口中完成验证，系统仅保留状态观察。"
+                    )
+                elif hits and await _looks_like_login_gate(page):
                     status_hint = (
                         "已扫码确认，但页面仍停留在登录门面，抖音尚未下发强登录态。"
                         "请先检查手机端是否还有继续确认步骤；若没有，通常是风控未放行。"
+                    )
+                elif weak_session_hold_until and now < weak_session_hold_until:
+                    status_hint = (
+                        "已扫码确认，系统已暂停自动跳转和二维码刷新，"
+                        "请在当前浏览器窗口中完成验证码/安全确认。"
                     )
                 await _push_login_progress(
                     owner_id,
@@ -699,7 +740,12 @@ async def _scan_qrcode_login_locked(account: "DouyinAccount", *, timeout: int) -
 
             # 抖音常见中间态：仅出现 weak cookie，URL 仍停留在根路径
             # 触发一次主动跳转复检，避免“扫码已确认但页面不跳”导致永远超时
-            if now - last_weak_recheck >= 20 and await _has_weak_session_cookie(page.context):
+            if (
+                not manual_verification_active
+                and not (weak_session_hold_until and now < weak_session_hold_until)
+                and now - last_weak_recheck >= 20
+                and weak_cookie_present
+            ):
                 logger.info(
                     f"[login] 检测到弱登录态 cookie，主动跳转复检 account={account_id} "
                     f"url={page.url}"
@@ -729,6 +775,13 @@ async def _scan_qrcode_login_locked(account: "DouyinAccount", *, timeout: int) -
                     and verification_fingerprint != last_verification_fingerprint
                 ):
                     last_verification_fingerprint = verification_fingerprint
+                    manual_verification_active = True
+                    parts = verification_fingerprint.split("|", 4)
+                    if len(parts) >= 2 and parts[1]:
+                        manual_verification_kind_label = parts[1]
+                    logger.info(
+                        f"[login] 进入人工验证冻结模式 account={account_id} kind={manual_verification_kind_label}"
+                    )
 
             # 每 30 秒心跳一次（便于实时观察是否卡死）
             if now - last_heartbeat >= 30:
@@ -737,7 +790,33 @@ async def _scan_qrcode_login_locked(account: "DouyinAccount", *, timeout: int) -
                 hits = await _session_cookie_debug_names(page.context)
                 logged_in = await _is_logged_in(page)
                 status_hint = None
-                if hits and not logged_in and await _looks_like_login_gate(page):
+                if manual_verification_active:
+                    verification = await _inspect_verification(page)
+                    if verification is None:
+                        manual_verification_active = False
+                        manual_verification_kind_label = "人工验证"
+                        logger.info(
+                            f"[login] 人工验证页面已退出，恢复自动检测 account={account_id} url={page.url}"
+                        )
+                    else:
+                        manual_verification_kind_label = verification["kind_label"]
+                        status_hint = (
+                            f"检测到{manual_verification_kind_label}，已暂停自动跳转和二维码刷新。"
+                            "请继续在当前浏览器窗口中完成验证。"
+                        )
+                elif weak_session_hold_until and now < weak_session_hold_until:
+                    remain_hold = int(max(0, weak_session_hold_until - now))
+                    status_hint = (
+                        "已扫码确认，系统已暂停自动跳转和二维码刷新，"
+                        f"保留当前页面供人工处理（约 {remain_hold}s）。"
+                    )
+                if (
+                    not manual_verification_active
+                    and hits
+                    and not logged_in
+                    and not (weak_session_hold_until and now < weak_session_hold_until)
+                    and await _looks_like_login_gate(page)
+                ):
                     status_hint = (
                         "已扫码确认，但页面仍停留在登录门面，抖音尚未下发强登录态。"
                         "请先检查手机端是否还有继续确认步骤；若没有，通常是风控未放行。"
@@ -757,7 +836,12 @@ async def _scan_qrcode_login_locked(account: "DouyinAccount", *, timeout: int) -
                     logged_in=logged_in,
                     status_hint=status_hint,
                 )
-                if not logged_in and hits:
+                if (
+                    not manual_verification_active
+                    and not (weak_session_hold_until and now < weak_session_hold_until)
+                    and not logged_in
+                    and hits
+                ):
                     verification_fingerprint = await _push_verification_required(
                         owner_id,
                         account_id,
@@ -771,10 +855,21 @@ async def _scan_qrcode_login_locked(account: "DouyinAccount", *, timeout: int) -
                         and verification_fingerprint != last_verification_fingerprint
                     ):
                         last_verification_fingerprint = verification_fingerprint
+                        manual_verification_active = True
+                        parts = verification_fingerprint.split("|", 4)
+                        if len(parts) >= 2 and parts[1]:
+                            manual_verification_kind_label = parts[1]
+                        logger.info(
+                            f"[login] 进入人工验证冻结模式 account={account_id} kind={manual_verification_kind_label}"
+                        )
                 last_heartbeat = now
 
             # 每 45 秒重新截取一次二维码（抖音二维码 60 秒过期）
-            if now - last_refresh > 45:
+            if (
+                not manual_verification_active
+                and not (weak_session_hold_until and now < weak_session_hold_until)
+                and now - last_refresh > 45
+            ):
                 logger.info(f"[login] 二维码即将过期，刷新 account={account_id}")
                 new_qr = await _capture_qr_base64(page)
                 if new_qr:

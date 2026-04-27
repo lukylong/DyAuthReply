@@ -6,6 +6,7 @@ import type {
 import type { DouyinReplyLog, DouyinReplyLogStat } from '#/api/core/douyin';
 
 import { computed, onMounted, ref, watch } from 'vue';
+import { useRoute } from 'vue-router';
 
 import { Page } from '@vben/common-ui';
 
@@ -27,10 +28,14 @@ import DetailDrawer from './modules/detail-drawer.vue';
 
 defineOptions({ name: 'DouyinReplyLog' });
 
+const route = useRoute();
 const stat = ref<DouyinReplyLogStat | null>(null);
 const detailDrawerRef = ref<InstanceType<typeof DetailDrawer>>();
 const currentLog = ref<DouyinReplyLog>();
 const currentAccountId = ref<string | undefined>();
+const routeAccountId = computed(() =>
+  typeof route.query.account_id === 'string' ? route.query.account_id : undefined,
+);
 
 const successRate = computed(() => {
   if (!stat.value || !stat.value.total) return 0;
@@ -58,7 +63,7 @@ function onActionClick({ code, row }: OnActionClickParams<DouyinReplyLog>) {
 
 const [Grid, gridApi] = useVbenVxeGrid({
   formOptions: {
-    schema: useSearchFormSchema(),
+    schema: useSearchFormSchema(routeAccountId.value),
     submitOnChange: true,
     collapsed: false,
   },
@@ -90,13 +95,18 @@ const [Grid, gridApi] = useVbenVxeGrid({
   } as VxeTableGridOptions<DouyinReplyLog>,
 });
 
-// 当 account 筛选变化时主动刷新统计（proxy 内部已处理一次，这里兜底）
-watch(currentAccountId, () => {
-  // intentionally empty — statistics already refreshed inside query()
+watch(routeAccountId, async (accountId, prev) => {
+  if (accountId === prev) {
+    return;
+  }
+  await gridApi.formApi.setValues({
+    account_id: accountId,
+  });
+  await gridApi.query();
 });
 
 onMounted(() => {
-  loadStat();
+  loadStat(routeAccountId.value);
 });
 </script>
 

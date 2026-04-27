@@ -20,6 +20,25 @@ export interface DouyinSession {
   is_alive: boolean;
 }
 
+export interface DouyinConversationItem {
+  id: string;
+  peer_sec_uid: string;
+  peer_nickname?: null | string;
+  peer_avatar?: null | string;
+  last_message_at?: null | string;
+  last_message_preview?: null | string;
+  unread_count: number;
+}
+
+export interface DouyinMessageItem {
+  id: string;
+  direction: 'in' | 'out';
+  content_type: string;
+  content: string;
+  received_at?: null | string;
+  processed: boolean;
+}
+
 export interface PaginatedResponse<T> {
   total: number;
   items: T[];
@@ -49,4 +68,38 @@ export async function controlSession(
 
 export async function batchStopSession(ids: string[]) {
   return requestClient.post('/api/core/douyin/session/batch/stop', { ids });
+}
+
+export async function getSessionConversations(sessionId: string) {
+  return requestClient.get<DouyinConversationItem[]>(
+    `/api/core/douyin/session/${sessionId}/conversations`,
+  );
+}
+
+export async function getSessionMessages(sessionId: string, conversationId: string) {
+  return requestClient.get<DouyinMessageItem[]>(
+    `/api/core/douyin/session/${sessionId}/conversation/${conversationId}/messages`,
+  );
+}
+
+export async function sendManualReply(
+  sessionId: string,
+  conversationId: string,
+  text: string,
+) {
+  return requestClient.post<{ message: string; success: boolean }>(
+    `/api/core/douyin/session/${sessionId}/manual-reply`,
+    { conversation_id: conversationId, text },
+  );
+}
+
+export async function triggerAutoReplyTest(
+  sessionId: string,
+  conversationId: string,
+  text: string,
+) {
+  return requestClient.post<{ message: string; success: boolean }>(
+    `/api/core/douyin/session/${sessionId}/auto-reply-test`,
+    { conversation_id: conversationId, text },
+  );
 }

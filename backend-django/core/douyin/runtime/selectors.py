@@ -15,7 +15,11 @@ from __future__ import annotations
 
 # ---------------- 基础 URL ----------------
 CREATOR_HOME = "https://creator.douyin.com/"
-CREATOR_IM = "https://creator.douyin.com/creator-micro/im"
+CREATOR_IM = "https://creator.douyin.com/creator-micro/data/following/chat"
+CREATOR_IM_CANDIDATES = [
+    CREATOR_IM,
+    "https://creator.douyin.com/creator-micro/im",
+]
 CREATOR_LOGIN_URL_HINTS = ("login", "passport")  # URL 里包含这些关键词即视为登录页
 
 # ---------------- 登录相关 ----------------
@@ -31,31 +35,66 @@ LOGIN_SUCCESS_URL_HINTS = (
     "creator.douyin.com/creator-micro/home",
     "creator.douyin.com/creator-micro/content",
     "creator.douyin.com/creator-micro/data-center",
+    "creator.douyin.com/creator-micro/data/following/chat",
     "creator.douyin.com/creator-micro/im",
     "creator.douyin.com/creator-micro/message",
 )
 
 # ---------------- 私信相关 ----------------
+IM_TAB_LABELS = [
+    "全部",
+    "全部消息",
+    "朋友私信",
+    "陌生人",
+    "陌生人消息",
+    "陌生人私信",
+    "已关注",
+    "粉丝",
+    "群消息",
+]
+
+IM_TAB_SELECTORS = [
+    "div[role='tab']",
+    "button[role='tab']",
+    "div[class*='tab']",
+    "button[class*='tab']",
+    "div[class*='segment']",
+]
+
 # 会话列表：每个会话项
 IM_CONVERSATION_ITEMS = [
+    "div.ReactVirtualized__Grid__innerScrollContainer li.semi-list-item",
+    "li.semi-list-item",
+    "div[role='gridcell'] li[role='list-item']",
     "div[class*='conversation-list'] div[class*='conversation-item']",
     "div[class*='session-list'] div[class*='session-item']",
     "li[class*='conversation']",
 ]
 # 单个会话项内：对方昵称
 IM_CONV_NICKNAME = [
+    "span[class*='item-header-name']",
+    "div[class*='item-header-left'] span",
     "div[class*='nickname']",
     "span[class*='nickname']",
+    "div[class*='semi-list-item-body'] span",
     "p[class*='name']",
 ]
 # 单个会话项内：最近一条消息预览
 IM_CONV_LAST_MESSAGE = [
+    "span[class*='stranger-item-content']",
+    "div[class*='item-content']",
+    "div[class*='semi-list-item-body'] div",
+    "span[class*='text-']",
     "div[class*='last-message']",
     "div[class*='message-preview']",
     "p[class*='last']",
 ]
 # 未读角标
 IM_CONV_UNREAD_BADGE = [
+    "span.semi-badge-dot",
+    "span[class*='semi-badge-dot']",
+    "div[class*='semi-badge']",
+    "span[class*='badge-dot']",
     "span[class*='unread']",
     "div[class*='badge']",
 ]
@@ -64,12 +103,14 @@ IM_CONV_UNREAD_BADGE = [
 IM_MESSAGE_BUBBLES = [
     "div[class*='message-item']",
     "div[class*='msg-item']",
+    "div[class*='chat-message']",
     "div[class*='bubble']",
 ]
 # 消息文本内容
 IM_MESSAGE_TEXT = [
     "div[class*='text-content']",
     "span[class*='content']",
+    "div[class*='text'] span",
     "div[class*='msg-text']",
 ]
 # 区分方向：本方（右侧气泡）常带 me/self/send 关键词
@@ -77,11 +118,14 @@ IM_MESSAGE_SELF_HINT = ("me", "self", "send", "own", "right", "sent")
 
 # 当前对话窗口的输入框 + 发送按钮
 IM_INPUT_BOX = [
+    "div.chat-input-nSWBco[contenteditable='true']",
     "div[contenteditable='true']",
     "textarea[placeholder*='请输入']",
     "textarea[placeholder*='输入']",
 ]
 IM_SEND_BUTTON = [
+    "button.chat-btn",
+    "button.chat-btn:not([disabled])",
     "button[class*='send-btn']",
     "div[class*='send-button']",
     "button:has-text('发送')",

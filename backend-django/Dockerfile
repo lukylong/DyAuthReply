@@ -28,11 +28,22 @@ RUN sed -i 's|http://archive.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g; 
     && apt-get install -y --no-install-recommends \
         tzdata \
         netcat-openbsd \
+        build-essential \
+        pkg-config \
+        unixodbc-dev \
+        xvfb \
+        x11vnc \
+        fluxbox \
+        novnc \
+        websockify \
+        fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Python 依赖（利用 buildx 缓存） ----
 COPY requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -U "pip<25" "setuptools<81" "packaging>=24.1" wheel \
+    && \
     pip install -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple -r requirements.txt \
     || pip install -r requirements.txt
 
@@ -46,7 +57,7 @@ RUN mkdir -p /app/logs /var/lib/zq-platform/douyin
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 8000
+EXPOSE 8000 5900 6080
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["web"]

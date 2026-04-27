@@ -34,6 +34,7 @@ class DouyinAccountSchemaIn(ModelSchema):
             'owner',
             'last_heartbeat',
             'last_login_at',
+            'last_history_sync_at',
             'pending_verification_type',
             'pending_verification_at',
             'pending_verification_until',
@@ -59,6 +60,7 @@ class DouyinAccountSchemaPatch(Schema):
     """抖音账号部分更新模式"""
     nickname: Optional[str] = None
     status: Optional[int] = None
+    auto_reply_enabled: Optional[bool] = None
     daily_reply_quota: Optional[int] = None
     min_interval_seconds: Optional[int] = None
     max_interval_seconds: Optional[int] = None

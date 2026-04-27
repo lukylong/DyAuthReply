@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from django.conf import settings
@@ -43,6 +44,32 @@ _DEFAULT_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+
+
+def _clear_stale_chromium_singleton_locks(user_data_dir: Path) -> None:
+    """
+    清理 Chromium 持久化目录中的陈旧单实例锁。
+
+    Docker/容器重启后，profile 目录里经常残留 SingletonLock/Socket/Cookie，
+    导致 launch_persistent_context 直接报 profile in use。
+    """
+    stale_patterns = [
+        "SingletonLock",
+        "SingletonSocket",
+        "SingletonCookie",
+        ".org.chromium.Chromium.*",
+    ]
+    for pattern in stale_patterns:
+        for path in user_data_dir.glob(pattern):
+            try:
+                path.unlink()
+                logger.info(f"[browser] 已清理陈旧 Chromium 锁文件: {path}")
+            except FileNotFoundError:
+                continue
+            except IsADirectoryError:
+                continue
+            except OSError as e:  # noqa: BLE001
+                logger.warning(f"[browser] 清理陈旧 Chromium 锁文件失败 path={path} err={e}")
 
 
 class BrowserManager:
@@ -91,25 +118,36 @@ class BrowserManager:
                 await cls.start()
 
             user_data_dir = get_user_data_dir(str(account.id))
+            _clear_stale_chromium_singleton_locks(user_data_dir)
             headless = getattr(settings, 'DOUYIN_WORKER_HEADLESS', False)
+            browser_channel = getattr(settings, 'DOUYIN_WORKER_BROWSER_CHANNEL', '') or None
+            viewport_width = int(getattr(settings, 'DOUYIN_WORKER_VIEWPORT_WIDTH', 1440))
+            viewport_height = int(getattr(settings, 'DOUYIN_WORKER_VIEWPORT_HEIGHT', 900))
+            locale = getattr(settings, 'DOUYIN_WORKER_LOCALE', 'zh-CN')
+            timezone_id = getattr(settings, 'DOUYIN_WORKER_TIMEZONE', 'Asia/Shanghai')
 
             launch_kwargs: dict = {
                 "headless": headless,
                 "user_agent": account.user_agent or _DEFAULT_UA,
-                "viewport": {"width": 1280, "height": 800},
-                "locale": "zh-CN",
-                "timezone_id": "Asia/Shanghai",
+                "viewport": {"width": viewport_width, "height": viewport_height},
+                "locale": locale,
+                "timezone_id": timezone_id,
                 "args": [
                     "--disable-blink-features=AutomationControlled",
                     "--disable-features=IsolateOrigins,site-per-process",
+                    f"--window-size={viewport_width},{viewport_height}",
+                    "--start-maximized",
                 ],
             }
+            if browser_channel:
+                launch_kwargs["channel"] = browser_channel
             if account.proxy_url:
                 launch_kwargs["proxy"] = {"server": account.proxy_url}
 
             logger.info(
                 f"[browser] 启动账号上下文 account={account.id} headless={headless} "
-                f"proxy={'Y' if account.proxy_url else 'N'}"
+                f"proxy={'Y' if account.proxy_url else 'N'} "
+                f"channel={browser_channel or 'bundled'} viewport={viewport_width}x{viewport_height}"
             )
             assert cls._playwright is not None
             context = await cls._playwright.chromium.launch_persistent_context(
@@ -163,3 +201,37 @@ class BrowserManager:
             return None
         state = await ctx.storage_state()
         return save_storage_state(str(account_id), state)
+
+    @classmethod
+    async def focus_account_page(cls, account: "DouyinAccount", *, target_url: str | None = None) -> Optional[str]:
+        """
+        将指定账号的浏览器页面置前，并导航到目标 URL。
+
+        这用于“监管页”场景，避免用户看到的是上一个账号停留的页面。
+        """
+        ctx = await cls.get_or_create_context(account)
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        if page is None:
+            return None
+
+        if target_url is None:
+            try:
+                from core.douyin.runtime import selectors as S
+                target_url = S.CREATOR_IM if getattr(account, 'status', None) == 1 else S.CREATOR_HOME
+            except Exception:
+                target_url = "https://creator.douyin.com/"
+
+        try:
+            if page.url != target_url:
+                await page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
+                await asyncio.sleep(1.2)
+            await page.bring_to_front()
+            try:
+                await page.evaluate("window.focus()")
+            except Exception:
+                pass
+            logger.info(f"[browser] 已聚焦账号页面 account={account.id} url={page.url}")
+            return page.url
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[browser] 聚焦账号页面失败 account={account.id} err={e}")
+            return None

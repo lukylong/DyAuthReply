@@ -88,6 +88,13 @@ def list_all_template(request):
     return DouyinTemplate.objects.filter(status=True, is_deleted=False).order_by('-sort', '-sys_create_datetime')
 
 
+@router.post("/template/preview", response=DouyinTemplatePreviewOut, summary="模板预览（变量渲染）")
+def preview_template(request, data: DouyinTemplatePreviewIn):
+    tpl = get_object_or_404(DouyinTemplate, id=data.template_id)
+    rendered = _render(tpl.content, data.context)
+    return DouyinTemplatePreviewOut(rendered=rendered, links=tpl.links or [])
+
+
 @router.get("/template/{tpl_id}", response=DouyinTemplateSchemaOut, summary="模板详情")
 def get_template(request, tpl_id: str):
     return get_object_or_404(DouyinTemplate, id=tpl_id)
@@ -138,13 +145,6 @@ def delete_template(request, tpl_id: str):
 def batch_delete_template(request, data: DouyinTemplateBatchDeleteIn):
     count = DouyinTemplate.objects.filter(id__in=data.ids).delete()[0]
     return {"count": count}
-
-
-@router.post("/template/preview", response=DouyinTemplatePreviewOut, summary="模板预览（变量渲染）")
-def preview_template(request, data: DouyinTemplatePreviewIn):
-    tpl = get_object_or_404(DouyinTemplate, id=data.template_id)
-    rendered = _render(tpl.content, data.context)
-    return DouyinTemplatePreviewOut(rendered=rendered, links=tpl.links or [])
 
 
 # ============ utils ============

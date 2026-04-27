@@ -67,6 +67,7 @@ const form = reactive<DouyinTemplateInput & { id?: string }>({
 // 预览
 const previewVisible = ref(false);
 const previewRendered = ref('');
+const previewLinks = ref<DouyinTemplateLink[]>([]);
 const previewCtx = ref('{"nickname":"小明"}');
 
 // 分类对话框
@@ -179,10 +180,12 @@ async function onDelete(row: DouyinTemplate) {
 async function onPreview(row: DouyinTemplate) {
   previewVisible.value = true;
   previewRendered.value = '';
+  previewLinks.value = [];
   try {
     const ctx = JSON.parse(previewCtx.value || '{}');
     const res = await previewTemplate(row.id, ctx);
     previewRendered.value = res.rendered;
+    previewLinks.value = res.links || [];
   } catch {
     ElMessage.error('上下文必须是合法 JSON');
   }
@@ -415,6 +418,16 @@ onMounted(async () => {
       <ElCard shadow="never" header="渲染结果">
         <pre class="preview-box">{{ previewRendered }}</pre>
       </ElCard>
+      <ElCard shadow="never" header="链接预览" class="mt-12">
+        <div v-if="previewLinks.length === 0" class="text-gray-400">未配置链接</div>
+        <div v-else class="link-preview-list">
+          <div v-for="(link, idx) in previewLinks" :key="idx" class="link-preview-item">
+            <div class="link-preview-title">{{ link.title || `链接 ${idx + 1}` }}</div>
+            <div class="link-preview-url">{{ link.url }}</div>
+            <div v-if="link.note" class="link-preview-note">{{ link.note }}</div>
+          </div>
+        </div>
+      </ElCard>
     </ElDialog>
 
     <!-- 新建分类 -->
@@ -480,5 +493,35 @@ onMounted(async () => {
   word-break: break-all;
   font-family: ui-monospace, 'JetBrains Mono', monospace;
   font-size: 13px;
+}
+
+.link-preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.link-preview-item {
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+.link-preview-title {
+  margin-bottom: 4px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.link-preview-url {
+  color: #2563eb;
+  word-break: break-all;
+}
+
+.link-preview-note {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #6b7280;
 }
 </style>

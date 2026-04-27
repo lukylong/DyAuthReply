@@ -23,12 +23,13 @@ export function getResultOptions() {
 /**
  * 搜索表单 Schema
  */
-export function useSearchFormSchema(): VbenFormSchema[] {
+export function useSearchFormSchema(defaultAccountId?: string): VbenFormSchema[] {
   return [
     {
       component: 'ApiSelect',
       fieldName: 'account_id',
       label: '账号',
+      defaultValue: defaultAccountId,
       componentProps: {
         placeholder: '请选择账号',
         clearable: true,

@@ -5,7 +5,7 @@ import type { OnActionClickFn } from '#/adapter/vxe-table';
 import type { DouyinRule } from '#/api/core/douyin';
 
 import { z } from '#/adapter/form';
-import { getSimpleDouyinAccountListApi } from '#/api/core/douyin';
+import { getAllTemplate, getSimpleDouyinAccountListApi } from '#/api/core/douyin';
 
 /**
  * 匹配方式选项
@@ -26,6 +26,26 @@ export function getSendModeOptions() {
     { label: '合并发送', value: 'merged' },
     { label: '多条发送', value: 'multi_message' },
     { label: '卡片兜底', value: 'card_fallback' },
+  ];
+}
+
+export function getChannelOptions() {
+  return [
+    { label: '私信', value: 'dm' },
+    { label: '评论', value: 'comment' },
+    { label: '全部渠道', value: 'all' },
+  ];
+}
+
+export function getWeekdayOptions() {
+  return [
+    { label: '周一', value: '1' },
+    { label: '周二', value: '2' },
+    { label: '周三', value: '3' },
+    { label: '周四', value: '4' },
+    { label: '周五', value: '5' },
+    { label: '周六', value: '6' },
+    { label: '周日', value: '7' },
   ];
 }
 
@@ -130,11 +150,7 @@ export function useRuleFormSchema(): VbenFormSchema[] {
       label: '关键词',
       componentProps: {
         rows: 3,
-        placeholder: '每行一个，或用中/英文逗号分隔',
-      },
-      dependencies: {
-        show: (v: any) => v.match_type === 'contains',
-        triggerFields: ['match_type'],
+        placeholder: '包含关键词模式下生效；每行一个，或用中/英文逗号分隔',
       },
     },
     {
@@ -142,11 +158,7 @@ export function useRuleFormSchema(): VbenFormSchema[] {
       fieldName: 'regex_pattern',
       label: '正则表达式',
       componentProps: {
-        placeholder: '例如 (发货|物流|什么时候)',
-      },
-      dependencies: {
-        show: (v: any) => v.match_type === 'regex',
-        triggerFields: ['match_type'],
+        placeholder: '正则匹配模式下生效，例如 (发货|物流|什么时候)',
       },
     },
     {
@@ -155,7 +167,23 @@ export function useRuleFormSchema(): VbenFormSchema[] {
       label: '回复文案',
       componentProps: {
         rows: 4,
-        placeholder: '支持 {nickname} / {time_greeting} 等变量占位',
+        placeholder: '未引用模板时使用；支持 {{nickname}} / {{time_greeting}} 等变量占位',
+      },
+      dependencies: {
+        show: (v: any) => !v.template_id,
+        triggerFields: ['template_id'],
+      },
+    },
+    {
+      component: 'ApiSelect',
+      fieldName: 'template_id',
+      label: '引用模板',
+      componentProps: {
+        placeholder: '可选：优先使用模板内容',
+        clearable: true,
+        api: getAllTemplate,
+        labelField: 'name',
+        valueField: 'id',
       },
     },
     {
@@ -166,6 +194,10 @@ export function useRuleFormSchema(): VbenFormSchema[] {
         rows: 2,
         placeholder: '每行一个 URL（可选）',
       },
+      dependencies: {
+        show: (v: any) => !v.template_id,
+        triggerFields: ['template_id'],
+      },
     },
     {
       component: 'Select',
@@ -174,6 +206,50 @@ export function useRuleFormSchema(): VbenFormSchema[] {
       defaultValue: 'merged',
       componentProps: {
         options: getSendModeOptions(),
+      },
+      dependencies: {
+        show: (v: any) => !v.template_id,
+        triggerFields: ['template_id'],
+      },
+    },
+    {
+      component: 'Select',
+      fieldName: 'channel',
+      label: '生效渠道',
+      defaultValue: 'dm',
+      componentProps: {
+        options: getChannelOptions(),
+      },
+    },
+    {
+      component: 'CheckboxGroup',
+      fieldName: 'weekday_values',
+      label: '生效星期',
+      defaultValue: ['1', '2', '3', '4', '5', '6', '7'],
+      componentProps: {
+        options: getWeekdayOptions(),
+      },
+    },
+    {
+      component: 'TimePicker',
+      fieldName: 'time_window_start',
+      label: '开始时间',
+      componentProps: {
+        clearable: true,
+        format: 'HH:mm',
+        valueFormat: 'HH:mm:ss',
+        placeholder: '为空表示全天',
+      },
+    },
+    {
+      component: 'TimePicker',
+      fieldName: 'time_window_end',
+      label: '结束时间',
+      componentProps: {
+        clearable: true,
+        format: 'HH:mm',
+        valueFormat: 'HH:mm:ss',
+        placeholder: '为空表示全天',
       },
     },
     {
@@ -251,10 +327,35 @@ export function useRuleTableColumns(
       },
     },
     {
+      field: 'template_name',
+      title: '引用模板',
+      minWidth: 140,
+      formatter: ({ row }) => row.template_name || '-',
+    },
+    {
       field: 'send_mode',
       title: '发送模式',
       width: 110,
       cellRender: { name: 'CellTag', options: getSendModeOptions() },
+    },
+    {
+      field: 'channel',
+      title: '渠道',
+      width: 100,
+      formatter: ({ row }) => {
+        if (row.channel === 'all') return '全部';
+        if (row.channel === 'comment') return '评论';
+        return '私信';
+      },
+    },
+    {
+      field: 'time_window_start',
+      title: '生效时段',
+      width: 160,
+      formatter: ({ row }) => {
+        if (!row.time_window_start || !row.time_window_end) return '全天';
+        return `${row.time_window_start}~${row.time_window_end}`;
+      },
     },
     {
       field: 'priority',

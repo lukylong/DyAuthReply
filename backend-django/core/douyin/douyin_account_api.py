@@ -156,18 +156,24 @@ def trigger_login(request, account_id: str):
 )
 def trigger_logout(request, account_id: str):
     """登出：
-    1. 清理 storage_state 并置为未登录
+    1. 清理 storage_state / sec_uid 并置为未登录
     2. 通知 worker 关闭浏览器上下文并删除加密登录态文件
+
+    注意：必须同时清掉 sec_uid，否则下次重新登录时（即便扫的是别的号），
+    inbox 的"账号身份核对"会因为 DB 里残留的旧 sec_uid 而错误地把新登录视作"漂移"
+    并立即又把账号打下线，形成下线-登录死循环。
     """
     account = get_object_or_404(DouyinAccount, id=account_id)
     account.status = 0
     account.storage_state_path = ''
+    account.sec_uid = ''
     account.pending_verification_type = None
     account.pending_verification_at = None
     account.pending_verification_until = None
     account.save(update_fields=[
         'status',
         'storage_state_path',
+        'sec_uid',
         'pending_verification_type',
         'pending_verification_at',
         'pending_verification_until',
@@ -200,6 +206,14 @@ def cancel_login(request, account_id: str):
 )
 def focus_account(request, account_id: str):
     account = get_object_or_404(DouyinAccount, id=account_id)
+    # 状态守卫：未登录账号不允许聚焦监管页。
+    # 否则会让 worker 用残留 user_data_dir + cookies 拉起一个看似登录的 chromium 窗口，
+    # 表现为"刚登出，点监管页又看到已登录页"。前端看到的是 success=False 提示。
+    if int(account.status or 0) != 1:
+        return DouyinAccountActionOut(
+            success=False,
+            message=f"账号 {account.nickname} 当前未登录，请先扫码登录后再聚焦监管页",
+        )
     ok = command_publisher.send_focus_account(str(account_id))
     if ok:
         msg = f"已请求聚焦账号 {account.nickname} 的监管页"

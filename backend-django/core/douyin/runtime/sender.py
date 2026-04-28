@@ -182,6 +182,49 @@ def write_manual_out_message(
     return str(msg.id)
 
 
+@sync_to_async
+def _record_auto_outbound_message(
+    account_id: str,
+    conversation_id: str,
+    text: str,
+    *,
+    rule_id: Optional[str] = None,
+) -> Optional[str]:
+    """
+    自动回复发送成功后，落一条 direction='out' 的 DouyinMessage 行。
+    用作下一轮 scan_inbox 的"自己刚发过"回声黑名单的真源之一。
+
+    使用 get_or_create 防止极端并发下重复落库。
+    """
+    from core.douyin.douyin_conversation_model import DouyinConversation
+    from core.douyin.douyin_message_model import DouyinMessage
+
+    conv = DouyinConversation.objects.filter(id=conversation_id, account_id=account_id).first()
+    if conv is None:
+        return None
+    now = timezone.now()
+    ext_id = f"auto_out_{int(now.timestamp() * 1000)}"
+    msg, _ = DouyinMessage.objects.get_or_create(
+        conversation=conv,
+        external_msg_id=ext_id,
+        defaults={
+            'direction': 'out',
+            'content_type': 'text',
+            'content': text,
+            'raw_payload': {'auto': True, 'rule_id': rule_id or ''},
+            'received_at': now,
+            'processed': True,
+        },
+    )
+    conv.last_message_at = now
+    conv.last_message_preview = (text or '')[:200]
+    try:
+        conv.save(update_fields=['last_message_at', 'last_message_preview', 'sys_update_datetime'])
+    except Exception:  # noqa: BLE001
+        conv.save(update_fields=['last_message_at', 'last_message_preview'])
+    return str(msg.id)
+
+
 # -------------------- Playwright 发送 --------------------
 async def _locate_input(page):
     for sel in S.IM_INPUT_BOX:
@@ -371,6 +414,16 @@ async def confirm_text_present_in_recent_messages(
 
 
 async def _read_recent_bubbles(page, limit: int = 6) -> list[dict]:
+    """
+    读取最近 limit 条消息气泡及其方向。
+
+    方向判定遵循 `core.douyin.runtime.inbox._classify_bubble_direction` 的规则：
+      1. 类名命中 IM_MESSAGE_OTHER_HINT → 'in'（peer 优先，避免误判为 self）
+      2. 类名命中 IM_MESSAGE_SELF_HINT  → 'out'
+      3. 兜底：沿用旧的"任意 self hint 命中"宽松判定，再按 hint 子集判 in/out
+    confirm_text_present_in_recent_messages 只关心 direction=='out'
+    的气泡是否包含目标文本，所以这里采取"宁可漏报 self，也别把对方误判成 self"。
+    """
     results: list[dict] = []
     for sel in S.IM_MESSAGE_BUBBLES:
         try:
@@ -381,8 +434,22 @@ async def _read_recent_bubbles(page, limit: int = 6) -> list[dict]:
             start = max(0, count - limit)
             for i in range(start, count):
                 bubble = loc.nth(i)
-                cls = (await bubble.get_attribute('class') or '').lower()
-                is_self = any(h in cls for h in S.IM_MESSAGE_SELF_HINT)
+                own_cls = (await bubble.get_attribute('class') or '').lower()
+                # 抖音 PC 创作者中心 is-me-* 标记在外层，selector 选中的是内层，
+                # 这里把 parent 的 class 一起拼进来判定，跟 inbox._classify_bubble_direction 保持一致。
+                try:
+                    parent_cls = (await bubble.evaluate(
+                        "(el) => (el.parentElement && el.parentElement.getAttribute('class')) || ''"
+                    ) or '').lower()
+                except Exception:
+                    parent_cls = ''
+                cls = (own_cls + ' ' + parent_cls).strip()
+                if any(h in cls for h in S.IM_MESSAGE_OTHER_HINT):
+                    direction = 'in'
+                elif any(h in cls for h in S.IM_MESSAGE_SELF_HINT):
+                    direction = 'out'
+                else:
+                    direction = 'unknown'
                 text: Optional[str] = None
                 for tsel in S.IM_MESSAGE_TEXT:
                     try:
@@ -398,7 +465,7 @@ async def _read_recent_bubbles(page, limit: int = 6) -> list[dict]:
                         text = (await bubble.inner_text()).strip()
                     except Exception:
                         text = ''
-                results.append({'direction': 'out' if is_self else 'in', 'text': text})
+                results.append({'direction': direction, 'text': text})
             return results
         except Exception:
             continue
@@ -567,6 +634,21 @@ async def send_reply(
             result='success',
             duration_ms=duration,
         )
+        # 关键：把每段实际发出的内容落成 direction='out' 的 DouyinMessage，
+        # 让下一轮 scan_inbox 的 echo_blacklist 能稳定命中——避免"自己回复自己"。
+        for seg in segments:
+            try:
+                await _record_auto_outbound_message(
+                    account_id=account_id,
+                    conversation_id=conversation_id,
+                    text=seg,
+                    rule_id=str(rule.id),
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    f"[sender] 落 outbound DouyinMessage 失败（不影响发送主流程） "
+                    f"account={account_id} conv={conversation_id} err={e}"
+                )
         logger.info(
             f"[sender] ✔ 发送成功 account={account_id} peer={peer_nickname!r} "
             f"segments={len(segments)} duration_ms={duration} reply_log={log_id}"

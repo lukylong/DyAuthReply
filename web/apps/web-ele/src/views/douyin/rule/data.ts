@@ -118,12 +118,13 @@ export function useRuleFormSchema(): VbenFormSchema[] {
       fieldName: 'account_id',
       label: '所属账号',
       componentProps: {
-        placeholder: '请选择账号',
+        placeholder: '留空表示对所有账号生效（默认规则）',
+        clearable: true,
         api: getSimpleDouyinAccountListApi,
         labelField: 'nickname',
         valueField: 'id',
       },
-      rules: z.string().min(1, '请选择所属账号'),
+      help: '留空表示全局规则，对所有账号生效；指定账号后该规则仅对此账号生效。',
     },
     {
       component: 'Input',
@@ -307,7 +308,11 @@ export function useRuleTableColumns(
     {
       field: 'account_nickname',
       title: '账号',
-      minWidth: 140,
+      minWidth: 160,
+      formatter: ({ row }) => {
+        if (!row.account_id) return '全部账号（默认规则）';
+        return row.account_nickname || '-';
+      },
     },
     {
       field: 'match_type',

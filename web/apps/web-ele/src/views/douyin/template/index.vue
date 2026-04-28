@@ -68,7 +68,6 @@ const form = reactive<DouyinTemplateInput & { id?: string }>({
 const previewVisible = ref(false);
 const previewRendered = ref('');
 const previewLinks = ref<DouyinTemplateLink[]>([]);
-const previewCtx = ref('{"nickname":"小明"}');
 
 // 分类对话框
 const catDialogVisible = ref(false);
@@ -182,7 +181,7 @@ async function onPreview(row: DouyinTemplate) {
   previewRendered.value = '';
   previewLinks.value = [];
   try {
-    const ctx = JSON.parse(previewCtx.value || '{}');
+    const ctx = JSON.parse('{"nickname":"小明"}');
     const res = await previewTemplate(row.id, ctx);
     previewRendered.value = res.rendered;
     previewLinks.value = res.links || [];
@@ -412,9 +411,6 @@ onMounted(async () => {
 
     <!-- 预览对话框 -->
     <ElDialog v-model="previewVisible" title="模板预览" width="520px">
-      <ElFormItem label="变量(JSON)">
-        <ElInput v-model="previewCtx" type="textarea" :rows="3" />
-      </ElFormItem>
       <ElCard shadow="never" header="渲染结果">
         <pre class="preview-box">{{ previewRendered }}</pre>
       </ElCard>

@@ -100,7 +100,10 @@ IM_CONV_UNREAD_BADGE = [
 ]
 
 # 打开会话后：消息列表中的消息气泡
+# 抖音 PC 创作者中心实际 className 形如 'box-item-message-r0L2l6'（CSS Module hash 后缀），
+# 用 [class*=] 子串匹配避开 hash。前面的 selector 命中即返回，老命名保留做兜底。
 IM_MESSAGE_BUBBLES = [
+    "div[class*='box-item-message']",   # 抖音创作者中心 PC 实际命名（2026-04 实测）
     "div[class*='message-item']",
     "div[class*='msg-item']",
     "div[class*='chat-message']",
@@ -108,13 +111,62 @@ IM_MESSAGE_BUBBLES = [
 ]
 # 消息文本内容
 IM_MESSAGE_TEXT = [
+    "div[class*='text-item-message']",  # 抖音创作者中心 PC 实际命名（2026-04 实测）
     "div[class*='text-content']",
     "span[class*='content']",
     "div[class*='text'] span",
     "div[class*='msg-text']",
 ]
-# 区分方向：本方（右侧气泡）常带 me/self/send 关键词
-IM_MESSAGE_SELF_HINT = ("me", "self", "send", "own", "right", "sent")
+# 区分方向：本方（右侧气泡）常带的精准类名关键词。
+# 注意：必须用稳定且不会在“对方消息”类名里出现的子串。
+# - 不能用 'send'，会误命中 'sender-xxx'（对方消息容器）。
+# - 不能用 'right'，'right-icon' / 'right-padding' / 'rightAlign-other' 都会误中。
+# - 不能用 'me'，会误命中 'message-xxx'。
+IM_MESSAGE_SELF_HINT = (
+    "is-me-",           # 抖音创作者中心 PC 实际命名（2026-04 实测，is-me-cb9NAa）
+    "is-master",        # 抖音创作者中心常见
+    "message-master",
+    "ownership-master",
+    "is-self",
+    "is-mine",
+    "outbound",
+    "out-message",
+    "placement-right",
+    "chat-master",
+    "self-message",
+    "own-msg",
+    "msg-self",
+    "msg-own",
+    "msg-mine",
+    "msg-out",
+)
+# 用作"对方消息"的负向匹配 hint（命中其中之一则一定不是 self）。
+# 当 self_hint 与 other_hint 同时命中时，按 other 优先（避免把对方误判成自己）。
+IM_MESSAGE_OTHER_HINT = (
+    "is-other",
+    "ownership-other",
+    "message-other",
+    "is-peer",
+    "inbound",
+    "in-message",
+    "placement-left",
+    "chat-other",
+    "peer-message",
+    "msg-other",
+    "msg-peer",
+    "msg-in",
+    "received-from",
+    "from-other",
+    "is-friend",
+)
+# 在 bubble 内提取“发送者主页链接”的候选选择器，进而拿到 sec_user_id 与本账号比对。
+IM_MESSAGE_AUTHOR_LINK = [
+    "a[href*='user/']",
+    "a[href*='sec_uid=']",
+    "a[href*='/user/MS4w']",
+    "div[class*='avatar'] a",
+    "div[class*='author'] a",
+]
 
 # 当前对话窗口的输入框 + 发送按钮
 IM_INPUT_BOX = [

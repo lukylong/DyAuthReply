@@ -50,6 +50,22 @@ x-backend-env: &backend-env
   DOUYIN_WORKER_VIEWPORT_HEIGHT: ${DOUYIN_WORKER_VIEWPORT_HEIGHT:-900}
   DOUYIN_WORKER_LOCALE: ${DOUYIN_WORKER_LOCALE:-zh-CN}
   DOUYIN_WORKER_TIMEZONE: ${DOUYIN_WORKER_TIMEZONE:-Asia/Shanghai}
+  # IM 协议旁路抓包（改造前调研用，默认关闭）
+  DOUYIN_SNIFFER_ENABLED: ${DOUYIN_SNIFFER_ENABLED:-false}
+  DOUYIN_SNIFFER_DIR: ${DOUYIN_SNIFFER_DIR:-}
+  DOUYIN_SNIFFER_MAX_BODY: ${DOUYIN_SNIFFER_MAX_BODY:-32768}
+  DOUYIN_SNIFFER_URL_KEYWORDS: ${DOUYIN_SNIFFER_URL_KEYWORDS:-}
+  # Phase 2 transport：true 时启用 WS 入向消息快路径（默认关闭，灰度开启）
+  DOUYIN_TRANSPORT_WS_INBOUND: ${DOUYIN_TRANSPORT_WS_INBOUND:-false}
+  # Phase 3 transport：'browser' (默认) / 'http_protocol' (浏览器仅签名，业务流量走 HTTP)
+  DOUYIN_TRANSPORT_BACKEND: ${DOUYIN_TRANSPORT_BACKEND:-browser}
+  # Verb 级灰度开关（仅当 DOUYIN_TRANSPORT_BACKEND=http_protocol 时生效）
+  # 任一开关失败时自动 fallback 到 BrowserTransport，灰度安全
+  DOUYIN_HTTP_PROTOCOL_SEND_TEXT: ${DOUYIN_HTTP_PROTOCOL_SEND_TEXT:-false}
+  DOUYIN_HTTP_PROTOCOL_SEND_REPLY: ${DOUYIN_HTTP_PROTOCOL_SEND_REPLY:-false}
+  DOUYIN_HTTP_PROTOCOL_SCAN_INBOX: ${DOUYIN_HTTP_PROTOCOL_SCAN_INBOX:-false}
+  # Phase 3 dual-run：影子编码 + 真路径真发；零真发风险，配合 sniffer 做协议对账
+  DOUYIN_TRANSPORT_DUAL_RUN: ${DOUYIN_TRANSPORT_DUAL_RUN:-false}
 
 services:
   # ---------------------------------------------------------------------------

@@ -25,8 +25,11 @@ class DouyinRuleFilters(FuFilters):
 
 
 class DouyinRuleSchemaIn(ModelSchema):
-    """规则输入模式"""
-    account_id: str = Field(..., description="所属抖音账号ID")
+    """规则输入模式
+
+    account_id 可为空：表示全局规则（对所有账号生效）。
+    """
+    account_id: Optional[str] = Field(None, description="所属抖音账号ID；为空表示全局规则，对所有账号生效")
     template_id: Optional[str] = Field(None, description="引用模板ID")
 
     class Config:
@@ -103,7 +106,12 @@ class DouyinRuleSchemaOut(ModelSchema):
 
     @staticmethod
     def resolve_account_nickname(obj):
-        return obj.account.nickname if obj.account_id else None
+        if not obj.account_id:
+            return "全部账号（默认规则）"
+        try:
+            return obj.account.nickname
+        except Exception:
+            return None
 
     @staticmethod
     def resolve_template_id(obj):

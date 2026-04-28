@@ -91,8 +91,10 @@ async def human_click(locator) -> None:
         except Exception as e:  # noqa: BLE001
             last_error = e
             logger.debug(f"[humanize] click failed kwargs={kwargs}: {e}")
+    # JS 兜底点击：必须显式指定 timeout，否则 Locator.evaluate 默认 30s，
+    # 当 item 的 DOM 已 detach（会话列表刷新/虚拟滚动重渲染）时，会卡满 30s 才抛错。
     try:
-        await locator.evaluate("(el) => el.click()")
+        await locator.evaluate("(el) => el.click()", timeout=5000)
         return
     except Exception as e:  # noqa: BLE001
         last_error = e

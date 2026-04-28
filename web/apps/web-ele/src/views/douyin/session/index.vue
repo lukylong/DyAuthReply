@@ -323,11 +323,28 @@ onUnmounted(() => {
       size="900px"
     >
       <div class="manual-layout">
-        <ElCard class="manual-conv" shadow="never" header="会话列表">
+        <ElCard
+          class="manual-conv"
+          shadow="never"
+          header="会话列表"
+          :body-style="{
+            padding: 0,
+            flex: 1,
+            minHeight: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+          }"
+        >
+          <div class="manual-conv-meta">
+            共 <b>{{ conversations.length }}</b> 个会话
+          </div>
           <ElTable
             :data="conversations"
             v-loading="manualLoading"
+            height="100%"
             highlight-current-row
+            class="manual-conv-table"
             @row-click="(row) => loadConversationMessages(row.id)"
           >
             <ElTableColumn prop="peer_nickname" label="对方" min-width="120">
@@ -340,7 +357,17 @@ onUnmounted(() => {
           </ElTable>
         </ElCard>
 
-        <ElCard class="manual-chat" shadow="never" header="消息与发送">
+        <ElCard
+          class="manual-chat"
+          shadow="never"
+          header="消息与发送"
+          :body-style="{
+            flex: 1,
+            minHeight: 0,
+            display: 'flex',
+            flexDirection: 'column',
+          }"
+        >
           <div class="manual-chat-header">
             <span>当前会话：{{ activeConversation?.peer_nickname || activeConversation?.peer_sec_uid || '未选择' }}</span>
             <ElButton
@@ -433,18 +460,43 @@ onUnmounted(() => {
 .manual-layout {
   display: flex;
   gap: 16px;
-  height: calc(100vh - 180px);
+  height: 100%;
+  min-height: 0;
 }
 
 .manual-conv {
   width: 340px;
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .manual-chat {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-height: 0;
+}
+
+.manual-conv :deep(.el-card),
+.manual-chat :deep(.el-card) {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.manual-conv-meta {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #6b7280;
+  background: #f9fafb;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.manual-conv-table {
+  flex: 1;
+  min-height: 0;
 }
 
 .manual-chat-header {
@@ -452,12 +504,14 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 12px;
+  flex-shrink: 0;
 }
 
 .manual-messages {
   flex: 1;
   overflow: auto;
   padding: 8px 0;
+  min-height: 0;
 }
 
 .manual-message {
@@ -490,12 +544,14 @@ onUnmounted(() => {
 
 .manual-editor {
   margin-top: 12px;
+  flex-shrink: 0;
 }
 
 .auto-reply-test {
   margin-top: 18px;
   padding-top: 12px;
   border-top: 1px dashed #d1d5db;
+  flex-shrink: 0;
 }
 
 .manual-editor-actions {

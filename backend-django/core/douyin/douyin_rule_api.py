@@ -37,6 +37,10 @@ def _normalize_rule_payload(payload: dict) -> dict:
     if template_id == '':
         template_id = None
     normalized['template_id'] = template_id
+    account_id = normalized.get('account_id')
+    if account_id == '':
+        account_id = None
+    normalized['account_id'] = account_id
     return normalized
 
 
@@ -90,7 +94,7 @@ def get_rule(request, rule_id: str):
 @router.post("/rule", response=DouyinRuleSchemaOut, summary="创建回复规则")
 def create_rule(request, data: DouyinRuleSchemaIn):
     payload = _normalize_rule_payload(data.dict())
-    if not DouyinAccount.objects.filter(id=payload['account_id']).exists():
+    if payload.get('account_id') and not DouyinAccount.objects.filter(id=payload['account_id']).exists():
         raise HttpError(400, "所属抖音账号不存在")
     if payload.get('template_id') and not DouyinTemplate.objects.filter(id=payload['template_id']).exists():
         raise HttpError(400, "引用模板不存在")
@@ -102,6 +106,8 @@ def create_rule(request, data: DouyinRuleSchemaIn):
 def update_rule(request, rule_id: str, data: DouyinRuleSchemaIn):
     rule = get_object_or_404(DouyinRule, id=rule_id)
     payload = _normalize_rule_payload(data.dict())
+    if payload.get('account_id') and not DouyinAccount.objects.filter(id=payload['account_id']).exists():
+        raise HttpError(400, "所属抖音账号不存在")
     if payload.get('template_id') and not DouyinTemplate.objects.filter(id=payload['template_id']).exists():
         raise HttpError(400, "引用模板不存在")
     _validate_rule_payload(payload)

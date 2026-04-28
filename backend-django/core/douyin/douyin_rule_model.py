@@ -40,8 +40,10 @@ class DouyinRule(RootModel):
         to='core.DouyinAccount',
         on_delete=models.CASCADE,
         db_constraint=False,
+        null=True,
+        blank=True,
         related_name='rules',
-        help_text="规则所属的抖音账号",
+        help_text="规则所属的抖音账号；为空表示全局规则，对所有账号生效",
         db_index=True,
     )
 

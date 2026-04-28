@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Optional
 
 from django.conf import settings
 
+from core.douyin.runtime.sniffer import SnifferManager, is_enabled as is_sniffer_enabled
 from core.douyin.runtime.storage import (
     get_user_data_dir,
     load_storage_state,
@@ -92,6 +93,10 @@ class BrowserManager:
     @classmethod
     async def stop(cls) -> None:
         """优雅关闭所有上下文与 Playwright"""
+        try:
+            await SnifferManager.detach_all()
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[browser] detach_all 异常: {e}")
         for acc_id in list(cls._contexts.keys()):
             await cls.close_context(acc_id)
         if cls._playwright is not None:
@@ -172,11 +177,22 @@ class BrowserManager:
             """)
 
             cls._contexts[str(account.id)] = context
+
+            if is_sniffer_enabled():
+                try:
+                    await SnifferManager.attach(str(account.id), context)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[browser] 挂载 sniffer 失败 account={account.id} err={e}")
+
             return context
 
     @classmethod
     async def close_context(cls, account_id: str) -> None:
         """关闭指定账号的上下文"""
+        try:
+            await SnifferManager.detach(str(account_id))
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[browser] 卸载 sniffer 异常 account={account_id} err={e}")
         ctx = cls._contexts.pop(str(account_id), None)
         if ctx is not None:
             try:

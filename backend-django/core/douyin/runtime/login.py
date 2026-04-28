@@ -664,6 +664,7 @@ async def _scan_qrcode_login_locked(account: "DouyinAccount", *, timeout: int) -
         last_refresh = now_ts      # 刚推送过二维码，45s 后再刷新
         last_heartbeat = now_ts    # 30s 后打第一条心跳
         last_weak_recheck = now_ts
+        last_strong_recheck = now_ts
         last_url = page.url
         last_verification_fingerprint: Optional[str] = None
         manual_verification_active = False
@@ -673,6 +674,7 @@ async def _scan_qrcode_login_locked(account: "DouyinAccount", *, timeout: int) -
             await asyncio.sleep(1.0)
             now = datetime.utcnow().timestamp()
             weak_cookie_present = await _has_weak_session_cookie(page.context)
+            strong_cookie_present = await _has_session_cookie(page.context)
             if weak_cookie_present:
                 if weak_session_hold_until is None:
                     weak_session_hold_until = now + _WEAK_SESSION_HOLD_SECONDS
@@ -737,6 +739,36 @@ async def _scan_qrcode_login_locked(account: "DouyinAccount", *, timeout: int) -
                     f"url={page.url} elapsed={elapsed}s"
                 )
                 break
+
+            # 强 session cookie 已下发但页面（被别的 tab 顶到后台后）没自动跳转的情况：
+            # 主动 goto 一次创作者首页让 page.url 进入业务页，让 _is_logged_in 能判 True。
+            if (
+                not manual_verification_active
+                and strong_cookie_present
+                and not _is_login_success(page.url)
+                and now - last_strong_recheck >= 5
+            ):
+                logger.info(
+                    f"[login] 检测到强登录 cookie 但 URL 仍在 {page.url!r}，主动跳转 home 验活 "
+                    f"account={account_id}"
+                )
+                try:
+                    await page.goto(
+                        "https://creator.douyin.com/creator-micro/home",
+                        wait_until="domcontentloaded",
+                        timeout=20000,
+                    )
+                    await asyncio.sleep(1.2)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[login] 强态主动跳转失败 account={account_id} err={e}")
+                last_strong_recheck = now
+                # 如果跳转后已经判得到登录态，下个 sleep 周期顶部就会 break
+                if await _is_logged_in(page):
+                    logger.info(
+                        f"[login] ✔ 强登录 cookie + home 业务页验活通过 "
+                        f"account={account_id} url={page.url}"
+                    )
+                    break
 
             # 抖音常见中间态：仅出现 weak cookie，URL 仍停留在根路径
             # 触发一次主动跳转复检，避免“扫码已确认但页面不跳”导致永远超时

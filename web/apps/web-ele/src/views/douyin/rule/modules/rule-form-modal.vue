@@ -108,7 +108,7 @@ async function ensureOptionsLoaded() {
 
 function fillForm(row: DouyinRule) {
   Object.assign(form, {
-    account_id: row.account_id,
+    account_id: row.account_id ?? '',
     name: row.name,
     match_type: row.match_type,
     keywords_text: (row.keywords || []).join('\n'),
@@ -126,7 +126,7 @@ function fillForm(row: DouyinRule) {
 
 function buildPayload(): DouyinRuleCreateInput {
   return {
-    account_id: form.account_id,
+    account_id: form.account_id ? form.account_id : null,
     name: form.name,
     match_type: form.match_type,
     keywords: form.match_type === 'contains' ? splitKeywords(form.keywords_text) : [],
@@ -151,10 +151,6 @@ function buildPayload(): DouyinRuleCreateInput {
 
 async function onSubmit() {
   await formRef.value?.validate();
-  if (!form.account_id) {
-    ElMessage.warning('请选择所属账号');
-    return;
-  }
   if (!form.name) {
     ElMessage.warning('请输入规则名称');
     return;
@@ -209,8 +205,19 @@ defineExpose({ open });
     @confirm="onSubmit"
   >
     <ElForm ref="formRef" :model="form" label-width="100px" class="mx-4">
-      <ElFormItem label="所属账号" required>
-        <ElSelect v-model="form.account_id" placeholder="请选择账号" filterable>
+      <ElFormItem label="所属账号">
+        <ElSelect
+          v-model="form.account_id"
+          placeholder="留空表示对所有账号生效（默认规则）"
+          filterable
+          clearable
+        >
+          <ElOption label="全部账号（默认规则）" value="">
+            <span style="color: #67c23a; font-weight: 500">全部账号（默认规则）</span>
+            <span style="margin-left: 8px; color: #909399; font-size: 12px">
+              对所有账号生效
+            </span>
+          </ElOption>
           <ElOption
             v-for="item in accounts"
             :key="item.id"
@@ -218,6 +225,9 @@ defineExpose({ open });
             :value="item.id"
           />
         </ElSelect>
+        <div class="form-help">
+          留空表示<b>全局规则</b>，对所有账号生效；指定账号后该规则仅对此账号生效，且优先于全局规则。
+        </div>
       </ElFormItem>
 
       <ElFormItem label="规则名称" required>
@@ -354,5 +364,12 @@ defineExpose({ open });
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.form-help {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #909399;
 }
 </style>

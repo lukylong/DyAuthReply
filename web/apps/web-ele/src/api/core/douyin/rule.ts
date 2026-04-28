@@ -8,11 +8,14 @@ export type DouyinRuleChannel = 'all' | 'comment' | 'dm';
 
 /**
  * 抖音回复规则
+ *
+ * 注意：account_id 可为 null —— null 表示全局规则，对所有账号生效（兜底/默认规则）。
+ * 后端在 account_id 为空时会把 account_nickname 返回为 "全部账号（默认规则）"。
  */
 export interface DouyinRule {
   id: string;
-  account_id: string;
-  account_nickname?: string;
+  account_id: null | string;
+  account_nickname?: null | string;
   name: string;
   match_type: DouyinRuleMatchType;
   match_type_display?: string;
@@ -39,7 +42,8 @@ export interface DouyinRule {
 }
 
 export interface DouyinRuleCreateInput {
-  account_id: string;
+  /** 留空（null）表示全局规则，对所有账号生效 */
+  account_id: null | string;
   name: string;
   match_type?: DouyinRuleMatchType;
   keywords?: string[];

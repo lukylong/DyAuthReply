@@ -45,6 +45,16 @@ def _build_outbound_im_frame() -> bytes:
     return _enc_field(1, 2, "send_message_request conversation text_content payload")
 
 
+def _build_inbound_frame_with_conversation_json() -> bytes:
+    payload = (
+        '{"command_type":6,'
+        '"conversation_id":"0:1:80549827440:3061476426516824",'
+        '"sec_uid":"MS4wLjABAAAAabcdefgHIJKLMNopqrstuvWXyz1234567890ABCDEFGH",'
+        '"text":"1"}'
+    )
+    return _enc_field(1, 2, payload) + _enc_field(2, 0, 1_700_000_000_123)
+
+
 class _StubInner(AccountTransport):
     """最小 inner transport，只有一个 scan_inbox 计数器。"""
     name = "stub"
@@ -53,6 +63,14 @@ class _StubInner(AccountTransport):
         self.scan_calls = 0
         self.send_calls = 0
         self.send_text_calls = 0
+        self.start_calls = 0
+        self.stop_calls = 0
+
+    async def start(self, account):
+        self.start_calls += 1
+
+    async def stop(self, account):
+        self.stop_calls += 1
 
     async def scan_inbox(self, account, **kwargs):
         self.scan_calls += 1
@@ -103,6 +121,23 @@ class WsInboundDecoratorTests(unittest.IsolatedAsyncioTestCase):
         deco._handle_frame(_build_outbound_im_frame(), url="wss://frontier")
         evt = await deco.wait_for_inbound_signal(timeout=0.05)
         self.assertIsNone(evt)
+
+    async def test_inbound_frame_prefers_conversation_id_hint(self):
+        inner = _StubInner()
+        deco = WsInboundDecorator(inner)
+        deco._account_id = "acc-uuid"
+        deco._loop = asyncio.get_running_loop()
+
+        async def waiter():
+            return await deco.wait_for_inbound_signal(timeout=2.0)
+
+        wait_task = asyncio.create_task(waiter())
+        await asyncio.sleep(0.01)
+        deco._handle_frame(_build_inbound_frame_with_conversation_json(), url="wss://frontier")
+        evt = await wait_task
+
+        self.assertIsNotNone(evt)
+        self.assertEqual(evt.conversation_hint, "0:1:80549827440:3061476426516824")
 
     async def test_debounce_collapses_burst_into_one_event(self):
         inner = _StubInner()
@@ -195,6 +230,57 @@ class WsInboundDecoratorAttachTests(unittest.IsolatedAsyncioTestCase):
 
         # 仍能正常 stop
         await deco.stop(_FakeAccount())
+
+    async def test_start_drives_inner_start(self):
+        """关键回归：装饰器的 start() 必须触发 inner.start()，否则 HttpProtocolTransport 的 SignProvider 永远不会启动"""
+        from core.douyin.runtime.transport import ws_decorator as wsd
+
+        inner = _StubInner()
+        deco = wsd.WsInboundDecorator(inner)
+
+        # 让 BrowserManager 抛错，确保 inner.start 在 BrowserManager 调用之前执行
+        async def _raise(*_a, **_kw):
+            raise RuntimeError("ctx unavailable")
+
+        original = wsd.BrowserManager.get_or_create_context
+        wsd.BrowserManager.get_or_create_context = AsyncMock(side_effect=_raise)
+        try:
+            await deco.start(_FakeAccount())
+        finally:
+            wsd.BrowserManager.get_or_create_context = original
+
+        self.assertEqual(inner.start_calls, 1)
+
+    async def test_stop_drives_inner_stop(self):
+        """对称：stop() 也要把 inner 关掉，让 SignProvider page / fallback BrowserContext 释放"""
+        inner = _StubInner()
+        deco = WsInboundDecorator(inner)
+        deco._account_id = "acc"
+        deco._loop = asyncio.get_running_loop()
+
+        await deco.stop(_FakeAccount())
+        self.assertEqual(inner.stop_calls, 1)
+
+    async def test_start_continues_when_inner_start_raises(self):
+        """inner.start 抛错时，装饰器仍要把 ws 监听挂上去（降级，不能让一个失败拖垮快路径）"""
+        from core.douyin.runtime.transport import ws_decorator as wsd
+
+        inner = _StubInner()
+
+        async def _boom(_account):
+            raise RuntimeError("signer down")
+        inner.start = _boom  # type: ignore[assignment]
+
+        deco = wsd.WsInboundDecorator(inner)
+        # BrowserManager 也让它走异常分支，避免真去 launch chromium
+        async def _no_ctx(*_a, **_kw):
+            raise RuntimeError("no ctx in test")
+        original = wsd.BrowserManager.get_or_create_context
+        wsd.BrowserManager.get_or_create_context = AsyncMock(side_effect=_no_ctx)
+        try:
+            await deco.start(_FakeAccount())  # 不应抛
+        finally:
+            wsd.BrowserManager.get_or_create_context = original
 
 
 if __name__ == "__main__":

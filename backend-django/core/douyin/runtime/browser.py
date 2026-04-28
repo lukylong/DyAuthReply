@@ -46,6 +46,8 @@ _DEFAULT_UA = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+_BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
+
 
 def _clear_stale_chromium_singleton_locks(user_data_dir: Path) -> None:
     """
@@ -71,6 +73,31 @@ def _clear_stale_chromium_singleton_locks(user_data_dir: Path) -> None:
                 continue
             except OSError as e:  # noqa: BLE001
                 logger.warning(f"[browser] 清理陈旧 Chromium 锁文件失败 path={path} err={e}")
+
+
+async def _attach_resource_saver(context: "BrowserContext", account_id: str) -> None:
+    if not bool(getattr(settings, "DOUYIN_WORKER_BLOCK_HEAVY_RESOURCES", True)):
+        return
+
+    async def _route_handler(route):  # type: ignore[no-untyped-def]
+        request = route.request
+        try:
+            rtype = (request.resource_type or "").lower()
+        except Exception:
+            rtype = ""
+        if rtype in _BLOCKED_RESOURCE_TYPES:
+            await route.abort()
+            return
+        await route.continue_()
+
+    try:
+        await context.route("**/*", _route_handler)
+        logger.info(
+            f"[browser] 已启用资源瘦身 account={account_id} "
+            f"blocked={sorted(_BLOCKED_RESOURCE_TYPES)}"
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[browser] 启用资源瘦身失败 account={account_id} err={e}")
 
 
 class BrowserManager:
@@ -128,8 +155,23 @@ class BrowserManager:
             browser_channel = getattr(settings, 'DOUYIN_WORKER_BROWSER_CHANNEL', '') or None
             viewport_width = int(getattr(settings, 'DOUYIN_WORKER_VIEWPORT_WIDTH', 1440))
             viewport_height = int(getattr(settings, 'DOUYIN_WORKER_VIEWPORT_HEIGHT', 900))
+            disable_gpu = bool(getattr(settings, 'DOUYIN_WORKER_DISABLE_GPU', True))
+            renderer_process_limit = int(
+                getattr(settings, 'DOUYIN_WORKER_RENDERER_PROCESS_LIMIT', 2) or 0
+            )
             locale = getattr(settings, 'DOUYIN_WORKER_LOCALE', 'zh-CN')
             timezone_id = getattr(settings, 'DOUYIN_WORKER_TIMEZONE', 'Asia/Shanghai')
+
+            launch_args = [
+                "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process",
+                f"--window-size={viewport_width},{viewport_height}",
+                "--start-maximized",
+            ]
+            if disable_gpu:
+                launch_args.append("--disable-gpu")
+            if renderer_process_limit > 0:
+                launch_args.append(f"--renderer-process-limit={renderer_process_limit}")
 
             launch_kwargs: dict = {
                 "headless": headless,
@@ -137,12 +179,7 @@ class BrowserManager:
                 "viewport": {"width": viewport_width, "height": viewport_height},
                 "locale": locale,
                 "timezone_id": timezone_id,
-                "args": [
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-features=IsolateOrigins,site-per-process",
-                    f"--window-size={viewport_width},{viewport_height}",
-                    "--start-maximized",
-                ],
+                "args": launch_args,
             }
             if browser_channel:
                 launch_kwargs["channel"] = browser_channel
@@ -152,13 +189,31 @@ class BrowserManager:
             logger.info(
                 f"[browser] 启动账号上下文 account={account.id} headless={headless} "
                 f"proxy={'Y' if account.proxy_url else 'N'} "
-                f"channel={browser_channel or 'bundled'} viewport={viewport_width}x{viewport_height}"
+                f"channel={browser_channel or 'bundled'} viewport={viewport_width}x{viewport_height} "
+                f"disable_gpu={disable_gpu} renderer_limit={renderer_process_limit}"
             )
             assert cls._playwright is not None
-            context = await cls._playwright.chromium.launch_persistent_context(
-                str(user_data_dir),
-                **launch_kwargs,
-            )
+            try:
+                context = await cls._playwright.chromium.launch_persistent_context(
+                    str(user_data_dir),
+                    **launch_kwargs,
+                )
+            except Exception as e:  # noqa: BLE001
+                # Docker 重建 / 异常退出后 profile 目录里偶尔残留 Singleton*，
+                # 第一次 launch 会直接报 "profile appears to be in use"。清锁后重试一次。
+                logger.warning(
+                    f"[browser] 首次启动上下文失败，尝试清锁重试 account={account.id} "
+                    f"err={type(e).__name__}: {e}"
+                )
+                _clear_stale_chromium_singleton_locks(user_data_dir)
+                await asyncio.sleep(0.5)
+                context = await cls._playwright.chromium.launch_persistent_context(
+                    str(user_data_dir),
+                    **launch_kwargs,
+                )
+            # 先登记，避免后续初始化步骤抛错导致“进程已起但上下文未登记”，
+            # 下一轮重复 launch 同一 profile 引发 singleton lock。
+            cls._contexts[str(account.id)] = context
 
             # 尝试从加密 storage_state 额外恢复（防止 user_data_dir 被清）
             restored = load_storage_state(str(account.id))
@@ -176,7 +231,7 @@ class BrowserManager:
                 Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
             """)
 
-            cls._contexts[str(account.id)] = context
+            await _attach_resource_saver(context, str(account.id))
 
             if is_sniffer_enabled():
                 try:

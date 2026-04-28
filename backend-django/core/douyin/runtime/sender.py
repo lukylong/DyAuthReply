@@ -31,6 +31,11 @@ from django.utils import timezone
 
 from core.douyin.runtime import selectors as S
 from core.douyin.runtime.humanize import human_click, human_type, random_sleep
+from core.douyin.runtime.send_template_cache import (
+    bind_platform_conversation_id,
+    capture_latest_success_template_from_sniff,
+    dump_cached_send_template_meta,
+)
 
 if TYPE_CHECKING:
     from core.douyin.douyin_account_model import DouyinAccount
@@ -649,6 +654,30 @@ async def send_reply(
                     f"[sender] 落 outbound DouyinMessage 失败（不影响发送主流程） "
                     f"account={account_id} conv={conversation_id} err={e}"
                 )
+        try:
+            from core.douyin.runtime.inbox import _extract_platform_conversation_id
+
+            platform_conv_id = await _extract_platform_conversation_id(page)
+            if platform_conv_id:
+                await bind_platform_conversation_id(
+                    account_id,
+                    conversation_id,
+                    platform_conv_id,
+                )
+                cached = await capture_latest_success_template_from_sniff(
+                    account_id,
+                    platform_conv_id,
+                )
+                meta = dump_cached_send_template_meta(account_id, platform_conv_id)
+                logger.info(
+                    f"[sender] 发送模板缓存刷新 account={account_id} "
+                    f"conv={platform_conv_id} cached={cached} meta={meta}"
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"[sender] 刷新成功发送模板失败（不影响主流程） "
+                f"account={account_id} conv={conversation_id} err={e}"
+            )
         logger.info(
             f"[sender] ✔ 发送成功 account={account_id} peer={peer_nickname!r} "
             f"segments={len(segments)} duration_ms={duration} reply_log={log_id}"

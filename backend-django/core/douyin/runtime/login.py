@@ -570,6 +570,19 @@ async def _finalize_login_success(page, account, owner_id: str, account_id: str)
     # 页面还处于 loading 时再等 1 秒
     await asyncio.sleep(1)
     profile = await _collect_profile(page)
+    if not profile.get("sec_uid"):
+        try:
+            from core.douyin.runtime.inbox import _collect_own_sec_uid
+
+            probed_sec_uid = await _collect_own_sec_uid(page)
+            if probed_sec_uid:
+                profile["sec_uid"] = probed_sec_uid
+                logger.info(
+                    f"[login] 通过 /user/self 回填 sec_uid account={account_id} "
+                    f"sec_uid={probed_sec_uid[:24]}..."
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[login] 回填 sec_uid 失败 account={account_id} err={e}")
     logger.info(
         f"[login] profile 采集完成 account={account_id} "
         f"nickname={profile.get('nickname')!r} "

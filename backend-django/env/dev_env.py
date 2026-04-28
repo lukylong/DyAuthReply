@@ -143,6 +143,9 @@ DOUYIN_ENABLE_VIRTUAL_DISPLAY = _env('DOUYIN_ENABLE_VIRTUAL_DISPLAY', 'true').lo
 DOUYIN_WORKER_BROWSER_CHANNEL = _env('DOUYIN_WORKER_BROWSER_CHANNEL', '')
 DOUYIN_WORKER_VIEWPORT_WIDTH = int(_env('DOUYIN_WORKER_VIEWPORT_WIDTH', '1440'))
 DOUYIN_WORKER_VIEWPORT_HEIGHT = int(_env('DOUYIN_WORKER_VIEWPORT_HEIGHT', '900'))
+DOUYIN_WORKER_DISABLE_GPU = _env('DOUYIN_WORKER_DISABLE_GPU', 'true').lower() == 'true'
+DOUYIN_WORKER_RENDERER_PROCESS_LIMIT = int(_env('DOUYIN_WORKER_RENDERER_PROCESS_LIMIT', '2'))
+DOUYIN_WORKER_BLOCK_HEAVY_RESOURCES = _env('DOUYIN_WORKER_BLOCK_HEAVY_RESOURCES', 'true').lower() == 'true'
 DOUYIN_WORKER_LOCALE = _env('DOUYIN_WORKER_LOCALE', 'zh-CN')
 DOUYIN_WORKER_TIMEZONE = _env('DOUYIN_WORKER_TIMEZONE', 'Asia/Shanghai')
 
@@ -179,7 +182,14 @@ DOUYIN_TRANSPORT_BACKEND = _env('DOUYIN_TRANSPORT_BACKEND', 'browser')
 # 推荐切量顺序：send_text → send_reply → scan_inbox（出向比入向幂等性高）
 DOUYIN_HTTP_PROTOCOL_SEND_TEXT = _env('DOUYIN_HTTP_PROTOCOL_SEND_TEXT', 'false').lower() == 'true'
 DOUYIN_HTTP_PROTOCOL_SEND_REPLY = _env('DOUYIN_HTTP_PROTOCOL_SEND_REPLY', 'false').lower() == 'true'
+DOUYIN_HTTP_PROTOCOL_SEND_STRICT = _env('DOUYIN_HTTP_PROTOCOL_SEND_STRICT', 'false').lower() == 'true'
 DOUYIN_HTTP_PROTOCOL_SCAN_INBOX = _env('DOUYIN_HTTP_PROTOCOL_SCAN_INBOX', 'false').lower() == 'true'
+DOUYIN_HTTP_PROTOCOL_SCAN_STRICT = _env('DOUYIN_HTTP_PROTOCOL_SCAN_STRICT', 'false').lower() == 'true'
+# scan_inbox 双跑对账：HTTP 解析 + DOM 扫描同时跑，对账后再翻 SCAN_INBOX=true
+# 让 HTTP 主路径接管。开启时 worker 日志会出现 [transport.scan_dual_run] ... 对账输出
+DOUYIN_HTTP_PROTOCOL_SCAN_INBOX_DUAL_RUN = _env(
+    'DOUYIN_HTTP_PROTOCOL_SCAN_INBOX_DUAL_RUN', 'false'
+).lower() == 'true'
 
 # Phase 3 影子干跑（dual-run）：启用后**每次**发送类调用都额外编码一份 protobuf
 # 落到 [transport.dual_run] 日志，但**不真发**。配合 sniffer 抓真实出站 IM 流量，

@@ -93,6 +93,19 @@ class DouyinWorkerCommandSerializationTests(unittest.IsolatedAsyncioTestCase):
     抢到旧 BrowserContext → 用户看到的是"已登录"页面。
     """
 
+    def setUp(self):
+        # 隔离 storage 磁盘 IO —— 默认 DOUYIN_DATA_DIR 是 /var/lib/zq-platform，
+        # 本机 / CI runner 没有写权限会让 _stop_account 链路炸。
+        # worker 测试只关心命令编排顺序，跟 storage 无关。
+        from unittest.mock import patch
+        for p in (
+            patch("core.douyin.runtime.storage.delete_storage_state", lambda *a, **kw: None),
+            patch("core.douyin.runtime.storage.delete_user_data_dir", lambda *a, **kw: None),
+            patch("core.douyin.runtime.storage.delete_scan_cursor", lambda *a, **kw: None),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
     async def test_focus_waits_for_logout_to_finish(self):
         worker = DouyinWorker()
         account_id = "acc-serialize-test"

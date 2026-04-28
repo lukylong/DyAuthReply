@@ -80,6 +80,7 @@ class AccountTransport(ABC):
         *,
         max_conversations: int = 15,
         include_recent_without_unread: bool = False,
+        conversation_hint: Optional[str] = None,
     ) -> List["ScannedMessage"]:
         """扫一次收件箱，返回新增的入向消息（已落库）。"""
 

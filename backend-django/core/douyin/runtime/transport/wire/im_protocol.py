@@ -40,6 +40,7 @@ Response envelope:
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -62,10 +63,21 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------- 协议常量 ----------------
-SEND_MESSAGE_CMD_ID = 100        # 来自 sniff hex `08 64` (varint=100)
-GET_BY_CONVERSATION_CMD_ID = 302  # 来自 sniff hex `08 ad 02` (varint=301) — 待回放确认
-GET_BY_USER_INIT_CMD_ID = 203     # 来自 sniff hex `08 cb 01` (varint=203)
-GET_CONVERSATION_LIST_CMD_ID = 1001  # 来自 sniff hex `08 e9 07` (varint=1001)
+# 通过 sniff 21KB 真实响应反推确认（详见 /var/lib/zq-platform/douyin/sniff/）：
+#   send_message:        cmd_id=100 (req+resp)，inner wrapper field=100
+#   get_by_user(recv):   cmd_id=200 (resp)，inner wrapper field=200
+#   get_by_user(req):    cmd_id=200 (req)，body f200 = {f1=cursor_us, f2=limit}
+#   get_by_user_init:    cmd_id=203，inner wrapper field=203
+#   get_by_conversation: cmd_id=301 (req+resp)，inner wrapper field=301
+#                        req body f301 = {f1=conv_id, f3=since_msg_id, f6=limit}
+#                        resp body f301 = repeated f1=Message
+#   list_conversations:  cmd_id=1001，inner wrapper field=1000
+#                        resp body f1000.f4 = repeated ConversationListItem
+SEND_MESSAGE_CMD_ID = 100
+GET_BY_CONVERSATION_CMD_ID = 301
+GET_BY_USER_CMD_ID = 200
+GET_BY_USER_INIT_CMD_ID = 203
+GET_CONVERSATION_LIST_CMD_ID = 1001
 
 # envelope 中的 build_id —— 跟随抖音前端打包版本，平台升级时这里会失效
 # sniff 报告里看到的值；改 build 必须同步改这里（或者上层运行时 inject）
@@ -99,6 +111,11 @@ SMR_FIELD_2 = 2            # 10 01 → field 2 = 1 (推断 msg_type=1=text)
 # Phase 3.2b 第一版**先尝试常见布局**：text=field 4, client_msg_id=field 5
 SMR_FIELD_TEXT = 4         # 推断；如平台拒收，调到 5/6/7 试
 SMR_FIELD_CLIENT_MSG_ID = 5  # 推断
+SMR_FIELD_STIME = 5          # repeated ext_kv: {f1='s:stime', f2='1777...'}
+SMR_FIELD_MENTIONED_USERS = 5
+SMR_FIELD_6 = 6
+SMR_FIELD_7 = 7
+SMR_FIELD_8 = 8
 
 # Response 字段编号
 RESP_STATUS_CODE = 3       # `18 00` → field 3 = 0
@@ -221,6 +238,131 @@ def encode_send_message_request(
     return body, cm_id, sq_id
 
 
+def _encode_ext_kv(key: str, value: str) -> bytes:
+    inner = encode_field(1, key) + encode_field(2, value)
+    return encode_tag(5, WIRE_LEN) + encode_varint(len(inner)) + inner
+
+
+def _decode_ext_kv(raw: bytes) -> tuple[str, str]:
+    fields: dict[int, list] = {}
+    for fnum, _wt, val in iter_fields(raw):
+        fields.setdefault(fnum, []).append(val)
+    return get_first_str(fields, 1), get_first_str(fields, 2)
+
+
+def encode_send_message_request_from_template(
+    *,
+    template_body: bytes,
+    conversation_id: str,
+    text: str,
+    client_msg_id: Optional[str] = None,
+    seq_id: Optional[int] = None,
+) -> tuple[bytes, str, int]:
+    """基于真实成功样本重写 send_message 请求。
+
+    保留模板里的 envelope/header/identity_security 扩展字段，
+    仅替换会话、文本、client_msg_id、stime、seq_id。
+    """
+    if not template_body:
+        raise ValueError("template_body 不能为空")
+    if not conversation_id:
+        raise ValueError("conversation_id 不能为空")
+    if not text:
+        raise ValueError("text 不能为空")
+
+    top_fields: dict[int, list] = {}
+    for fnum, _wt, val in iter_fields(template_body):
+        top_fields.setdefault(fnum, []).append(val)
+
+    inner_top = get_first_bytes(top_fields, 8)
+    if not inner_top:
+        raise ValueError("template_body 缺少 envelope.field8")
+
+    send_payload_raw = None
+    for fnum, _wt, val in iter_fields(inner_top):
+        if fnum == SEND_PAYLOAD_FIELD_NUMBER and isinstance(val, (bytes, bytearray)):
+            send_payload_raw = bytes(val)
+            break
+    if not send_payload_raw:
+        raise ValueError("template_body 缺少 send_payload field100")
+
+    send_fields: dict[int, list] = {}
+    for fnum, _wt, val in iter_fields(send_payload_raw):
+        send_fields.setdefault(fnum, []).append(val)
+
+    cm_id = client_msg_id or str(uuid.uuid4())
+    sq_id = seq_id if seq_id is not None else next_seq_id()
+    stime = f"{time.time() * 1000:.4f}".rstrip("0").rstrip(".")
+    content_json = json.dumps(
+        {"text": text, "aweType": 774},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+    previous_msg_id = get_first_int(send_fields, 3, default=0)
+    current_msg_id = previous_msg_id + max(1, int(time.time() * 1000) % 997)
+    if current_msg_id <= 0:
+        current_msg_id = int(time.time() * 1_000_000)
+
+    ext_chunks: list[bytes] = []
+    for raw in send_fields.get(5) or []:
+        if not isinstance(raw, (bytes, bytearray)):
+            continue
+        key, _ = _decode_ext_kv(bytes(raw))
+        if key == "s:mentioned_users":
+            ext_chunks.append(
+                encode_tag(5, WIRE_LEN) + encode_varint(len(raw)) + bytes(raw)
+            )
+    ext_chunks.append(_encode_ext_kv("s:client_message_id", cm_id))
+    ext_chunks.append(_encode_ext_kv("s:stime", stime))
+
+    send_parts: list[bytes] = []
+    send_parts.append(encode_field(1, conversation_id))
+    send_parts.append(encode_field(2, get_first_int(send_fields, 2, default=1) or 1))
+    send_parts.append(encode_field(3, current_msg_id))
+    send_parts.append(encode_field(4, content_json))
+    send_parts.extend(ext_chunks)
+    send_parts.append(encode_field(6, get_first_int(send_fields, 6, default=7) or 7))
+    send_parts.append(encode_field(7, get_first_str(send_fields, 7)))
+    send_parts.append(encode_field(8, cm_id))
+    payload = b"".join(send_parts)
+
+    inner = (
+        encode_tag(SEND_PAYLOAD_FIELD_NUMBER, WIRE_LEN)
+        + encode_varint(len(payload))
+        + payload
+    )
+
+    out: list[bytes] = []
+    out.append(encode_field(1, get_first_int(top_fields, 1, default=SEND_MESSAGE_CMD_ID)))
+    out.append(encode_field(2, sq_id))
+    out.append(encode_field(3, get_first_str(top_fields, 3) or IM_SDK_VERSION))
+    out.append(encode_field(4, get_first_str(top_fields, 4)))
+    out.append(encode_field(5, get_first_int(top_fields, 5, default=_ENVELOPE_FIELD5)))
+    out.append(encode_field(6, get_first_int(top_fields, 6, default=_ENVELOPE_FIELD6)))
+    out.append(encode_field(7, get_first_str(top_fields, 7) or IM_BUILD_ID))
+    out.append(encode_tag(8, WIRE_LEN))
+    out.append(encode_varint(len(inner)))
+    out.append(inner)
+    if 9 in top_fields:
+        out.append(encode_field(9, get_first_str(top_fields, 9)))
+    if 11 in top_fields:
+        out.append(encode_field(11, get_first_str(top_fields, 11)))
+    for raw in top_fields.get(15) or []:
+        if not isinstance(raw, (bytes, bytearray)):
+            continue
+        out.append(encode_tag(15, WIRE_LEN))
+        out.append(encode_varint(len(raw)))
+        out.append(bytes(raw))
+    if 18 in top_fields:
+        out.append(encode_field(18, get_first_int(top_fields, 18, default=1)))
+    if 21 in top_fields:
+        out.append(encode_field(21, get_first_str(top_fields, 21)))
+    if 22 in top_fields:
+        out.append(encode_field(22, get_first_str(top_fields, 22)))
+    return b"".join(out), cm_id, sq_id
+
+
 # ---------------- 解码 ----------------
 @dataclass
 class SendMessageResult:
@@ -231,6 +373,9 @@ class SendMessageResult:
     server_msg_id: int          # 服务端 message_id，可能很大（int64）
     client_msg_id: str          # 客户端 uuid 回显，用来对账
     raw_envelope: dict[int, list]  # 调试用，便于排查未识别字段
+    biz_status_code: int = 0    # inner 业务状态码；0=业务成功，非 0 代表平台拒绝/风控
+    biz_status_text: str = ""   # inner 业务提示
+    biz_raw_check_code: int = 0
 
 
 def decode_send_message_response(buf: bytes) -> SendMessageResult:
@@ -248,6 +393,9 @@ def decode_send_message_response(buf: bytes) -> SendMessageResult:
     inner = get_first_bytes(envelope, RESP_BODY_FIELD)
     server_msg_id = 0
     client_msg_id = ""
+    biz_status_code = 0
+    biz_status_text = ""
+    biz_raw_check_code = 0
 
     if inner:
         # inner = field 100 wrapper
@@ -258,6 +406,22 @@ def decode_send_message_response(buf: bytes) -> SendMessageResult:
                     inner2.setdefault(f2, []).append(v2)
                 server_msg_id = get_first_int(inner2, SMResp_SERVER_MSG_ID)
                 client_msg_id = get_first_str(inner2, SMResp_CLIENT_MSG_ID)
+                biz_raw = get_first_bytes(inner2, 6)
+                if biz_raw:
+                    try:
+                        biz_obj = json.loads(biz_raw.decode("utf-8", "ignore"))
+                    except Exception:
+                        biz_obj = {}
+                    if isinstance(biz_obj, dict):
+                        biz_status_code = int(biz_obj.get("status_code") or 0)
+                        biz_raw_check_code = int(biz_obj.get("raw_check_code") or 0)
+                        biz_msg = biz_obj.get("status_msg") or {}
+                        if isinstance(biz_msg, dict):
+                            biz_status_text = (
+                                (biz_msg.get("msg_content") or {}).get("tips") or ""
+                            )
+                        elif isinstance(biz_msg, str):
+                            biz_status_text = biz_msg
                 break
 
     return SendMessageResult(
@@ -265,5 +429,8 @@ def decode_send_message_response(buf: bytes) -> SendMessageResult:
         status_msg=status_msg,
         server_msg_id=server_msg_id,
         client_msg_id=client_msg_id,
+        biz_status_code=biz_status_code,
+        biz_status_text=biz_status_text,
+        biz_raw_check_code=biz_raw_check_code,
         raw_envelope=envelope,
     )

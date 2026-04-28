@@ -131,6 +131,23 @@ async def _find_conversation_item_across_tabs(
                 return snap.get('item'), tab_label or '默认'
     return None, None
 
+
+async def _wait_im_input_ready(page, timeout_ms: int = 4000) -> bool:
+    """等待 IM 输入框可见，避免刚切会话时 sender 立即报“未找到输入框”."""
+    from core.douyin.runtime import selectors as S
+
+    per_selector = max(500, int(timeout_ms / max(1, len(S.IM_INPUT_BOX))))
+    for sel in S.IM_INPUT_BOX:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() == 0:
+                continue
+            await loc.wait_for(state="visible", timeout=per_selector)
+            return True
+        except Exception:
+            continue
+    return False
+
 # 命令频道（与 API 侧保持一致）
 CMD_CHANNEL_PATTERN = "douyin:cmd:*"
 
@@ -421,8 +438,8 @@ class DouyinWorker:
         *,
         refresh_interval: int = 15,
         heartbeat_interval: int = 15,
-        idle_poll_min: int = 10,
-        idle_poll_max: int = 25,
+        idle_poll_min: int = 20,
+        idle_poll_max: int = 45,
         transport_factory=None,
     ) -> None:
         self.worker_id = f"{socket.gethostname()}:{os.getpid()}"
@@ -466,7 +483,6 @@ class DouyinWorker:
     # ---------------- 主入口 ----------------
     async def run(self) -> None:
         logger.info(f"[worker] 启动 DouyinWorker worker_id={self.worker_id}")
-        await BrowserManager.start()
         await self._connect_redis()
 
         try:
@@ -704,6 +720,9 @@ class DouyinWorker:
         return transport
 
     def _start_login_task(self, account_id: str, account) -> asyncio.Task:
+        logger.info(
+            f"[worker] 创建扫码登录任务 account={account_id} nickname={getattr(account, 'nickname', '')!r}"
+        )
         task = asyncio.create_task(
             self._run_login_task(account_id, account),
             name=f"dy-login-{account_id[:8]}",
@@ -713,6 +732,7 @@ class DouyinWorker:
 
     async def _run_login_task(self, account_id: str, account) -> bool:
         try:
+            logger.info(f"[worker] 扫码登录任务启动 account={account_id}")
             # 串行清理：旧 BrowserContext + 持久化 storage state；
             # 必须在 task 内做，这样 _login_tasks 字典上的占位先于 close_context 生效，
             # focus / manual_reply / manual_auto_reply 等并发命令的守卫一定能看到。
@@ -725,9 +745,14 @@ class DouyinWorker:
                 delete_account_runtime_state(account_id)
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[worker] login 前清理 runtime state 失败 account={account_id} err={e}")
-            return await scan_qrcode_login(account)
+            ok = await scan_qrcode_login(account)
+            logger.info(f"[worker] 扫码登录任务结束 account={account_id} ok={ok}")
+            return ok
         except asyncio.CancelledError:
             logger.info(f"[worker] 已取消扫码登录任务 account={account_id}")
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.exception(f"[worker] 扫码登录任务异常 account={account_id}: {e}")
             raise
         finally:
             self._login_tasks.pop(account_id, None)
@@ -939,6 +964,7 @@ class DouyinWorker:
             logger.exception(f"[worker] 账号 {account_id} 登录异常: {e}")
 
         loop_count = 0
+        pending_scan_hint: str | None = None
         while not self._stop.is_set():
             loop_count += 1
             try:
@@ -971,6 +997,13 @@ class DouyinWorker:
                     await asyncio.sleep(120)
                     continue
                 session_active = await _session_is_active(account_id)
+                if int(getattr(acc_row, 'status', 0) or 0) != 1:
+                    logger.info(
+                        f"[worker] 账号未在线，跳过 transport 扫描/自动回复 account={account_id} "
+                        f"status={acc_row.status} session_active={session_active}"
+                    )
+                    await asyncio.sleep(15)
+                    continue
                 if not _can_process_reply(acc_row.status, acc_row.auto_reply_enabled, session_active):
                     logger.info(
                         f"[worker] 账号不可用于自动回复 account={account_id} "
@@ -979,11 +1012,6 @@ class DouyinWorker:
                     )
                     await asyncio.sleep(30)
                     continue
-                if acc_row.status != 1 and session_active:
-                    logger.warning(
-                        f"[worker] 账号状态非在线，但会话仍活跃，继续托管 account={account_id} "
-                        f"status={acc_row.status}"
-                    )
                 if loop_count == 1 or loop_count % 10 == 0:
                     valid = await is_login_valid(acc_row)
                     if not valid:
@@ -1014,7 +1042,9 @@ class DouyinWorker:
                 new_msgs: list[ScannedMessage] = await transport.scan_inbox(
                     acc_row,
                     include_recent_without_unread=backfill_mode,
+                    conversation_hint=pending_scan_hint,
                 )
+                pending_scan_hint = None
                 if backfill_mode:
                     await _mark_history_sync_completed(account_id)
                     logger.info(f"[worker] 已完成首次历史会话补扫标记 account={account_id}")
@@ -1031,11 +1061,27 @@ class DouyinWorker:
                     )
                     for m in new_msgs:
                         await self._handle_one_message(acc_row, m, rules, owner_id)
-                # 随机间隔；transport 若有 WS 快路径会在收到入向信号时立即唤醒
-                wait = random.uniform(self.idle_poll_min, self.idle_poll_max)
+                # 随机间隔：
+                #   - 优先尊重账号自己的 min/max interval 配置
+                #   - 启用 WS 快路径时，空闲轮询可更保守，主要靠 WS 唤醒
+                wait_min = max(
+                    self.idle_poll_min,
+                    int(getattr(acc_row, 'min_interval_seconds', 0) or 0),
+                )
+                wait_max = max(
+                    self.idle_poll_max,
+                    int(getattr(acc_row, 'max_interval_seconds', 0) or 0),
+                )
+                if getattr(transport, "name", "") == "ws_inbound":
+                    wait_min = max(wait_min, 30)
+                    wait_max = max(wait_max, 60)
+                if wait_max < wait_min:
+                    wait_max = wait_min
+                wait = random.uniform(wait_min, wait_max)
                 logger.debug(f"[worker] 账号 {account_id} 等待 {wait:.1f}s 或 WS 信号")
                 evt = await transport.wait_for_inbound_signal(timeout=wait)
                 if evt is not None:
+                    pending_scan_hint = evt.conversation_hint
                     logger.info(
                         f"[worker] WS 唤醒 account={account_id} source={evt.source} "
                         f"hint={evt.conversation_hint!r}"
@@ -1198,41 +1244,107 @@ class DouyinWorker:
                              f"rule={rule.name}", self.worker_id)
             return
 
-        # 打开会话（点击会话列表已在 inbox 扫描时完成，这里复用同一个 page）
-        context = await BrowserManager.get_or_create_context(account)
-        page = await context.new_page()
+        # 发送优先走 transport 直发（http_protocol 可不依赖页面会话定位）；
+        # 若直发失败，再降级到 DOM 定位会话后发送，兼容 browser 路径与兜底。
+        page = None
+        transport_conversation_id = (
+            str((msg.raw or {}).get('conversation_id') or '').strip()
+            or msg.conversation_id
+        )
         try:
-            from core.douyin.runtime import selectors as S
-            logger.info(f"[reply] 打开 IM 页面 account={account_id}")
-            for im_url in getattr(S, 'CREATOR_IM_CANDIDATES', [S.CREATOR_IM]):
-                await page.goto(im_url, wait_until='domcontentloaded', timeout=30000)
-                await asyncio.sleep(2)
-                if page.url.startswith(im_url) or 'following/chat' in page.url or '/im' in page.url:
-                    break
-
-            target_nick = msg.peer_nickname or ''
-            target_preview = (msg.text or '').strip()
-            item, tab_label = await _find_conversation_item_across_tabs(
-                page,
-                target_nick=target_nick,
-                target_preview=target_preview,
-            )
-            if item is None:
-                raise RuntimeError(f"未找到对方会话：nickname={msg.peer_nickname}")
-            logger.info(
-                f"[reply] 点击会话成功 account={account_id} peer={peer!r} tab={tab_label}"
-            )
-            await human_click(item)
-            await asyncio.sleep(1.5)
-
             transport = await self._get_or_create_transport(account)
-            log_id = await transport.send_reply(
-                account, page,
-                conversation_id=msg.conversation_id,
-                trigger_message_id=msg.message_id,
-                rule=rule,
-                peer_nickname=msg.peer_nickname or '',
+            http_send_reply_enabled = bool(
+                getattr(settings, "DOUYIN_HTTP_PROTOCOL_SEND_REPLY", False)
             )
+            try:
+                if not http_send_reply_enabled:
+                    raise RuntimeError("HTTP send_reply 已关闭，直接走 DOM 会话定位发送")
+                log_id = await transport.send_reply(
+                    account,
+                    None,
+                    conversation_id=transport_conversation_id,
+                    trigger_message_id=msg.message_id,
+                    rule=rule,
+                    peer_nickname=msg.peer_nickname or '',
+                )
+            except Exception as direct_err:  # noqa: BLE001
+                if (
+                    http_send_reply_enabled
+                    and bool(getattr(settings, "DOUYIN_HTTP_PROTOCOL_SEND_STRICT", False))
+                ):
+                    # 严格模式：发送只允许 HTTP 协议路径，不允许回退 DOM 输入框。
+                    raise
+                logger.info(
+                    f"[reply] 直发未完成，回退 DOM 会话定位 account={account_id} "
+                    f"peer={peer!r} reason={type(direct_err).__name__}: {direct_err}"
+                )
+                from core.douyin.runtime import selectors as S
+
+                context = await BrowserManager.get_or_create_context(account)
+                page = await context.new_page()
+                logger.info(f"[reply] 打开 IM 页面 account={account_id}")
+                for im_url in getattr(S, 'CREATOR_IM_CANDIDATES', [S.CREATOR_IM]):
+                    await page.goto(im_url, wait_until='domcontentloaded', timeout=30000)
+                    await asyncio.sleep(2)
+                    if page.url.startswith(im_url) or 'following/chat' in page.url or '/im' in page.url:
+                        break
+
+                target_nick = msg.peer_nickname or ''
+                target_preview = (msg.text or '').strip()
+                fallback_err = None
+                for attempt in range(1, 4):
+                    item, tab_label = await _find_conversation_item_across_tabs(
+                        page,
+                        target_nick=target_nick,
+                        target_preview=target_preview,
+                    )
+                    if item is None:
+                        fallback_err = RuntimeError(f"未找到对方会话：nickname={msg.peer_nickname}")
+                        logger.info(
+                            f"[reply] DOM 回退第 {attempt}/3 次未定位会话 account={account_id} "
+                            f"peer={peer!r} nick={target_nick!r} preview={target_preview[:24]!r}"
+                        )
+                        await asyncio.sleep(1.0)
+                        continue
+
+                    logger.info(
+                        f"[reply] 点击会话成功 account={account_id} peer={peer!r} tab={tab_label} "
+                        f"attempt={attempt}/3"
+                    )
+                    await human_click(item)
+                    await asyncio.sleep(1.8)
+                    if not await _wait_im_input_ready(page, timeout_ms=5000):
+                        fallback_err = RuntimeError("会话已点击但输入框未就绪")
+                        logger.warning(
+                            f"[reply] DOM 回退第 {attempt}/3 次输入框未就绪 account={account_id} "
+                            f"peer={peer!r}"
+                        )
+                        await asyncio.sleep(1.0)
+                        continue
+                    try:
+                        log_id = await transport.send_reply(
+                            account,
+                            page,
+                            conversation_id=transport_conversation_id,
+                            trigger_message_id=msg.message_id,
+                            rule=rule,
+                            peer_nickname=msg.peer_nickname or '',
+                        )
+                        fallback_err = None
+                        break
+                    except Exception as send_err:  # noqa: BLE001
+                        fallback_err = send_err
+                        logger.warning(
+                            f"[reply] DOM 回退第 {attempt}/3 次发送失败 account={account_id} "
+                            f"peer={peer!r} err={type(send_err).__name__}: {send_err}"
+                        )
+                        if "未找到输入框" in str(send_err):
+                            # 输入框通常是页面尚未完成会话切换，短等后再重试一次定位+点击。
+                            await asyncio.sleep(1.2)
+                            continue
+                        raise
+                if fallback_err is not None:
+                    raise fallback_err from direct_err
             self._account_metrics[account_id]['replies_today'] += 1
             logger.info(
                 f"[reply] ✔ 回复成功 account={account_id} peer={peer!r} "
@@ -1259,8 +1371,9 @@ class DouyinWorker:
                 'error': str(e),
             })
         finally:
-            with suppress(Exception):
-                await page.close()
+            if page is not None:
+                with suppress(Exception):
+                    await page.close()
 
     # ---------------- 基础设施 ----------------
     async def _connect_redis(self) -> None:

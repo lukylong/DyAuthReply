@@ -85,12 +85,14 @@ class DualRunDecorator(AccountTransport):
         *,
         max_conversations: int = 15,
         include_recent_without_unread: bool = False,
+        conversation_hint: str | None = None,
     ) -> List["ScannedMessage"]:
         # 入向不做 dual_run（响应才是难点，请求是平台主动推过来的）
         return await self._inner.scan_inbox(
             account,
             max_conversations=max_conversations,
             include_recent_without_unread=include_recent_without_unread,
+            conversation_hint=conversation_hint,
         )
 
     async def send_text(

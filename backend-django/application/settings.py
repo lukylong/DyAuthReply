@@ -203,21 +203,25 @@ LOGGING = {
     "handlers": {
         "file": {
             "level": "INFO",
-            "class": "logging.handlers.RotatingFileHandler",
+            "class": "logging.handlers.TimedRotatingFileHandler",
             "filename": SERVER_LOGS_FILE,
-            "maxBytes": 1024 * 1024 * 10,  # 100 MB
-            "backupCount": 5,  # 最多备份5个
+            "when": "midnight",
+            "interval": 1,
+            "backupCount": 30,
             "formatter": "standard",
             "encoding": "utf-8",
+            "utc": False,
         },
         "error": {
             "level": "ERROR",
-            "class": "logging.handlers.RotatingFileHandler",
+            "class": "logging.handlers.TimedRotatingFileHandler",
             "filename": ERROR_LOGS_FILE,
-            "maxBytes": 1024 * 1024 * 10,  # 100 MB
-            "backupCount": 3,  # 最多备份3个
+            "when": "midnight",
+            "interval": 1,
+            "backupCount": 30,
             "formatter": "standard",
             "encoding": "utf-8",
+            "utc": False,
         },
         "console": {
             "level": "INFO",

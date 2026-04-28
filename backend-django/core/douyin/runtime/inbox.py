@@ -135,6 +135,8 @@ def _upsert_conversation_snapshot(
     preview: str,
     unread_count: int,
     touched_at,
+    *,
+    platform_conversation_id: Optional[str] = None,
 ) -> Optional[str]:
     """只同步会话列表快照，不写消息流水。"""
     from core.douyin.douyin_account_model import DouyinAccount
@@ -149,12 +151,36 @@ def _upsert_conversation_snapshot(
         peer_sec_uid=peer_sec_uid,
         defaults={
             'peer_nickname': peer_nickname or '',
+            'platform_conversation_id': (platform_conversation_id or '').strip() or None,
             'last_message_at': touched_at,
             'last_message_preview': (preview or '')[:200],
             'unread_count': max(0, int(unread_count or 0)),
         },
     )
     return str(conv.id)
+
+
+@sync_to_async
+def _silent_mark_read_in_db(conversation_id: str) -> int:
+    """
+    HTTP 协议路径专用的"静默已读"——只更新本地 DB 的 unread_count=0，
+    **不打抖音的 mark_read 接口**（避免触发额外风控、避免影响 DOM 路径）。
+
+    语义：协议路径已经把入向消息成功落库 + 准备分发了，从我们这边视角
+    "处理完毕" == "已读"，前端列表上那个红点应当立刻消失。
+
+    DOM 兜底路径仍然按 conversation.unread_count 判断是否扫描，所以这里
+    清零后 fallback 路径会跳过该会话的下一轮兜底——这正是我们想要的：
+    HTTP 已经处理过了，DOM 不应该重复处理。
+
+    Returns:
+        实际被影响的行数（0 = 没找到 / 本来就是 0）。
+    """
+    from core.douyin.douyin_conversation_model import DouyinConversation
+
+    if not conversation_id:
+        return 0
+    return DouyinConversation.objects.filter(id=conversation_id).update(unread_count=0)
 
 
 @sync_to_async
@@ -230,10 +256,22 @@ def _upsert_conversation_and_message(
     text: str,
     received_at,
     raw: dict,
+    *,
+    external_msg_id: Optional[str] = None,
+    peer_avatar: Optional[str] = None,
+    platform_conversation_id: Optional[str] = None,
 ) -> Optional[tuple]:
     """
     upsert DouyinConversation + DouyinMessage。
     返回 (conversation_id, message_id) 表示新增了一条入向消息；返回 None 表示重复跳过。
+
+    Args:
+        external_msg_id: 显式传入时直接当作 stable id（HTTP 协议路径用
+            `srv_<server_message_id>` 形式，比 hash 更稳定）；None 时 fallback
+            到 (peer_sec_uid + iso_time + content[:60]) 的 sha1 hash（DOM 路径）。
+        peer_nickname / peer_avatar: 仅在非空时覆盖 DB；传 None / 空串表示
+            "本次没有更新这个字段"，避免 HTTP 路径暂时没有昵称就把 DOM 路径
+            之前补到的昵称冲掉。
     """
     from core.douyin.douyin_account_model import DouyinAccount
     from core.douyin.douyin_conversation_model import DouyinConversation
@@ -243,17 +281,33 @@ def _upsert_conversation_and_message(
     if account is None:
         return None
 
+    # last_message_* 总是覆盖（每次扫描都是更新的事实）；
+    # peer_nickname / peer_avatar 走 "only if non-empty" 语义，避免空值反向污染
+    defaults = {
+        'last_message_at': received_at,
+        'last_message_preview': (text or '')[:200],
+    }
+    nick = (peer_nickname or '').strip()
+    if nick:
+        defaults['peer_nickname'] = nick
+    avatar = (peer_avatar or '').strip()
+    if avatar:
+        defaults['peer_avatar'] = avatar
+    platform_conv_id = (platform_conversation_id or '').strip()
+    if platform_conv_id:
+        defaults['platform_conversation_id'] = platform_conv_id
+
     conv, _ = DouyinConversation.objects.update_or_create(
         account=account,
         peer_sec_uid=peer_sec_uid,
-        defaults={
-            'peer_nickname': peer_nickname or '',
-            'last_message_at': received_at,
-            'last_message_preview': (text or '')[:200],
-        },
+        defaults=defaults,
     )
 
-    ext_id = _hash_msg_id(peer_sec_uid, received_at.isoformat(), text)
+    ext_id = (
+        external_msg_id
+        if external_msg_id
+        else _hash_msg_id(peer_sec_uid, received_at.isoformat(), text)
+    )
     msg, created = DouyinMessage.objects.get_or_create(
         conversation=conv,
         external_msg_id=ext_id,
@@ -485,6 +539,18 @@ async def _extract_peer_sec_uid(page) -> Optional[str]:
             parts = m.group(1).split('_')
             if len(parts) >= 2:
                 return parts[-1]
+    except Exception:
+        pass
+    return None
+
+
+async def _extract_platform_conversation_id(page) -> Optional[str]:
+    """从当前 IM URL 提取抖音平台 conversation_id。"""
+    try:
+        url = page.url
+        m = re.search(r'conversation_id=([^&]+)', url)
+        if m:
+            return m.group(1)
     except Exception:
         pass
     return None
@@ -948,14 +1014,22 @@ async def _read_conversation_messages(
 async def scan_inbox(
     account: "DouyinAccount",
     *,
-    max_conversations: int = 15,
+    max_conversations: int = 50,
     include_recent_without_unread: bool = False,
+    max_scan_rounds: int = 20,
+    max_messages_per_scan: int = 20,
 ) -> List[ScannedMessage]:
     """
     扫描一次收件箱，返回"本轮新增的入向消息"列表。
 
     - 默认仅扫描有未读角标的会话，避免对所有会话逐个点击（降低被风控风险）
     - include_recent_without_unread=True 时，对最近会话做一次补扫，每个会话最多补最近 1 条入向消息
+    - 抖音 IM 会话列表是虚拟滚动（ReactVirtualized__Grid），DOM 里只渲染当前视口内的项；
+      因此本函数会**每轮无条件尝试滚动一屏**，直到：
+        1) `_scroll_conversation_list` 返回 False（已滚到底）
+        2) 连续 2 轮无新 fingerprint 出现（视为已覆盖完整列表）
+        3) 收集到的入向消息数达到 `max_messages_per_scan`（避免单次 scan 跑太久）
+        4) 已迭代 `max_scan_rounds` 轮（硬上限兜底）
     - 若全无未读则直接返回 []
     """
     account_id = str(account.id)
@@ -1004,7 +1078,8 @@ async def scan_inbox(
                     continue
             seen_fingerprints: set[str] = set()
             scan_round = 0
-            while True:
+            no_new_fingerprint_streak = 0
+            while scan_round < max_scan_rounds:
                 scan_round += 1
                 try:
                     snapshots = await _read_visible_conversation_snapshot(page, max_items=max_conversations)
@@ -1013,9 +1088,12 @@ async def scan_inbox(
                         f"[inbox] 读取会话快照失败 account={account_id} tab={tab_label or '默认'} round={scan_round}: {e}"
                     )
                     snapshots = []
+                # 本轮真正"新进入视口"的会话数（已 seen 的不算）——用于判断是否已滚到底
+                new_in_round = sum(1 for s in snapshots if str(s.get('fingerprint') or '') not in seen_fingerprints)
                 logger.info(
                     f"[inbox] 会话列表项数 account={account_id} tab={tab_label or '默认'} "
-                    f"round={scan_round} count={len(snapshots)}"
+                    f"round={scan_round} count={len(snapshots)} new_in_round={new_in_round} "
+                    f"seen_total={len(seen_fingerprints)}"
                 )
                 if not snapshots:
                     break
@@ -1044,6 +1122,7 @@ async def scan_inbox(
                         # 等待面板切换 + React 异步渲染气泡（之前 0.8~1.5s 不够，导致 total=0）
                         await random_sleep(1.5, 2.2)
                         logger.info(f"[inbox] 已进入会话 nickname={nickname!r} url={page.url}")
+                        platform_conversation_id = await _extract_platform_conversation_id(page)
                         peer_sec_uid = await _extract_peer_sec_uid(page) or _fallback_peer_sec_uid(
                             tab_label or '默认',
                             nickname or f"unknown_{idx}",
@@ -1058,6 +1137,7 @@ async def scan_inbox(
                             preview=preview,
                             unread_count=unread,
                             touched_at=now,
+                            platform_conversation_id=platform_conversation_id,
                         )
                         logger.info(
                             f"[inbox] 已同步会话快照 #{idx} account={account_id} tab={tab_label or '默认'} "
@@ -1164,6 +1244,7 @@ async def scan_inbox(
                                     'round': scan_round,
                                     'backfill': include_recent_without_unread and unread <= 0,
                                 },
+                                platform_conversation_id=platform_conversation_id,
                             )
                             if result is None:
                                 logger.debug(
@@ -1190,29 +1271,53 @@ async def scan_inbox(
                                     'backfill': include_recent_without_unread and unread <= 0,
                                 },
                             ))
-                            logger.info(
-                                f"[inbox] 已捕获新消息，提前结束本轮扫描以便尽快触发回复 "
-                                f"account={account_id} tab={tab_label or '默认'} conv_id={conv_id}"
-                            )
-                            return new_messages
+                            # 不再"找到第一条就 return" —— 之前那个早返回 + 不滚动的 bug
+                            # 联手导致"会话列表分页时第二屏永远扫不到"。继续处理本屏剩余会话
+                            # 并在 for 末尾试滚下一屏，直到 max_messages_per_scan 阈值。
                     except Exception as e:  # noqa: BLE001
                         logger.warning(
                             f"[inbox] 处理会话 #{idx} 失败 account={account_id} tab={tab_label or '默认'}: {e}"
                         )
                         continue
 
-                if round_hits == 0 and not await _scroll_conversation_list(page):
-                    break
-                if round_hits == 0:
-                    await random_sleep(0.5, 0.9)
-                    if scan_round >= 3:
+                # 已收集到足够多消息：返回让 worker 尽快回复（避免单次 scan 跑太久）
+                if len(new_messages) >= max_messages_per_scan:
+                    logger.info(
+                        f"[inbox] 已达单次扫描消息上限 account={account_id} "
+                        f"tab={tab_label or '默认'} count={len(new_messages)} cap={max_messages_per_scan}"
+                    )
+                    return new_messages
+
+                # 本轮无新会话进入视口：累计 streak；连续 2 轮无新视为已滚到底
+                if new_in_round == 0:
+                    no_new_fingerprint_streak += 1
+                    if no_new_fingerprint_streak >= 2:
+                        logger.info(
+                            f"[inbox] 列表已扫完 account={account_id} tab={tab_label or '默认'} "
+                            f"scan_round={scan_round} seen={len(seen_fingerprints)} "
+                            f"new_messages={len(new_messages)}"
+                        )
                         break
-                    continue
-                if not await _scroll_conversation_list(page):
+                else:
+                    no_new_fingerprint_streak = 0
+
+                # 关键：每轮无条件尝试滚一屏（之前只在 round_hits==0 才滚，导致首屏全命中
+                # 时永远滚不下去）。滚不动 = 已到底。
+                moved = await _scroll_conversation_list(page)
+                if not moved:
+                    logger.info(
+                        f"[inbox] 列表滚动条已到底 account={account_id} tab={tab_label or '默认'} "
+                        f"scan_round={scan_round} seen={len(seen_fingerprints)} "
+                        f"new_messages={len(new_messages)}"
+                    )
                     break
-                await random_sleep(0.5, 0.9)
-                if scan_round >= 8:
-                    break
+                await random_sleep(0.6, 1.0)
+            else:
+                # 走到 max_scan_rounds 上限 —— 列表特别长或者滚动器卡死时的兜底
+                logger.warning(
+                    f"[inbox] 触发 max_scan_rounds={max_scan_rounds} 兜底退出 "
+                    f"account={account_id} tab={tab_label or '默认'} seen={len(seen_fingerprints)}"
+                )
 
         logger.info(
             f"[inbox] ✔ 扫描完成 account={account_id} "

@@ -46,6 +46,24 @@ export default defineConfig(async () => {
             // WebSocket 已经由 src/api/core/websocket.ts 直连 ws://localhost:8000/ws/*。
             ws: false,
           },
+          '/vnc': {
+            changeOrigin: true,
+            configure: (proxy) => {
+              proxy.on('error', (err) => {
+                if (isHarmlessProxyError(err)) {
+                  // eslint-disable-next-line no-console
+                  console.debug(`[proxy] ignored harmless error: ${err.message}`);
+                  return;
+                }
+                // eslint-disable-next-line no-console
+                console.error('[proxy] /vnc error:', err);
+              });
+            },
+            rewrite: (path) => path.replace(/^\/vnc/, ''),
+            target: 'http://localhost:6080',
+            // noVNC 页面资源与 websockify 都走这个前缀，需开启 WS 代理。
+            ws: true,
+          },
         },
       },
     },

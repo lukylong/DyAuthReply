@@ -4,5 +4,4 @@ venv
 static/
 .venv/
 logs/
-*/migrations/
 

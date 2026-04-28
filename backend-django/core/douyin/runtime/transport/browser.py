@@ -52,6 +52,7 @@ class BrowserTransport(AccountTransport):
         *,
         max_conversations: int = 15,
         include_recent_without_unread: bool = False,
+        conversation_hint: str | None = None,
     ) -> List["ScannedMessage"]:
         return await scan_inbox(
             account,

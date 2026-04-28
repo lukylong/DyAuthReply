@@ -17,6 +17,8 @@ import logging
 import os
 import signal
 import sys
+from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
 
 import django
 
@@ -27,12 +29,21 @@ def _setup_django() -> None:
 
 
 def _setup_logging() -> None:
+    log_dir = Path(__file__).resolve().parent / 'logs'
+    log_dir.mkdir(parents=True, exist_ok=True)
+    worker_log_file = log_dir / 'douyin_worker.log'
     logging.basicConfig(
         level=os.environ.get('DOUYIN_WORKER_LOG_LEVEL', 'INFO').upper(),
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
         handlers=[
             logging.StreamHandler(sys.stdout),
-            logging.FileHandler('douyin_worker.log', encoding='utf-8'),
+            TimedRotatingFileHandler(
+                str(worker_log_file),
+                when='midnight',
+                interval=1,
+                backupCount=30,
+                encoding='utf-8',
+            ),
         ],
     )
 

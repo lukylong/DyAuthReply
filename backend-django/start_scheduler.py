@@ -14,6 +14,8 @@
 import logging
 import os
 import sys
+from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
 
 import django
 
@@ -23,13 +25,23 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'application.settings')
 # 初始化 Django
 django.setup()
 
+LOG_DIR = Path(__file__).resolve().parent / 'logs'
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+SCHEDULER_LOG_FILE = LOG_DIR / 'scheduler.log'
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler('scheduler.log')
+        TimedRotatingFileHandler(
+            str(SCHEDULER_LOG_FILE),
+            when='midnight',
+            interval=1,
+            backupCount=30,
+            encoding='utf-8',
+        ),
     ]
 )
 

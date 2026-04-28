@@ -394,3 +394,161 @@ class AccountIdentityMismatchTests(unittest.TestCase):
         self.assertIsInstance(err, LoginGateDetected)
         self.assertIn("身份核对失败", str(err))
         self.assertIn("acc-1", str(err))
+
+
+class ScanInboxScrollLoopTests(unittest.IsolatedAsyncioTestCase):
+    """
+    回归 bug：抖音 IM 会话列表是虚拟滚动（ReactVirtualized__Grid），DOM 里
+    只渲染当前视口内的项；之前的 scan loop 只在 `round_hits == 0` 时滚动，
+    且找到第一条新消息就 `return`，导致"信息过多没下拉就拿不全"——
+    这里通过模拟会话快照序列 + 滚动 mock，断言新 loop 的滚动遵从语义。
+    """
+
+    async def _run_scan(self, snapshots_by_round, scroll_results, *, max_scan_rounds=10):
+        from core.douyin.runtime import inbox as inbox_mod
+
+        account = MagicMock()
+        account.id = "acc-test-1"
+        account.nickname = "test"
+        account.sec_uid = "MS4wLjAB_test_uid"
+
+        page = MagicMock()
+        page.goto = AsyncMock()
+        page.close = AsyncMock()
+        page.url = "https://creator.douyin.com/im"
+
+        ctx = MagicMock()
+        ctx.new_page = AsyncMock(return_value=page)
+
+        scroll_calls: list[bool] = []
+
+        async def _fake_scroll(_p):
+            r = scroll_results[len(scroll_calls)] if len(scroll_calls) < len(scroll_results) else False
+            scroll_calls.append(r)
+            return r
+
+        snap_iter = iter(snapshots_by_round)
+
+        async def _fake_snap(_p, max_items=50):
+            try:
+                return next(snap_iter)
+            except StopIteration:
+                return []
+
+        with patch.object(inbox_mod.BrowserManager, "get_or_create_context",
+                          new=AsyncMock(return_value=ctx)), \
+             patch.object(inbox_mod, "_looks_like_login_gate",
+                          new=AsyncMock(return_value=False)), \
+             patch.object(inbox_mod, "_ensure_account_sec_uid",
+                          new=AsyncMock(return_value=account.sec_uid)), \
+             patch.object(inbox_mod, "_switch_im_tab",
+                          new=AsyncMock(return_value=False)), \
+             patch.object(inbox_mod, "_read_visible_conversation_snapshot",
+                          new=AsyncMock(side_effect=_fake_snap)), \
+             patch.object(inbox_mod, "_scroll_conversation_list",
+                          new=AsyncMock(side_effect=_fake_scroll)), \
+             patch("core.douyin.runtime.inbox.random_sleep",
+                   new=AsyncMock(return_value=None)), \
+             patch("core.douyin.runtime.inbox.asyncio.sleep",
+                   new=AsyncMock(return_value=None)):
+            result = await inbox_mod.scan_inbox(account, max_scan_rounds=max_scan_rounds)
+
+        return scroll_calls, result
+
+    async def test_first_screen_full_of_aggregate_entries_still_scrolls(self):
+        """
+        修 bug 的关键回归：首屏 2 个聚合入口（陌生人消息/朋友私信）虽然被
+        `_is_aggregate_conversation` continue 跳过、round_hits=0，但 fingerprint
+        已记入 seen，按新逻辑下一轮**仍必须滚动**。
+        旧逻辑会在 round_hits==0 且 _scroll 返回 True 时 sleep 后 continue 而不
+        累计 streak，但 round_hits>0 路径才是触发问题的核心：本测试覆盖
+        "无 round_hits 但有新 fingerprint" 场景，确保滚动每轮都会发生。
+        """
+        # 注意：preview 不能含 ":"，否则 inbox 会按 "陌生人消息: 实际昵称" 规则
+        # 把 nickname 改写成 preview 前缀，绕开 _is_aggregate_conversation 的跳过分支。
+        snaps = [
+            [
+                {'idx': 0, 'unread': 0, 'nickname': '陌生人消息', 'preview': '聚合预览 1',
+                 'fingerprint': 'fp1', 'item': MagicMock()},
+                {'idx': 1, 'unread': 0, 'nickname': '朋友私信', 'preview': '聚合预览 2',
+                 'fingerprint': 'fp2', 'item': MagicMock()},
+            ],
+            [
+                {'idx': 0, 'unread': 0, 'nickname': '群消息', 'preview': '聚合预览 3',
+                 'fingerprint': 'fp3', 'item': MagicMock()},
+            ],
+            # 第 3、4 轮重复返回相同 fingerprint → new_in_round=0 累计两轮 → break
+            [
+                {'idx': 0, 'unread': 0, 'nickname': '群消息', 'preview': '聚合预览 3',
+                 'fingerprint': 'fp3', 'item': MagicMock()},
+            ],
+            [
+                {'idx': 0, 'unread': 0, 'nickname': '群消息', 'preview': '聚合预览 3',
+                 'fingerprint': 'fp3', 'item': MagicMock()},
+            ],
+        ]
+        scroll_results = [True, True, True, True]
+        scrolls, msgs = await self._run_scan(snaps, scroll_results)
+
+        # 第 1、2、3 轮都尝试滚动；第 4 轮 streak=2 break，不再滚
+        self.assertEqual(
+            len(scrolls), 3,
+            f"应当每轮都试滚，预期 3 次滚动，实际 {len(scrolls)}: {scrolls}",
+        )
+        self.assertEqual(msgs, [])
+
+    async def test_scroll_returning_false_breaks_immediately(self):
+        """`_scroll_conversation_list` 返回 False 视为"已滚到底"，立刻退出 while。"""
+        snaps = [
+            [
+                {'idx': 0, 'unread': 0, 'nickname': '陌生人消息', 'preview': '预览 1',
+                 'fingerprint': 'fp1', 'item': MagicMock()},
+            ],
+            # 不应被消费——上一轮滚不动就 break 了
+            [
+                {'idx': 0, 'unread': 0, 'nickname': '朋友私信', 'preview': '预览 2',
+                 'fingerprint': 'fp2', 'item': MagicMock()},
+            ],
+        ]
+        scroll_results = [False]
+
+        scrolls, msgs = await self._run_scan(snaps, scroll_results)
+
+        self.assertEqual(len(scrolls), 1)
+        self.assertFalse(scrolls[0])
+        self.assertEqual(msgs, [])
+
+    async def test_no_new_fingerprint_streak_breaks_after_two_rounds(self):
+        """连续 2 轮没有新会话进入视口 → 视为已覆盖完整列表，不再死磕。"""
+        same = lambda: [{'idx': 0, 'unread': 0, 'nickname': '陌生人消息',  # noqa: E731
+                         'preview': '预览 1', 'fingerprint': 'fp1',
+                         'item': MagicMock()}]
+        snaps = [same() for _ in range(50)]
+        scroll_results = [True] * 50
+
+        scrolls, _msgs = await self._run_scan(snaps, scroll_results, max_scan_rounds=10)
+
+        # round 1: new_in_round=1 → streak=0 → scroll #1
+        # round 2: new_in_round=0 → streak=1 → scroll #2
+        # round 3: new_in_round=0 → streak=2 → break before scroll
+        self.assertEqual(
+            len(scrolls), 2,
+            f"streak>=2 应在第 3 轮 break，预期滚 2 次，实际 {len(scrolls)}",
+        )
+
+    async def test_max_scan_rounds_caps_pathological_loops(self):
+        """每轮都返回新 fingerprint + 永远能滚 → 必须被 max_scan_rounds 兜住。"""
+        snaps = [
+            [{'idx': 0, 'unread': 0, 'nickname': '陌生人消息',
+              'preview': f'预览 {i}', 'fingerprint': f'fp{i}', 'item': MagicMock()}]
+            for i in range(50)
+        ]
+        scroll_results = [True] * 50
+
+        scrolls, _ = await self._run_scan(snaps, scroll_results, max_scan_rounds=5)
+
+        # 5 轮 while 循环，每轮都 scroll 一次（new_in_round 永远 > 0，streak 永远 0）
+        self.assertEqual(
+            len(scrolls), 5,
+            f"max_scan_rounds=5 应当只滚 5 次，实际 {len(scrolls)}",
+        )

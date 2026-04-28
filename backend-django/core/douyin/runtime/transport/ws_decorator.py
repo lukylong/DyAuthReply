@@ -69,6 +69,17 @@ class WsInboundDecorator(AccountTransport):
     async def start(self, account: "DouyinAccount") -> None:
         self._account_id = str(account.id)
         self._loop = asyncio.get_running_loop()
+
+        # 委派 inner 启动（HttpProtocolTransport / BrowserTransport 都需要）
+        # —— 之前漏调导致 SignProvider 没初始化，dual-run / send_text HTTP 路径都拿不到 signer
+        try:
+            await self._inner.start(account)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"[transport.ws] inner.start 异常 account={self._account_id} "
+                f"err={type(e).__name__}: {e}（继续启动 ws 监听，仅 inner 协议路径可能缺失）"
+            )
+
         try:
             ctx = await BrowserManager.get_or_create_context(account)
         except Exception as e:  # noqa: BLE001
@@ -99,6 +110,14 @@ class WsInboundDecorator(AccountTransport):
         self._attached_page_ids.clear()
         self._attached_ws_ids.clear()
         self._signal.set()  # 唤醒所有等待者退出
+        # 同步关 inner，让 SignProvider / fallback 也释放资源
+        try:
+            await self._inner.stop(account)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"[transport.ws] inner.stop 异常 account={self._account_id} "
+                f"err={type(e).__name__}: {e}"
+            )
         logger.info(f"[transport.ws] WsInboundDecorator 停止 account={self._account_id}")
 
     # ---------------- 主 verbs（委派） ----------------
@@ -108,11 +127,13 @@ class WsInboundDecorator(AccountTransport):
         *,
         max_conversations: int = 15,
         include_recent_without_unread: bool = False,
+        conversation_hint: str | None = None,
     ) -> List["ScannedMessage"]:
         return await self._inner.scan_inbox(
             account,
             max_conversations=max_conversations,
             include_recent_without_unread=include_recent_without_unread,
+            conversation_hint=conversation_hint,
         )
 
     async def send_reply(

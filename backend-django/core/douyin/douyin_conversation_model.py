@@ -46,6 +46,14 @@ class DouyinConversation(RootModel):
         help_text="对方头像URL",
     )
 
+    platform_conversation_id = models.CharField(
+        max_length=128,
+        null=True,
+        blank=True,
+        help_text="抖音平台侧 conversation_id（HTTP 协议收发使用）",
+        db_index=True,
+    )
+
     last_message_at = models.DateTimeField(
         null=True,
         blank=True,

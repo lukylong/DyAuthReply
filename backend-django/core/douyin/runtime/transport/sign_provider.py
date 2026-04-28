@@ -34,9 +34,11 @@ import logging
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 from core.douyin.runtime.browser import BrowserManager
+from core.douyin.runtime import selectors as S
 
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, Page
@@ -130,10 +132,152 @@ async ({ method, url, body, body_b64, headers, timeoutMs }) => {
       content_b64: bytesToB64(buf),
     };
   } catch (e) {
-    return { ok: false, error: String(e && e.message || e) };
+    let pageUrl = '';
+    let readyState = '';
+    let online = null;
+    try { pageUrl = String(location && location.href || ''); } catch (_) {}
+    try { readyState = String(document && document.readyState || ''); } catch (_) {}
+    try { online = !!(navigator && navigator.onLine); } catch (_) {}
+    return {
+      ok: false,
+      error: String(e && e.message || e),
+      error_name: String(e && e.name || ''),
+      error_stack: String(e && e.stack || ''),
+      page_url: pageUrl,
+      ready_state: readyState,
+      online: online,
+    };
   } finally {
     clearTimeout(t);
   }
+}
+"""
+
+_SIGNED_XHR_JS = r"""
+async ({ method, url, body, body_b64, headers, timeoutMs }) => {
+  const b64ToBytes = (s) => {
+    const bin = atob(s);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  };
+  const bytesToB64 = (buf) => {
+    const bytes = new Uint8Array(buf || new ArrayBuffer(0));
+    let s = '';
+    const CHUNK = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      s += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+    }
+    return btoa(s);
+  };
+  return await new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    let timer = null;
+    try {
+      xhr.open(method || 'GET', url, true);
+      xhr.withCredentials = true;
+      xhr.responseType = 'arraybuffer';
+      const reqHeaders = headers || {};
+      Object.keys(reqHeaders).forEach((k) => {
+        try { xhr.setRequestHeader(k, reqHeaders[k]); } catch (_) {}
+      });
+      xhr.onload = () => {
+        clearTimeout(timer);
+        const respHeaders = {};
+        try {
+          const raw = xhr.getAllResponseHeaders() || '';
+          raw.trim().split(/[\r\n]+/).forEach((line) => {
+            const idx = line.indexOf(':');
+            if (idx > 0) {
+              const key = line.slice(0, idx).trim().toLowerCase();
+              const val = line.slice(idx + 1).trim();
+              if (key) respHeaders[key] = val;
+            }
+          });
+        } catch (_) {}
+        const buf = xhr.response || new ArrayBuffer(0);
+        let text = '';
+        try { text = new TextDecoder('utf-8', { fatal: false }).decode(buf); } catch (_) { text = ''; }
+        resolve({
+          ok: true,
+          status: xhr.status,
+          url: xhr.responseURL || url,
+          headers: respHeaders,
+          text,
+          content_b64: bytesToB64(buf),
+        });
+      };
+      xhr.onerror = (e) => {
+        clearTimeout(timer);
+        let pageUrl = '';
+        let readyState = '';
+        let online = null;
+        try { pageUrl = String(location && location.href || ''); } catch (_) {}
+        try { readyState = String(document && document.readyState || ''); } catch (_) {}
+        try { online = !!(navigator && navigator.onLine); } catch (_) {}
+        resolve({
+          ok: false,
+          error: String((e && e.message) || 'XMLHttpRequest failed'),
+          error_name: 'XHRNetworkError',
+          error_stack: '',
+          page_url: pageUrl,
+          ready_state: readyState,
+          online,
+        });
+      };
+      xhr.ontimeout = () => {
+        clearTimeout(timer);
+        resolve({
+          ok: false,
+          error: 'XMLHttpRequest timeout',
+          error_name: 'XHRTimeout',
+          error_stack: '',
+          page_url: String(location && location.href || ''),
+          ready_state: String(document && document.readyState || ''),
+          online: !!(navigator && navigator.onLine),
+        });
+      };
+      xhr.onabort = () => {
+        clearTimeout(timer);
+        resolve({
+          ok: false,
+          error: 'XMLHttpRequest aborted',
+          error_name: 'XHRAbort',
+          error_stack: '',
+          page_url: String(location && location.href || ''),
+          ready_state: String(document && document.readyState || ''),
+          online: !!(navigator && navigator.onLine),
+        });
+      };
+      xhr.timeout = timeoutMs || 15000;
+      timer = setTimeout(() => {
+        try { xhr.abort(); } catch (_) {}
+      }, (timeoutMs || 15000) + 50);
+      if (method !== 'GET' && method !== 'HEAD') {
+        if (body_b64) {
+          const bytes = b64ToBytes(body_b64);
+          xhr.send(bytes.buffer);
+        } else if (body !== null && body !== undefined) {
+          xhr.send(body);
+        } else {
+          xhr.send();
+        }
+      } else {
+        xhr.send();
+      }
+    } catch (e) {
+      clearTimeout(timer);
+      resolve({
+        ok: false,
+        error: String(e && e.message || e),
+        error_name: String(e && e.name || 'XHREvalError'),
+        error_stack: String(e && e.stack || ''),
+        page_url: String(location && location.href || ''),
+        ready_state: String(document && document.readyState || ''),
+        online: !!(navigator && navigator.onLine),
+      });
+    }
+  });
 }
 """
 
@@ -144,6 +288,11 @@ _SIGNER_HOSTS = (
     "https://www.douyin.com/",
     "https://creator.douyin.com/",
 )
+
+_SIGNER_HOME_BY_HOST = {
+    "www.douyin.com": "https://www.douyin.com/",
+    "creator.douyin.com": S.CREATOR_HOME,
+}
 
 
 class SignProvider:
@@ -164,7 +313,7 @@ class SignProvider:
     def __init__(
         self,
         *,
-        signer_url: str = "https://www.douyin.com/",
+        signer_url: str = S.CREATOR_HOME,
         evaluate_timeout_ms: int = 15000,
     ) -> None:
         self._signer_url = signer_url
@@ -238,6 +387,56 @@ class SignProvider:
         await self.start(account)
         return self.is_ready
 
+    @staticmethod
+    def _preferred_signer_host(url: str, headers: Optional[dict[str, str]] = None) -> str:
+        candidates = [
+            str((headers or {}).get("origin") or ""),
+            str((headers or {}).get("referer") or ""),
+            str(url or ""),
+        ]
+        for raw in candidates:
+            try:
+                host = urlparse(raw).netloc.lower()
+            except Exception:
+                host = ""
+            if host.endswith("creator.douyin.com"):
+                return "creator.douyin.com"
+            if host.endswith("www.douyin.com"):
+                return "www.douyin.com"
+        return "creator.douyin.com"
+
+    async def _ensure_signer_host(
+        self,
+        preferred_host: str,
+    ) -> None:
+        page = self._page
+        if page is None or page.is_closed():
+            raise SignerUnavailable("signer page 未就绪")
+        current_host = ""
+        try:
+            current_host = urlparse(page.url or "").netloc.lower()
+        except Exception:
+            current_host = ""
+        if current_host == preferred_host:
+            return
+
+        target_url = _SIGNER_HOME_BY_HOST.get(preferred_host) or self._signer_url
+        try:
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
+            await asyncio.sleep(0.8)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"[sign] signer page 切宿主失败 account={self._account_id} "
+                f"from={current_host or 'unknown'} to={preferred_host} err={e}"
+            )
+            raise SignerUnavailable(
+                f"signer host switch failed: {current_host or 'unknown'} -> {preferred_host}: {e}"
+            ) from e
+        logger.info(
+            f"[sign] signer page 已切换宿主 account={self._account_id} "
+            f"host={preferred_host} url={page.url}"
+        )
+
     # ---------------- 主 verbs ----------------
     async def signed_fetch(
         self,
@@ -247,6 +446,7 @@ class SignProvider:
         body: Optional[Union[str, bytes]] = None,
         headers: Optional[dict[str, str]] = None,
         timeout_ms: Optional[int] = None,
+        use_xhr: bool = False,
     ) -> SignedResponse:
         """
         在 signer page 内做一次 fetch。浏览器侧自带的 axios/fetch 拦截器会
@@ -280,24 +480,38 @@ class SignProvider:
         assert page is not None  # type narrow（is_ready 已确保）
 
         async with self._lock:
+            preferred_host = self._preferred_signer_host(url, headers)
+            await self._ensure_signer_host(preferred_host)
             try:
-                result = await page.evaluate(_SIGNED_FETCH_JS, payload)
+                runner = _SIGNED_XHR_JS if use_xhr else _SIGNED_FETCH_JS
+                result = await page.evaluate(runner, payload)
             except Exception as e:  # noqa: BLE001
                 self._fail_streak += 1
                 logger.warning(
                     f"[sign] page.evaluate 抛错 account={self._account_id} "
-                    f"streak={self._fail_streak} err={type(e).__name__}: {e}"
+                    f"streak={self._fail_streak} transport={'xhr' if use_xhr else 'fetch'} "
+                    f"err={type(e).__name__}: {e}"
                 )
                 raise SignerUnavailable(f"signed_fetch evaluate failed: {e}") from e
 
         if not result or not result.get("ok"):
             self._fail_streak += 1
             err = result.get("error") if isinstance(result, dict) else "no result"
+            err_name = result.get("error_name") if isinstance(result, dict) else ""
+            page_url = result.get("page_url") if isinstance(result, dict) else ""
+            ready_state = result.get("ready_state") if isinstance(result, dict) else ""
+            online = result.get("online") if isinstance(result, dict) else None
             logger.warning(
                 f"[sign] signed_fetch 浏览器侧失败 account={self._account_id} "
-                f"streak={self._fail_streak} err={err}"
+                f"streak={self._fail_streak} err={err} "
+                f"err_name={err_name or 'unknown'} page={page_url or 'unknown'} "
+                f"ready_state={ready_state or 'unknown'} online={online}"
             )
-            raise SignerUnavailable(f"signed_fetch failed in browser: {err}")
+            raise SignerUnavailable(
+                "signed_fetch failed in browser: "
+                f"{err} (name={err_name or 'unknown'}, page={page_url or 'unknown'}, "
+                f"ready_state={ready_state or 'unknown'}, online={online})"
+            )
 
         # 解 content base64；解失败不致命，仅 content 为空
         content_b64 = result.get("content_b64") or ""

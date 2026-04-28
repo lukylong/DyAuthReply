@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Iterator, List, Optional, Tuple, Union
 
@@ -57,6 +58,8 @@ _FRONTIER_URL_HINTS = (
     "msns",
     "wss://",
 )
+
+_CONVERSATION_ID_RE = re.compile(r"\b\d+:\d+:\d+:\d+\b")
 
 
 # -------------------- 数据结构 --------------------
@@ -244,6 +247,7 @@ def decode_frontier_frame(
     texts: List[Tuple[int, str]] = []  # (depth, text)
     keywords_hit: set[str] = set()
     candidate_ids: List[str] = []
+    candidate_conversation_ids: List[str] = []
     candidate_ts: List[int] = []
 
     def walk(fs: List[ProtoField], depth: int) -> None:
@@ -257,6 +261,9 @@ def decode_frontier_frame(
                     # sec_uid 候选
                     if f.text.startswith("MS4w") or "sec_uid" in f.text:
                         candidate_ids.append(f.text)
+                    # conversation_id 候选
+                    for cid in _CONVERSATION_ID_RE.findall(f.text):
+                        candidate_conversation_ids.append(cid)
             if f.wire_type in (WIRE_VARINT, WIRE_FIXED64) and isinstance(f.value, int):
                 # 1.4e12 ~ 2e13: ms 时间戳常见量级（2014-11-05 ~ 2603）
                 if 1_400_000_000_000 <= f.value <= 20_000_000_000_000:
@@ -290,6 +297,12 @@ def decode_frontier_frame(
     if candidate_ids:
         sender_hint = candidate_ids[0][:128]
 
+    conversation_hint: Optional[str] = None
+    if candidate_conversation_ids:
+        conversation_hint = candidate_conversation_ids[0][:128]
+    elif sender_hint is not None:
+        conversation_hint = sender_hint
+
     server_ts_ms: Optional[int] = None
     if candidate_ts:
         # 取最大值（最近的事件）
@@ -299,7 +312,7 @@ def decode_frontier_frame(
 
     return FrontierIMHint(
         direction=direction,
-        conversation_hint=sender_hint,
+        conversation_hint=conversation_hint,
         sender_hint=sender_hint,
         text_candidate=text_candidate,
         server_ts_ms=server_ts_ms,

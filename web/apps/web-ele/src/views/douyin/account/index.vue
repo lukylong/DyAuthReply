@@ -267,11 +267,9 @@ let douyinWs: null | WebSocketManager = null;
 let supervisionWindow: null | Window = null;
 const isLoginFlowActive = computed(() => !!loginPendingAccountId.value);
 const supervisionUrl = computed(() => {
-  const url = new URL(window.location.href);
-  url.protocol = 'http:';
-  url.port = '6080';
-  url.pathname = '/vnc.html';
-  url.search = 'autoconnect=1&resize=scale&path=websockify';
+  const url = new URL(window.location.origin);
+  url.pathname = '/vnc/vnc.html';
+  url.search = 'autoconnect=1&resize=scale&path=vnc/websockify';
   url.hash = '';
   return url.toString();
 });

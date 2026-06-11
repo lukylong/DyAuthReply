@@ -37,6 +37,15 @@ from core.douyin.douyin_rule_api import router as douyin_rule_router
 from core.douyin.douyin_session_api import router as douyin_session_router
 from core.douyin.douyin_stat_api import router as douyin_stat_router
 from core.douyin.douyin_template_api import router as douyin_template_router
+from core.social.template_api import router as social_template_router
+from core.social.quick_reply_api import router as social_quick_reply_router
+from core.social.rule_api import router as social_rule_router
+from core.social.blacklist_api import router as social_blacklist_router
+from core.kuaishou.kuaishou_account_api import router as kuaishou_account_router
+from core.kuaishou.kuaishou_account_group_api import router as kuaishou_account_group_router
+from core.kuaishou.kuaishou_session_api import router as kuaishou_session_router
+from core.kuaishou.kuaishou_event_api import router as kuaishou_event_router
+from core.kuaishou.kuaishou_reply_log_api import router as kuaishou_reply_log_router
 
 
 # 创建核心模块的总路由
@@ -74,3 +83,16 @@ core_router.add_router("/douyin", douyin_quick_reply_router, tags=["Core-Douyin-
 core_router.add_router("/douyin", douyin_event_router, tags=["Core-Douyin-Event"])
 core_router.add_router("/douyin", douyin_stat_router, tags=["Core-Douyin-Stat"])
 core_router.add_router("/douyin", douyin_reply_log_router, tags=["Core-Douyin-ReplyLog"])
+
+# 跨平台共用层（抖音/快手共享：模板、快捷回复、规则、黑名单）
+core_router.add_router("/social", social_template_router, tags=["Core-Social-Template"])
+core_router.add_router("/social", social_quick_reply_router, tags=["Core-Social-QuickReply"])
+core_router.add_router("/social", social_rule_router, tags=["Core-Social-Rule"])
+core_router.add_router("/social", social_blacklist_router, tags=["Core-Social-Blacklist"])
+
+# 快手账号托管（平台运行时层；规则/模板/黑名单复用 /social）
+core_router.add_router("/kuaishou", kuaishou_account_router, tags=["Core-Kuaishou-Account"])
+core_router.add_router("/kuaishou", kuaishou_account_group_router, tags=["Core-Kuaishou-AccountGroup"])
+core_router.add_router("/kuaishou", kuaishou_session_router, tags=["Core-Kuaishou-Session"])
+core_router.add_router("/kuaishou", kuaishou_event_router, tags=["Core-Kuaishou-Event"])
+core_router.add_router("/kuaishou", kuaishou_reply_log_router, tags=["Core-Kuaishou-ReplyLog"])

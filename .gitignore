@@ -1,4 +1,5 @@
 /backend-django/tmp
+.codex-tasks/
 .env
 .env.bak
 __pycache__/

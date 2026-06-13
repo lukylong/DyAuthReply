@@ -146,7 +146,7 @@ class Command(BaseCommand):
             _BASE_IM_HEADERS,
             _ENDPOINTS,
         )
-        from core.douyin.runtime.transport.sign_provider import SignerUnavailable
+        from core.douyin.runtime.transport.sign_types import SignerUnavailable
         from core.douyin.runtime.transport.wire import (
             decode_get_by_user_response,
             decode_list_conversations_response,

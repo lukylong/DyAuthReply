@@ -37,7 +37,6 @@ from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.utils import timezone
 
-from core.douyin.runtime.browser import BrowserManager
 from core.douyin.runtime.message_store import (
     AccountIdentityMismatch,
     LoginGateDetected,
@@ -46,13 +45,7 @@ from core.douyin.runtime.message_store import (
     _recent_outbound_replies_log,
     _recent_outbound_texts,
 )
-from core.douyin.runtime.inbox import (
-    _read_visible_conversation_snapshot,
-    _switch_im_tab,
-)
 from core.douyin.runtime.account_status import mark_account_login_invalid
-from core.douyin.runtime.login import is_login_valid, scan_qrcode_login
-from core.douyin.runtime.humanize import human_click
 from core.douyin.runtime.matcher import match as match_rule
 from core.douyin.runtime.transport import AccountTransport, build_transport
 from core.douyin.runtime.ws_notify import push_event_log, push_to_user
@@ -62,93 +55,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
-def _normalize_nickname(name: Optional[str]) -> str:
-    return (name or "").strip().lower().replace(" ", "")
-
-
-async def _find_conversation_item_across_tabs(
-    page,
-    *,
-    target_nick: str,
-    target_preview: str,
-    max_items: int = 30,
-):
-    """
-    在全部私信分组里搜索目标会话。
-
-    返回 (locator, tab_label)。locator 找到则可直接点击。
-    """
-    search_tabs = [
-        None,
-        "陌生人",
-        "陌生人消息",
-        "陌生人私信",
-        "朋友私信",
-        "群消息",
-        "全部",
-        "全部消息",
-        "已关注",
-        "粉丝",
-    ]
-    seen_tabs: set[str] = set()
-    target_nick_norm = _normalize_nickname(target_nick)
-    target_preview = (target_preview or "").strip()[:24]
-
-    for tab_label in search_tabs:
-        tab_key = tab_label or "__current__"
-        if tab_key in seen_tabs:
-            continue
-        seen_tabs.add(tab_key)
-
-        if tab_label:
-            try:
-                if not await _switch_im_tab(page, tab_label):
-                    continue
-                await asyncio.sleep(0.8)
-            except Exception:
-                continue
-
-        try:
-            snapshots = await _read_visible_conversation_snapshot(page, max_items=max_items)
-        except Exception as e:  # noqa: BLE001
-            logger.debug(
-                f"[reply] 读取会话快照失败 tab={tab_label or '默认'} err={e}"
-            )
-            continue
-
-        logger.info(
-            f"[reply] 会话搜索 tab={tab_label or '默认'} count={len(snapshots)} "
-            f"target_nick={target_nick!r} target_preview={target_preview!r}"
-        )
-        for snap in snapshots:
-            nick_norm = _normalize_nickname(str(snap.get('nickname') or ''))
-            preview = str(snap.get('preview') or '')
-            nick_exact = bool(target_nick_norm) and nick_norm == target_nick_norm
-            nick_fuzzy = bool(target_nick_norm) and (
-                target_nick_norm in nick_norm or nick_norm in target_nick_norm
-            )
-            preview_hit = bool(target_preview) and target_preview in preview
-            if nick_exact or nick_fuzzy or preview_hit:
-                return snap.get('item'), tab_label or '默认'
-    return None, None
-
-
-async def _wait_im_input_ready(page, timeout_ms: int = 4000) -> bool:
-    """等待 IM 输入框可见，避免刚切会话时 sender 立即报“未找到输入框”."""
-    from core.douyin.runtime import selectors as S
-
-    per_selector = max(500, int(timeout_ms / max(1, len(S.IM_INPUT_BOX))))
-    for sel in S.IM_INPUT_BOX:
-        try:
-            loc = page.locator(sel).first
-            if await loc.count() == 0:
-                continue
-            await loc.wait_for(state="visible", timeout=per_selector)
-            return True
-        except Exception:
-            continue
-    return False
 
 # 命令频道（与 API 侧保持一致）
 CMD_CHANNEL_PATTERN = "douyin:cmd:*"
@@ -451,10 +357,8 @@ class DouyinWorker:
         self.idle_poll_max = idle_poll_max
 
         self._tasks: dict[str, asyncio.Task] = {}
-        self._login_tasks: dict[str, asyncio.Task] = {}
         self._account_metrics: dict[str, dict] = {}
-        # 每个账号一把命令串行锁：避免 logout 还没关 chromium 时 focus 命令并发抢到旧 ctx，
-        # 表现为"刚登出立刻点监管页，弹出来还是已登录的页面"。
+        # 每个账号一把命令串行锁：同账号命令（logout / manual_reply 等）串行执行，避免竞态。
         self._account_command_locks: dict[str, asyncio.Lock] = {}
         self._redis = None
         self._stop = asyncio.Event()
@@ -468,7 +372,7 @@ class DouyinWorker:
             self._transport_factory = transport_factory
         else:
             ws_inbound = bool(getattr(settings, 'DOUYIN_TRANSPORT_WS_INBOUND', False))
-            backend = str(getattr(settings, 'DOUYIN_TRANSPORT_BACKEND', 'browser') or 'browser')
+            backend = str(getattr(settings, 'DOUYIN_TRANSPORT_BACKEND', 'http_protocol') or 'http_protocol')
             dual_run = bool(getattr(settings, 'DOUYIN_TRANSPORT_DUAL_RUN', False))
             self._transport_factory = (
                 lambda _backend=backend, _ws=ws_inbound, _dr=dual_run: build_transport(
@@ -497,7 +401,6 @@ class DouyinWorker:
             logger.info("[worker] 进入关停流程")
             for aid in list(self._tasks.keys()):
                 await self._stop_account(aid)
-            await BrowserManager.stop()
             if self._redis is not None:
                 with suppress(Exception):
                     await self._redis.close()
@@ -619,24 +522,11 @@ class DouyinWorker:
         parts: list[str],
         payload: dict,
     ) -> None:
-        if action == 'login':
-            acc = await _fetch_account_orm(account_id)
-            if acc is None:
-                logger.warning(f"[worker] login 命令忽略：账号不存在 account={account_id}")
-                return
-            logger.info(
-                f"[worker] 即时扫码登录任务派发 account={account_id} nickname={acc.nickname!r}"
+        if action in ('login', 'login_cancel', 'focus'):
+            # 浏览器扫码登录 / 监管页聚焦已废弃：改为前端导入凭证（cookie + keys + web_protect）。
+            logger.warning(
+                f"[worker] 命令 {action!r} 已废弃（脱浏览器，纯协议）：请改用导入凭证 account={account_id}"
             )
-            if account_id in self._login_tasks:
-                logger.warning(f"[worker] 已存在扫码登录任务，忽略重复派发 account={account_id}")
-                return
-            # 立即占位 _login_tasks，避免清理旧 context 期间被并发到的 focus / scan
-            # 命令绕过登录守卫顶掉即将弹出的扫码 tab；真正的 close_context / 清状态
-            # 都挪进 _run_login_task 内部串行执行。
-            self._start_login_task(account_id, acc)
-        elif action == 'login_cancel':
-            logger.info(f"[worker] login_cancel 命令 account={account_id}")
-            await self._cancel_login_task(account_id)
         elif action == 'manual_reply':
             logger.info(f"[worker] manual_reply 命令 account={account_id} payload={payload}")
             await self._send_manual_reply(
@@ -653,27 +543,10 @@ class DouyinWorker:
             )
         elif action == 'logout':
             logger.info(f"[worker] logout 命令 account={account_id}")
-            await self._cancel_login_task(account_id)
             await self._stop_account(account_id)
             from core.douyin.runtime.storage import delete_account_runtime_state
             delete_account_runtime_state(account_id)
             logger.info(f"[worker] logout 完成 account={account_id} storage/profile 已清除")
-        elif action == 'focus':
-            # 状态守卫：未登录账号绝不打开 chromium。
-            # 否则会拿"上次未来得及清理的 user_data_dir + cookies"拉起一个看似登录的窗口，
-            # 表现为"刚登出，点监管页又看到已登录页"。
-            acc_row = await _fetch_account_orm(account_id)
-            if acc_row is None:
-                logger.warning(f"[worker] focus 命令忽略：账号不存在 account={account_id}")
-                return
-            if int(getattr(acc_row, 'status', 0) or 0) != 1:
-                logger.warning(
-                    f"[worker] focus 命令忽略：账号未登录 account={account_id} "
-                    f"status={acc_row.status}（请先扫码登录后再聚焦监管页）"
-                )
-                return
-            logger.info(f"[worker] focus 命令 account={account_id}")
-            await self._focus_account_page(account_id)
         elif action == 'session':
             # channel 形如 douyin:cmd:session:<account_id>:pause  (payload.action 也可)
             sub = parts[4] if len(parts) > 4 else payload.get('action', '')
@@ -698,7 +571,6 @@ class DouyinWorker:
                     await transport.stop(acc_row)
             except Exception as e:  # noqa: BLE001
                 logger.debug(f"[worker] transport.stop 异常 account={account_id} err={e}")
-        await BrowserManager.close_context(account_id)
         logger.info(f"[worker] 已停止账号协程 {account_id}")
 
     async def _get_or_create_transport(self, account: "DouyinAccount") -> AccountTransport:
@@ -721,88 +593,9 @@ class DouyinWorker:
         self._transports[account_id] = transport
         return transport
 
-    def _start_login_task(self, account_id: str, account) -> asyncio.Task:
-        logger.info(
-            f"[worker] 创建扫码登录任务 account={account_id} nickname={getattr(account, 'nickname', '')!r}"
-        )
-        task = asyncio.create_task(
-            self._run_login_task(account_id, account),
-            name=f"dy-login-{account_id[:8]}",
-        )
-        self._login_tasks[account_id] = task
-        return task
-
-    async def _run_login_task(self, account_id: str, account) -> bool:
-        try:
-            logger.info(f"[worker] 扫码登录任务启动 account={account_id}")
-            # 串行清理：旧 BrowserContext + 持久化 storage state；
-            # 必须在 task 内做，这样 _login_tasks 字典上的占位先于 close_context 生效，
-            # focus / manual_reply / manual_auto_reply 等并发命令的守卫一定能看到。
-            try:
-                await BrowserManager.close_context(account_id)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"[worker] login 前关闭旧 context 失败 account={account_id} err={e}")
-            try:
-                from core.douyin.runtime.storage import delete_account_runtime_state
-                delete_account_runtime_state(account_id)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"[worker] login 前清理 runtime state 失败 account={account_id} err={e}")
-            ok = await scan_qrcode_login(account)
-            logger.info(f"[worker] 扫码登录任务结束 account={account_id} ok={ok}")
-            return ok
-        except asyncio.CancelledError:
-            logger.info(f"[worker] 已取消扫码登录任务 account={account_id}")
-            raise
-        except Exception as e:  # noqa: BLE001
-            logger.exception(f"[worker] 扫码登录任务异常 account={account_id}: {e}")
-            raise
-        finally:
-            self._login_tasks.pop(account_id, None)
-
-    async def _cancel_login_task(self, account_id: str) -> None:
-        task = self._login_tasks.pop(account_id, None)
-        if task is None:
-            logger.info(f"[worker] 当前无可取消的扫码登录任务 account={account_id}")
-            return
-        task.cancel()
-        with suppress(asyncio.CancelledError, Exception):
-            await task
-        await BrowserManager.close_context(account_id)
-        logger.info(f"[worker] 扫码登录任务已取消并关闭上下文 account={account_id}")
-
-    async def _focus_account_page(self, account_id: str) -> None:
-        account = await _fetch_account_orm(account_id)
-        if account is None:
-            logger.warning(f"[worker] focus 忽略：账号不存在 account={account_id}")
-            return
-        # 登录任务进行中时不要 focus —— focus 会去 navigate pages[0]，
-        # 而 pages[0] 通常就是当前显示二维码的登录 tab，会把扫码页直接顶掉。
-        login_task = self._login_tasks.get(account_id)
-        if login_task is not None and not login_task.done():
-            logger.info(
-                f"[worker] focus 命令被忽略：扫码登录中，避免顶掉二维码页 account={account_id}"
-            )
-            return
-        try:
-            from core.douyin.runtime import selectors as S
-            target_url = S.CREATOR_IM if getattr(account, 'status', None) == 1 else S.CREATOR_HOME
-        except Exception:
-            target_url = None
-        url = await BrowserManager.focus_account_page(account, target_url=target_url)
-        if url:
-            logger.info(f"[worker] 已聚焦账号页面 account={account_id} url={url}")
-        else:
-            logger.warning(f"[worker] 聚焦账号页面失败 account={account_id}")
-
     async def _send_manual_reply(self, account_id: str, *, conversation_id: str, text: str) -> None:
         if not conversation_id or not text.strip():
             logger.warning(f"[worker] manual_reply 参数不完整 account={account_id}")
-            return
-        login_task = self._login_tasks.get(account_id)
-        if login_task is not None and not login_task.done():
-            logger.warning(
-                f"[worker] manual_reply 拒绝：扫码登录中 account={account_id} conv={conversation_id}"
-            )
             return
         account = await _fetch_account_orm(account_id)
         conv = await _fetch_conversation(account_id, conversation_id)
@@ -842,12 +635,6 @@ class DouyinWorker:
     async def _run_manual_auto_reply_test(self, account_id: str, *, conversation_id: str, text: str) -> None:
         if not conversation_id or not text.strip():
             logger.warning(f"[reply] manual_auto_reply 参数不完整 account={account_id}")
-            return
-        login_task = self._login_tasks.get(account_id)
-        if login_task is not None and not login_task.done():
-            logger.warning(
-                f"[reply] manual_auto_reply 拒绝：扫码登录中 account={account_id} conv={conversation_id}"
-            )
             return
         account = await _fetch_account_orm(account_id)
         conv = await _fetch_conversation(account_id, conversation_id)
@@ -917,14 +704,6 @@ class DouyinWorker:
         while not self._stop.is_set():
             loop_count += 1
             try:
-                # 关键：登录任务正在跑（同一 BrowserContext 上）就别开新 tab 抢占，
-                # 否则会把用户的二维码 tab 顶到后台、刷新成新页面，登录态收不到。
-                if account_id in self._login_tasks and not self._login_tasks[account_id].done():
-                    logger.info(
-                        f"[worker] ⏸ 扫码登录任务进行中，跳过本轮 scan account={account_id}"
-                    )
-                    await asyncio.sleep(5)
-                    continue
                 # 静默时段不扫描
                 if _in_silent_window(a.get('silent_start'), a.get('silent_end')):
                     logger.info(
@@ -961,29 +740,8 @@ class DouyinWorker:
                     )
                     await asyncio.sleep(30)
                     continue
-                # 纯协议(http_protocol)模式不再用浏览器打开创作者中心校验登录态
-                # （会拉起 Chromium，与脱浏览器目标冲突）；cookie 失效改由 scan_inbox
-                # 的 HTTP 调用失败来暴露。仅 browser 后端保留此浏览器校验。
-                _login_check_needs_browser = str(
-                    getattr(settings, 'DOUYIN_TRANSPORT_BACKEND', 'browser') or 'browser'
-                ).lower() != 'http_protocol'
-                if _login_check_needs_browser and (loop_count == 1 or loop_count % 10 == 0):
-                    valid = await is_login_valid(acc_row)
-                    if not valid:
-                        logger.warning(
-                            f"[worker] 检测到在线账号登录态不可用，打回重新登录 account={account_id}"
-                        )
-                        await mark_account_login_invalid(
-                            account_id,
-                            "在线校验失败：业务页面不可用",
-                            keep_pending_verification=bool(
-                                acc_row.pending_verification_until
-                                and timezone.now() < acc_row.pending_verification_until
-                            ),
-                        )
-                        await asyncio.sleep(15)
-                        return
-
+                # 纯协议模式不再用浏览器校验登录态；cookie 失效由 scan_inbox 的 HTTP
+                # 调用失败暴露，再由 signer 健康度 / mark_account_login_invalid 打回。
                 backfill_mode = acc_row.last_history_sync_at is None
 
                 # 取（或首建）该账号的 transport（WS 快路径首次会在这里 attach 监听）

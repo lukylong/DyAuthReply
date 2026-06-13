@@ -39,6 +39,8 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 
 from core.douyin.runtime.browser import BrowserManager
 from core.douyin.runtime import selectors as S
+# 共享类型已下沉到中性模块 sign_types（不依赖浏览器）；此处 re-export 保持兼容。
+from core.douyin.runtime.transport.sign_types import SignedResponse, SignerUnavailable
 
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, Page
@@ -46,34 +48,6 @@ if TYPE_CHECKING:
     from core.douyin.douyin_account_model import DouyinAccount
 
 logger = logging.getLogger(__name__)
-
-
-class SignerUnavailable(RuntimeError):
-    """签名页不可用（浏览器崩了 / cookie 过期 / page.evaluate 抛）"""
-
-
-@dataclass
-class SignedResponse:
-    """signed_fetch 的标准化返回。
-
-    body 双形态：
-      - text: 当 fetch 成功且能 utf-8 解码时填入，便于 JSON 接口直接 .json()
-      - content: 永远填二进制（即便是 JSON 接口也填 utf-8 编码）
-        protobuf / 任意二进制接口必须用 .content，不要用 .text
-    """
-
-    status: int
-    url: str
-    headers: dict[str, str] = field(default_factory=dict)
-    text: str = ""
-    content: bytes = b""
-
-    def json(self) -> Any:
-        return json.loads(self.text)
-
-    @property
-    def ok(self) -> bool:
-        return 200 <= self.status < 300
 
 
 # 浏览器侧 fetch 包装：

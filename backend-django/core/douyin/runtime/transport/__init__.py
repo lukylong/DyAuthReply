@@ -32,7 +32,8 @@ from core.douyin.runtime.transport.base import AccountTransport, InboundEvent
 from core.douyin.runtime.transport.browser import BrowserTransport
 from core.douyin.runtime.transport.dual_run import DualRunDecorator
 from core.douyin.runtime.transport.http_protocol import HttpProtocolTransport
-from core.douyin.runtime.transport.sign_provider import SignProvider, SignerUnavailable
+from core.douyin.runtime.transport.sign_provider import SignProvider
+from core.douyin.runtime.transport.sign_types import SignerUnavailable
 from core.douyin.runtime.transport.ws_decorator import WsInboundDecorator
 
 logger = logging.getLogger(__name__)

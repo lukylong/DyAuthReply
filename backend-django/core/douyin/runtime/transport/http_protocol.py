@@ -45,9 +45,11 @@ from core.douyin.runtime.transport.wire.codec import (
     get_first_str,
     iter_fields,
 )
-from core.douyin.runtime.transport.sign_provider import (
+from core.douyin.runtime.transport.sign_types import (
     SignedResponse,
     SignerUnavailable,
+)
+from core.douyin.runtime.transport.sign_provider import (
     SignProvider,
 )
 from core.douyin.runtime.transport.wire import (

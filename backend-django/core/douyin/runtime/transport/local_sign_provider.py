@@ -37,7 +37,7 @@ from urllib.parse import urlparse
 
 from asgiref.sync import sync_to_async
 
-from core.douyin.runtime.transport.sign_provider import SignedResponse, SignerUnavailable
+from core.douyin.runtime.transport.sign_types import SignedResponse, SignerUnavailable
 from core.douyin.runtime.transport.sign.signer import sign_params
 
 if TYPE_CHECKING:

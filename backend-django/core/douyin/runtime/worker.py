@@ -48,7 +48,8 @@ from core.douyin.runtime.inbox import (
     _recent_outbound_texts,
     _switch_im_tab,
 )
-from core.douyin.runtime.login import is_login_valid, mark_account_login_invalid, scan_qrcode_login
+from core.douyin.runtime.account_status import mark_account_login_invalid
+from core.douyin.runtime.login import is_login_valid, scan_qrcode_login
 from core.douyin.runtime.humanize import human_click
 from core.douyin.runtime.matcher import match as match_rule
 from core.douyin.runtime.sender import dump_manual_reply_debug

@@ -32,7 +32,7 @@ from urllib.parse import urlparse
 
 from asgiref.sync import sync_to_async
 
-from core.douyin.runtime.transport.sign_provider import SignedResponse, SignerUnavailable
+from core.douyin.runtime.transport.sign_types import SignedResponse, SignerUnavailable
 from core.douyin.runtime.transport.sign import js_signer
 from core.douyin.runtime.transport.sign.mstoken import resolve_mstoken
 # 复用 LocalSignProvider 已经校准过的 web 公共参数表与小工具，避免重复维护

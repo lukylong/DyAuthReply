@@ -286,6 +286,42 @@ _BASE_CREATOR_JSON_HEADERS: dict[str, str] = {
 }
 
 
+def _build_default_sign_provider():
+    """
+    按 DOUYIN_SIGN_BACKEND 选择签名后端（默认 browser，零回归）：
+
+      - 'browser'（默认）: SignProvider —— 浏览器内 fetch，前端拦截器自动注入签名头
+      - 'local'           : LocalSignProvider —— 纯 Python 本地算 a_bogus + msToken，
+                            httpx 带 cookie/代理直发（脱浏览器，但缺 bd-ticket-guard）
+      - 'js'              : JsSignProvider —— PyExecJS 执行 vendored dy_ab.js，
+                            a_bogus + bd-ticket-guard 齐全（脱浏览器，私信可发，推荐）
+
+    注意：local/js 是灰度路径，imapi 是否接受需用真实 cookie/抓包验证（关键闸门）。
+    未就绪/失败时 HttpProtocolTransport 仍会按现有逻辑 fallback 到 BrowserTransport。
+    """
+    backend = "browser"
+    try:
+        from django.conf import settings as _s
+        backend = str(getattr(_s, "DOUYIN_SIGN_BACKEND", "browser") or "browser").lower()
+    except Exception:  # noqa: BLE001
+        backend = "browser"
+
+    if backend == "js":
+        from core.douyin.runtime.transport.js_sign_provider import JsSignProvider
+        logger.info(
+            "[transport.http] 签名后端 = js（JsSignProvider：dy_ab.js + bd-ticket-guard，无浏览器）"
+        )
+        return JsSignProvider()
+
+    if backend == "local":
+        from core.douyin.runtime.transport.local_sign_provider import LocalSignProvider
+        logger.info("[transport.http] 签名后端 = local（LocalSignProvider，无浏览器）")
+        return LocalSignProvider()
+
+    logger.info("[transport.http] 签名后端 = browser（SignProvider）")
+    return SignProvider()
+
+
 class HttpProtocolTransport(AccountTransport):
     """
     Hybrid HTTP 协议 transport：浏览器只做签名 + cookie 维护，
@@ -309,7 +345,7 @@ class HttpProtocolTransport(AccountTransport):
         send_reply_enabled: Optional[bool] = None,
         scan_inbox_enabled: Optional[bool] = None,
     ) -> None:
-        self._sign = sign_provider or SignProvider()
+        self._sign = sign_provider or _build_default_sign_provider()
         # fallback 默认就是 BrowserTransport —— 它已经被 worker / sender 验证过
         self._fallback: AccountTransport = fallback or BrowserTransport()
         self._max_signer_failures = int(max_signer_failures)
@@ -896,27 +932,62 @@ class HttpProtocolTransport(AccountTransport):
             raise ValueError(f"{log_tag} 需要 conversation_id")
 
         endpoint = _ENDPOINTS["send_message"]
-        template_body = await _load_latest_successful_send_template(
-            str(account.id),
-            conversation_id,
-        )
-        if template_body:
-            body, client_msg_id, seq_id = encode_send_message_request_from_template(
-                template_body=template_body,
+
+        # 优先走 pb2 编码器（带完整 bd-ticket-guard 鉴权）——仅当签名后端持有 bd_ticket（js）。
+        # 缺 private_key（如 browser 后端）时回退到旧的手写 codec / 模板路径。
+        bd_ticket: dict = {}
+        get_bd = getattr(self._sign, "get_bd_ticket", None)
+        if callable(get_bd):
+            try:
+                bd_ticket = get_bd() or {}
+            except Exception:  # noqa: BLE001
+                bd_ticket = {}
+
+        encoder = "legacy"
+        if bd_ticket.get("private_key"):
+            from core.douyin.runtime.transport.wire.im_send_pb2 import (
+                encode_send_message_request_pb2,
+            )
+
+            s_v_web_id = ""
+            try:
+                cookies = await self._sign.get_cookies()
+                s_v_web_id = (cookies or {}).get("s_v_web_id", "")
+            except Exception:  # noqa: BLE001
+                s_v_web_id = ""
+
+            body, client_msg_id, seq_id = await sync_to_async(
+                encode_send_message_request_pb2
+            )(
                 conversation_id=conversation_id,
                 text=normalized,
+                bd_ticket=bd_ticket,
+                s_v_web_id=s_v_web_id,
             )
+            encoder = "pb2"
+            template_body = None
         else:
-            body, client_msg_id, seq_id = encode_send_message_request(
-                conversation_id=conversation_id,
-                text=normalized,
+            template_body = await _load_latest_successful_send_template(
+                str(account.id),
+                conversation_id,
             )
+            if template_body:
+                body, client_msg_id, seq_id = encode_send_message_request_from_template(
+                    template_body=template_body,
+                    conversation_id=conversation_id,
+                    text=normalized,
+                )
+            else:
+                body, client_msg_id, seq_id = encode_send_message_request(
+                    conversation_id=conversation_id,
+                    text=normalized,
+                )
 
         logger.info(
             f"[transport.http] {log_tag} → POST {endpoint['url']} "
             f"account={account.id} conv={conversation_id} "
             f"client_msg_id={client_msg_id} seq_id={seq_id} body_len={len(body)} "
-            f"template={'Y' if template_body else 'N'}"
+            f"encoder={encoder} template={'Y' if template_body else 'N'}"
         )
 
         resp: SignedResponse = await self._sign.signed_fetch(

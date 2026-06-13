@@ -41,6 +41,7 @@ import {
   deleteDouyinAccountApi,
   focusDouyinAccountApi,
   getDouyinAccountListApi,
+  importDouyinCredentialApi,
   patchDouyinAccountApi,
   triggerDouyinLoginApi,
   triggerDouyinLogoutApi,
@@ -471,6 +472,54 @@ async function onLogout(row: DouyinAccount) {
   }
 }
 
+// ---------------- 导入 Cookie 登录态（替代扫码登录，无浏览器）----------------
+const importDialogVisible = ref(false);
+const importAccountId = ref<string>('');
+const importAccountName = ref<string>('');
+const importSubmitting = ref(false);
+const importForm = reactive({
+  cookie: '',
+  web_protect: '',
+  keys: '',
+  user_agent: '',
+});
+
+function openImport(row: DouyinAccount) {
+  importAccountId.value = row.id;
+  importAccountName.value = row.nickname;
+  importForm.cookie = '';
+  importForm.web_protect = '';
+  importForm.keys = '';
+  importForm.user_agent = '';
+  importDialogVisible.value = true;
+}
+
+async function onImportSubmit() {
+  const cookie = importForm.cookie.trim();
+  const webProtect = importForm.web_protect.trim();
+  const keys = importForm.keys.trim();
+  if (!cookie && !webProtect && !keys) {
+    ElMessage.warning('请至少粘贴 Cookie，或填写要补充的 web_protect / keys');
+    return;
+  }
+  importSubmitting.value = true;
+  try {
+    const res = await importDouyinCredentialApi(importAccountId.value, {
+      cookie: cookie || undefined,
+      web_protect: webProtect || undefined,
+      keys: keys || undefined,
+      user_agent: importForm.user_agent.trim() || undefined,
+    });
+    ElMessage.success(res.message || '登录态已导入');
+    importDialogVisible.value = false;
+    loadData();
+  } catch (error: any) {
+    ElMessage.error(error?.response?.data?.detail || '导入失败');
+  } finally {
+    importSubmitting.value = false;
+  }
+}
+
 function onSelectionChange(rows: DouyinAccount[]) {
   selected.value = rows;
 }
@@ -614,26 +663,17 @@ onMounted(loadData);
             <template #default="{ row }">
               <ElButton
                 link
-                type="info"
-                size="small"
-                @click="openSupervisionPageDirect(row)"
-              >
-                监管页
-              </ElButton>
-              <ElButton
-                link
                 type="primary"
                 size="small"
-                :disabled="isLoginFlowActive"
-                @click="onLogin(row)"
+                @click="openImport(row)"
               >
-                {{ isLoginFlowActive ? '登录中…' : '扫码登录' }}
+                导入Cookie
               </ElButton>
               <ElButton
                 link
                 type="warning"
                 size="small"
-                :disabled="row.status !== 1 || isLoginFlowActive"
+                :disabled="row.status !== 1"
                 @click="onLogout(row)"
               >
                 登出
@@ -799,6 +839,61 @@ onMounted(loadData);
         </div>
         <template #footer>
           <ElButton @click="onCloseQrDialog">关闭</ElButton>
+        </template>
+      </ElDialog>
+
+      <!-- 导入 Cookie 登录态弹窗（替代扫码登录，无浏览器）-->
+      <ElDialog
+        v-model="importDialogVisible"
+        :title="`导入登录态 · ${importAccountName}`"
+        width="600px"
+        destroy-on-close
+      >
+        <ElForm label-width="96px">
+          <ElFormItem label="Cookie">
+            <ElInput
+              v-model="importForm.cookie"
+              type="textarea"
+              :rows="4"
+              placeholder="从浏览器 F12 → 网络 → 任意 douyin.com 请求复制的 Cookie 整行（首次导入必填，须含 sessionid；补 web_protect/keys 时可留空以复用已导入 Cookie）"
+            />
+          </ElFormItem>
+          <ElFormItem label="web_protect">
+            <ElInput
+              v-model="importForm.web_protect"
+              type="textarea"
+              :rows="2"
+              placeholder="bd-ticket-guard 的 web_protect JSON（发送私信才需要；仅监控可留空）"
+            />
+          </ElFormItem>
+          <ElFormItem label="keys">
+            <ElInput
+              v-model="importForm.keys"
+              type="textarea"
+              :rows="2"
+              placeholder="含 ec_privateKey 的 keys JSON（发送私信才需要；仅监控可留空）"
+            />
+          </ElFormItem>
+          <ElFormItem label="User-Agent">
+            <ElInput
+              v-model="importForm.user_agent"
+              placeholder="可选，与导出 Cookie 的浏览器一致的 UA"
+            />
+          </ElFormItem>
+          <div class="text-xs text-gray-400">
+            仅监控/接收消息只需 Cookie；发送私信需额外填 web_protect 与 keys（bd-ticket-guard）。
+            已导入过 Cookie 后再来补 web_protect/keys 时，Cookie 可留空（自动复用），未填的字段保留上次的值。
+          </div>
+        </ElForm>
+        <template #footer>
+          <ElButton @click="importDialogVisible = false">取消</ElButton>
+          <ElButton
+            type="primary"
+            :loading="importSubmitting"
+            @click="onImportSubmit"
+          >
+            导入
+          </ElButton>
         </template>
       </ElDialog>
     </div>

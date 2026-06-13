@@ -28,6 +28,9 @@ RUN sed -i 's|http://archive.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g; 
     && apt-get install -y --no-install-recommends \
         tzdata \
         netcat-openbsd \
+        curl \
+        ca-certificates \
+        xz-utils \
         build-essential \
         pkg-config \
         unixodbc-dev \
@@ -39,6 +42,19 @@ RUN sed -i 's|http://archive.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g; 
         fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
+# ---- Node.js 20（JS 签名引擎：execjs 需要 node 运行 dy_ab.js）----
+# 基础镜像未在 PATH 暴露 node/npm，显式安装；从 npmmirror 取二进制（国内快，自动适配 amd64/arm64）
+RUN ARCH=$(dpkg --print-architecture) \
+    && case "$ARCH" in \
+        amd64) NODEARCH=x64 ;; \
+        arm64) NODEARCH=arm64 ;; \
+        *) echo "unsupported arch: $ARCH" && exit 1 ;; \
+    esac \
+    && curl -fsSL "https://cdn.npmmirror.com/binaries/node/v20.18.0/node-v20.18.0-linux-${NODEARCH}.tar.xz" -o /tmp/node.tar.xz \
+    && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
+    && rm /tmp/node.tar.xz \
+    && node --version && npm --version
+
 # ---- Python 依赖（利用 buildx 缓存） ----
 COPY requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -49,6 +65,15 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # ---- 项目源码 ----
 COPY . /app
+
+# ---- 抖音 JS 签名引擎依赖 ----
+# dy_ab.js 需要 jsrsasign；node_modules 不入仓（.gitignore）。
+# 注：开发态 compose 用 ./backend-django:/app bind mount，运行时会用宿主机已装的
+# node_modules（jsrsasign 纯 JS、跨平台通用）；此步主要为固化部署（无 bind mount）兜底。
+RUN cd /app/core/douyin/runtime/transport/sign/js \
+    && (npm install jsrsasign@^11.1.0 --no-audit --no-fund \
+        --registry=https://registry.npmmirror.com \
+    || echo "[warn] 镜像内 jsrsasign 安装失败；开发态 bind mount 会用宿主机 node_modules，可忽略")
 
 # 预创建运行期目录
 RUN mkdir -p /app/logs /var/lib/zq-platform/douyin

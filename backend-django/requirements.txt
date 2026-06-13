@@ -26,4 +26,8 @@ pyodbc>=4.0.39
 gunicorn==23.0.0
 httpx==0.28.1
 # 抖音私信自动回复模块（core.douyin）
-playwright==1.48.0  
+playwright==1.48.0
+# JS 签名引擎：PyExecJS 执行 vendored dy_ab.js 算 a_bogus + bd-ticket-guard（需 Node 18+）
+PyExecJS==1.5.1
+# IM 私信 protobuf 编解码（发送请求体 dy_request_pb2，vendored 自 DouYin_Spider/static）
+protobuf>=5.27.1,<6

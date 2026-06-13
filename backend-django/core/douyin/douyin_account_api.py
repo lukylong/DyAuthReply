@@ -26,6 +26,7 @@ from core.douyin.douyin_account_schema import (
     DouyinAccountSchemaOut,
     DouyinAccountSchemaPatch,
     DouyinAccountSimpleOut,
+    DouyinCredentialImportIn,
 )
 
 router = Router()
@@ -109,6 +110,58 @@ def batch_delete_douyin_account(request, data: DouyinAccountBatchDeleteIn):
         except DouyinAccount.DoesNotExist:
             failed_ids.append(aid)
     return DouyinAccountBatchDeleteOut(count=success, failed_ids=failed_ids)
+
+
+@router.post(
+    "/account/{account_id}/import-credential",
+    response=DouyinAccountActionOut,
+    summary="导入登录态（粘贴 Cookie，替代扫码登录）",
+)
+def import_credential(request, account_id: str, data: DouyinCredentialImportIn):
+    """粘贴 Cookie 录入登录态（去浏览器扫码），支持分步增量补充。
+
+    - cookie：首次导入必填（监控/接收 + 发送都需要）；之后补凭据时可留空，
+      留空则复用已导入的 Cookie。
+    - web_protect / keys 选填：bd-ticket-guard 凭证，仅「发送私信」需要；
+      只做消息监控可不填。本次未提供的字段会保留上次导入的旧值（增量合并）。
+    """
+    from django.utils import timezone
+
+    from core.douyin.runtime.credential import has_send_credential, merge_storage_state
+    from core.douyin.runtime.storage import load_storage_state, save_storage_state
+
+    account = get_object_or_404(DouyinAccount, id=account_id)
+    base_state = load_storage_state(str(account_id))
+    try:
+        state = merge_storage_state(
+            base_state,
+            data.cookie or "",
+            web_protect=data.web_protect or "",
+            keys=data.keys or "",
+        )
+    except ValueError as e:
+        raise HttpError(400, f"凭证解析失败：{e}")
+
+    cookies = {c["name"]: c["value"] for c in state.get("cookies", [])}
+    if not ({"sessionid", "sessionid_ss"} & cookies.keys()):
+        raise HttpError(400, "Cookie 缺少 sessionid，请确认已登录抖音后再从浏览器复制完整 Cookie")
+
+    account.storage_state_path = save_storage_state(str(account_id), state)
+    account.status = 1  # 在线
+    account.last_login_at = timezone.now()
+    if data.nickname:
+        account.nickname = data.nickname
+    if data.user_agent:
+        account.user_agent = data.user_agent
+    account.save()
+
+    can_send = has_send_credential(state)
+    msg = (
+        "登录态已导入：可监控与发送私信。"
+        if can_send
+        else "登录态已导入：可监控/接收；发送私信还需补 web_protect 与 keys（bd-ticket-guard）。"
+    )
+    return DouyinAccountActionOut(success=True, message=msg)
 
 
 @router.post(

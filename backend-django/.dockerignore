@@ -36,6 +36,9 @@ Dockerfile
 docker-compose.yml
 .dockerignore
 
+# Node（JS 签名 jsrsasign 在镜像内 npm install，不从宿主机带入）
+**/node_modules
+
 # 其它
 *.md
 !README.md

@@ -188,3 +188,29 @@ export async function triggerDouyinLogoutApi(accountId: string) {
     `/api/core/douyin/account/${accountId}/logout`,
   );
 }
+
+export interface DouyinCredentialImportInput {
+  /** 浏览器复制的 Cookie 整行（首次导入必填，须含 sessionid；补凭据时可留空复用已导入 Cookie） */
+  cookie?: string;
+  /** bd-ticket-guard 的 web_protect JSON（发送私信才需要） */
+  web_protect?: string;
+  /** 含 ec_privateKey 的 keys JSON（发送私信才需要） */
+  keys?: string;
+  /** 可选，覆盖账号昵称 */
+  nickname?: string;
+  /** 可选，与导出 Cookie 的浏览器一致的 UA */
+  user_agent?: string;
+}
+
+/**
+ * 导入登录态（粘贴 Cookie，替代扫码登录）
+ */
+export async function importDouyinCredentialApi(
+  accountId: string,
+  data: DouyinCredentialImportInput,
+) {
+  return requestClient.post<DouyinAccountActionResponse>(
+    `/api/core/douyin/account/${accountId}/import-credential`,
+    data,
+  );
+}

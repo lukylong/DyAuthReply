@@ -122,3 +122,21 @@ class DouyinAccountActionOut(Schema):
     """账号动作（触发登录 / 登出）通用输出"""
     success: bool
     message: str
+
+
+class DouyinCredentialImportIn(Schema):
+    """粘贴 Cookie 录入登录态的输入（替代扫码登录）。"""
+    cookie: Optional[str] = Field(
+        None,
+        description="浏览器复制的 Cookie 整行（首次导入必填，须含 sessionid；补凭据时可留空以复用已导入 Cookie）",
+    )
+    web_protect: Optional[str] = Field(
+        None, description="bd-ticket-guard 的 web_protect JSON（发送私信需要）"
+    )
+    keys: Optional[str] = Field(
+        None, description="含 ec_privateKey 的 keys JSON（发送私信需要）"
+    )
+    nickname: Optional[str] = Field(None, description="可选，覆盖账号昵称")
+    user_agent: Optional[str] = Field(
+        None, description="可选，与导出 Cookie 的浏览器一致的 UA"
+    )

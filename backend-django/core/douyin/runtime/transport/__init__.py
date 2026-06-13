@@ -98,5 +98,9 @@ def build_transport(
         base = DualRunDecorator(base)
 
     if ws_inbound:
+        # 脱浏览器（http_protocol）用主动连 frontier-im WS；browser 仍用监听浏览器 WS
+        if backend == TRANSPORT_BACKEND_HTTP_PROTOCOL:
+            from core.douyin.runtime.transport.frontier_ws import FrontierWsDecorator
+            return FrontierWsDecorator(base)
         return WsInboundDecorator(base)
     return base

@@ -177,6 +177,16 @@ DOUYIN_TRANSPORT_WS_INBOUND = _env('DOUYIN_TRANSPORT_WS_INBOUND', 'false').lower
 #   2) 至少打开下面一个 DOUYIN_HTTP_PROTOCOL_* 开关
 DOUYIN_TRANSPORT_BACKEND = _env('DOUYIN_TRANSPORT_BACKEND', 'browser')
 
+# 签名后端（仅当 DOUYIN_TRANSPORT_BACKEND=http_protocol 时生效）：
+#   'browser'（默认）: SignProvider —— 每账号一个浏览器 context 做签名（重）
+#   'local'          : LocalSignProvider —— 纯 Python 算 a_bogus + msToken，无浏览器；
+#                      但缺 bd-ticket-guard，私信发送大概率签不出
+#   'js'             : JsSignProvider —— PyExecJS 执行 vendored dy_ab.js，a_bogus +
+#                      bd-ticket-guard 齐全，私信可收可发，无浏览器（推荐的脱浏览器后端）
+# local/js 为灰度路径：imapi 是否接受需用真实 cookie/抓包验证；未就绪/失败时
+# HttpProtocolTransport 仍会 fallback 到 BrowserTransport，零回归。
+DOUYIN_SIGN_BACKEND = _env('DOUYIN_SIGN_BACKEND', 'browser')
+
 # Verb 级灰度开关（仅当 DOUYIN_TRANSPORT_BACKEND=http_protocol 时生效）
 # 任一开关打开后，对应的 verb 走 HTTP 协议路径；失败自动 fallback 到 BrowserTransport。
 # 推荐切量顺序：send_text → send_reply → scan_inbox（出向比入向幂等性高）

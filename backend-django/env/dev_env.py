@@ -168,3 +168,46 @@ DOUYIN_HTTP_PROTOCOL_SCAN_INBOX_DUAL_RUN = _env(
 # 影子干跑（dual-run）：启用后每次发送类调用额外编码一份 protobuf 落 [transport.dual_run]
 # 日志但不真发，用于协议字段对账。零真发风险，与主路径正交，默认关闭。
 DOUYIN_TRANSPORT_DUAL_RUN = _env('DOUYIN_TRANSPORT_DUAL_RUN', 'false').lower() == 'true'
+
+# ---- 多账号托管 / Cookie 池治理（P1 健康 / P2 续期 / P3 并发） ----
+# 常驻签名进程池：消除 PyExecJS「每次 call 起 Node 子进程」的子进程风暴。
+# ENABLED=false 时回退每次起子进程的旧路径；SIZE 为常驻 node 进程数。
+DOUYIN_SIGN_POOL_ENABLED = _env('DOUYIN_SIGN_POOL_ENABLED', 'true').lower() == 'true'
+DOUYIN_SIGN_POOL_SIZE = int(_env('DOUYIN_SIGN_POOL_SIZE', '2'))
+DOUYIN_SIGN_POOL_TIMEOUT = float(_env('DOUYIN_SIGN_POOL_TIMEOUT', '20'))
+DOUYIN_NODE_BIN = _env('DOUYIN_NODE_BIN', 'node')
+
+# 全局并发治理：同一时刻并发 scan/send 的账号数上限（<=0 不限制）；启动错峰最大抖动秒数。
+DOUYIN_MAX_CONCURRENT_IO = int(_env('DOUYIN_MAX_CONCURRENT_IO', '16'))
+DOUYIN_STARTUP_JITTER_S = float(_env('DOUYIN_STARTUP_JITTER_S', '8'))
+
+# 统一 httpx 连接/超时（每账号独立 client）。
+DOUYIN_HTTP_TIMEOUT_S = float(_env('DOUYIN_HTTP_TIMEOUT_S', '15'))
+DOUYIN_HTTP_MAX_CONNECTIONS = int(_env('DOUYIN_HTTP_MAX_CONNECTIONS', '8'))
+DOUYIN_HTTP_MAX_KEEPALIVE = int(_env('DOUYIN_HTTP_MAX_KEEPALIVE', '4'))
+DOUYIN_HTTP_KEEPALIVE_EXPIRY_S = float(_env('DOUYIN_HTTP_KEEPALIVE_EXPIRY_S', '30'))
+
+# 资源阈值告警：worker 进程 RSS/CPU 超阈值发 risk_alert（<=0 关闭对应维度）。
+DOUYIN_MEM_ALERT_MB = float(_env('DOUYIN_MEM_ALERT_MB', '1500'))
+DOUYIN_CPU_ALERT_PCT = float(_env('DOUYIN_CPU_ALERT_PCT', '85'))
+
+# 僵尸 session 判定：心跳超过该秒数视为失联，由清理任务置 stopped。
+DOUYIN_SESSION_STALE_SECONDS = int(_env('DOUYIN_SESSION_STALE_SECONDS', '120'))
+
+# 凭证临期告警：bd-ticket 年龄超过该小时数发提前告警。
+DOUYIN_TICKET_WARN_AGE_HOURS = float(_env('DOUYIN_TICKET_WARN_AGE_HOURS', '24'))
+
+# 自动续期（默认关闭门控，PoC 验证通过后再开）：超过 REFRESH_AGE 小时尝试续期 bd-ticket。
+DOUYIN_TICKET_AUTORENEW_ENABLED = _env('DOUYIN_TICKET_AUTORENEW_ENABLED', 'false').lower() == 'true'
+DOUYIN_TICKET_REFRESH_AGE_HOURS = float(_env('DOUYIN_TICKET_REFRESH_AGE_HOURS', '18'))
+
+# ---- 多 worker 分片 + 租约（P4 横向扩展，面向 200+ 账号） ----
+# 分片：每个 worker 实例只托管 hash(account_id) % COUNT == INDEX 的账号。
+# 单 worker 部署保持 COUNT=1（托管全部）。多实例部署时每个实例配不同 INDEX。
+DOUYIN_WORKER_SHARD_COUNT = int(_env('DOUYIN_WORKER_SHARD_COUNT', '1'))
+DOUYIN_WORKER_SHARD_INDEX = int(_env('DOUYIN_WORKER_SHARD_INDEX', '0'))
+
+# 租约：多 worker 时用 Redis 锁保证一个账号同一时刻只被一个 worker 托管，崩溃后 TTL 到期转移。
+# 单 worker 部署可保持关闭。命令定向路由在「分片>1 或 租约开启」时自动生效。
+DOUYIN_WORKER_LEASE_ENABLED = _env('DOUYIN_WORKER_LEASE_ENABLED', 'false').lower() == 'true'
+DOUYIN_WORKER_LEASE_TTL = int(_env('DOUYIN_WORKER_LEASE_TTL', '45'))

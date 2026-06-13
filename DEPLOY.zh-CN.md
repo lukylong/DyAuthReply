@@ -730,6 +730,71 @@ curl -I https://zq.example.com
 
 7. **签名/风控失效**：抖音签名算法（`backend-django/core/douyin/runtime/transport/sign/js/dy_ab.js`、bd-ticket-guard）或风控策略改版可能导致扫描/发送失败；优先排查签名与凭证有效性，必要时更新签名脚本
 
+### 10.1 多账号 / Cookie 池治理（健康监测 + 续期 + 并发）
+
+调度任务（在 `/scheduler` 添加）：
+
+- `scheduler.tasks.douyin_probe_credentials` — 主动探活 cookie，失效自动标红并 WS 提示（建议 `cron: */10 * * * *`）
+- `scheduler.tasks.douyin_cleanup_stale_sessions` — 清理僵尸会话 + worker 存活巡检（建议 `*/2 * * * *`）
+- `scheduler.tasks.douyin_ticket_autorenew` — bd-ticket 自动续期（**默认门控关闭**，PoC 验证后再开，建议 `*/30 * * * *`）
+
+关键环境变量（默认值见 `backend-django/env/dev_env.py`，均可在 `.env` 覆盖）：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `DOUYIN_SIGN_POOL_ENABLED` | `true` | 常驻 Node 签名进程池（消除子进程风暴）；关闭则回退每次起子进程 |
+| `DOUYIN_SIGN_POOL_SIZE` | `2` | 常驻签名进程数（按 CPU 核数调） |
+| `DOUYIN_MAX_CONCURRENT_IO` | `16` | 同时刻并发 scan/send 的账号数上限（削峰）；`<=0` 不限 |
+| `DOUYIN_STARTUP_JITTER_S` | `8` | 账号协程启动错峰最大抖动秒数 |
+| `DOUYIN_HTTP_TIMEOUT_S` / `DOUYIN_HTTP_MAX_CONNECTIONS` | `15` / `8` | 每账号 httpx 超时与连接上限 |
+| `DOUYIN_MEM_ALERT_MB` / `DOUYIN_CPU_ALERT_PCT` | `1500` / `85` | worker 资源超阈值发 `risk_alert` |
+| `DOUYIN_SESSION_STALE_SECONDS` | `120` | 心跳超时视为僵尸会话 |
+| `DOUYIN_TICKET_WARN_AGE_HOURS` | `24` | bd-ticket 临期提前告警 |
+| `DOUYIN_TICKET_AUTORENEW_ENABLED` | `false` | 自动续期总开关（PoC 验证后再开） |
+
+续期 PoC 验证（不落库，只读探测）：
+
+```bash
+docker compose exec backend python manage.py douyin_renew_poc --account-id <账号ID>
+# 或用抓包 Cookie 头：--cookie-header "xxx=1; yyy=2"
+```
+
+### 10.2 多 worker 分片横向扩展（面向 200+ 账号）
+
+单 worker（默认 `DOUYIN_WORKER_SHARD_COUNT=1`）托管全部账号。账号规模增大、单进程
+压力到顶时，按 `account_id` 稳定哈希分片到多个 worker：
+
+- 每个 worker 实例设置相同的 `DOUYIN_WORKER_SHARD_COUNT=N` 和各自不同的 `DOUYIN_WORKER_SHARD_INDEX=0..N-1`，只托管 `hash(account_id) % N == INDEX` 的账号。
+- 开启 `DOUYIN_WORKER_LEASE_ENABLED=true`：用 Redis 租约保证一个账号同一时刻只被一个 worker 托管，worker 崩溃后租约 TTL（`DOUYIN_WORKER_LEASE_TTL`，默认 45s）到期自动转移。
+- 命令（manual_reply / pause / logout 等）经 Redis 广播，但在多 worker 模式下仅托管该账号的实例执行，不会重复。
+
+`docker-compose.yml` 已去掉 worker 固定 `container_name`，并透传分片/租约环境变量。
+两分片示例（`docker-compose.override.yml`）：
+
+```yaml
+services:
+  douyin-worker:                 # 分片 0
+    environment:
+      DOUYIN_WORKER_SHARD_COUNT: "2"
+      DOUYIN_WORKER_SHARD_INDEX: "0"
+      DOUYIN_WORKER_LEASE_ENABLED: "true"
+  douyin-worker-1:               # 分片 1（复制一份服务）
+    extends:
+      file: docker-compose.yml
+      service: douyin-worker
+    environment:
+      DOUYIN_WORKER_SHARD_COUNT: "2"
+      DOUYIN_WORKER_SHARD_INDEX: "1"
+      DOUYIN_WORKER_LEASE_ENABLED: "true"
+```
+
+```bash
+docker compose --profile douyin up -d douyin-worker douyin-worker-1
+```
+
+> 提示：所有 worker 共享同一个 `douyin-data` 卷与 `DOUYIN_STORAGE_ENCRYPTION_KEY`，
+> 才能在账号迁移到其它分片/实例时读到同一份登录态。
+
 ---
 
 ## 11. 升级 / 回滚 / 备份
@@ -784,7 +849,7 @@ cat .env | grep DOUYIN_STORAGE_ENCRYPTION_KEY
 | 开发环境 vite 报 `ws proxy error: This socket has been ended...` | 已知无害噪声，vite.config 已吞掉；若仍刷屏，重启 `pnpm --filter @vben/web-ele dev` |
 | 抖音导入后立刻掉线 | 凭证过期需重新导入；服务器时间漂移（`timedatectl`）；IP 段被风控，配 `proxy_url` |
 | `migrate` 卡住 | PostgreSQL 连接超限；上一次进程锁未释放：`docker compose restart backend` |
-| worker 频繁 OOM | 内存不足；减少同时托管账号数；或升配至 8 GB |
+| worker 频繁 OOM / 高 CPU | 降低 `DOUYIN_MAX_CONCURRENT_IO`；减少单实例账号数；或按 10.2 多 worker 分片横向扩展；关注 `risk_alert` 资源告警事件 |
 | Let's Encrypt 续签失败 | `/var/www/certbot` 路径被 Nginx 其他 location 拦截；`/.well-known` 必须可直接访问 |
 
 ---

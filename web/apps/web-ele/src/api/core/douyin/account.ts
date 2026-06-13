@@ -11,6 +11,11 @@ export interface DouyinAccount {
   status: number;
   auto_reply_enabled: boolean;
   status_display?: string;
+  /** 凭证能力分级：unknown / sendable / receive_only / invalid */
+  credential_state?: string;
+  credential_state_display?: string;
+  last_probe_at?: null | string;
+  last_probe_error?: null | string;
   storage_state_path?: string;
   owner_id?: null | string;
   owner_name?: null | string;
@@ -163,6 +168,8 @@ export async function triggerDouyinLogoutApi(accountId: string) {
 }
 
 export interface DouyinCredentialImportInput {
+  /** 一键导入串（浏览器扩展产出，DYCRED1. 开头）；提供后自动展开为 cookie/web_protect/keys */
+  bundle?: string;
   /** 浏览器复制的 Cookie 整行（首次导入必填，须含 sessionid；补凭据时可留空复用已导入 Cookie） */
   cookie?: string;
   /** bd-ticket-guard 的 web_protect JSON（发送私信才需要） */

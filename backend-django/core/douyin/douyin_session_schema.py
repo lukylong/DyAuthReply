@@ -89,6 +89,9 @@ class DouyinMessageItemOut(Schema):
     content: str
     received_at: Optional[datetime] = None
     processed: bool = False
+    # 发送者信息（用于消息回复界面显示）
+    sender_name: Optional[str] = None
+    sender_avatar: Optional[str] = None
 
 
 class DouyinManualReplyIn(Schema):

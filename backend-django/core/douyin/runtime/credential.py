@@ -74,15 +74,22 @@ def _unwrap_data_json(raw: str) -> dict[str, Any]:
 
 
 def parse_web_protect(raw: str) -> dict[str, str]:
-    """解析 web_protect → {ticket, ts_sign, client_cert}（任一缺失则为空串）。"""
+    """解析 web_protect → {ticket, ts_sign, client_cert, create_time}（任一缺失则为空串）。
+
+    create_time 是抖音签发该 bd-ticket 时的 epoch 秒，用于「凭证临期提前告警」估算 ticket 年龄。
+    """
     if not (raw or "").strip():
         return {}
     inner = _unwrap_data_json(raw)
-    return {
+    out = {
         "ticket": str(inner.get("ticket") or ""),
         "ts_sign": str(inner.get("ts_sign") or ""),
         "client_cert": str(inner.get("client_cert") or ""),
     }
+    create_time = inner.get("create_time")
+    if create_time:
+        out["create_time"] = str(create_time)
+    return out
 
 
 def parse_keys(raw: str) -> dict[str, str]:
@@ -92,6 +99,58 @@ def parse_keys(raw: str) -> dict[str, str]:
     inner = _unwrap_data_json(raw)
     priv = inner.get("ec_privateKey") or inner.get("private_key") or ""
     return {"private_key": str(priv)} if priv else {}
+
+
+# 一键导入串前缀：浏览器扩展把 cookie/web_protect/keys 打包成单行，避免逐项粘贴误操作。
+_BUNDLE_PREFIX = "DYCRED1."
+
+
+def parse_credential_bundle(raw: str) -> dict[str, str]:
+    """解析浏览器扩展生成的「一键导入串」→ {cookie, web_protect, keys, user_agent}。
+
+    支持两种形态：
+      1) 带前缀的 base64url：``DYCRED1.<base64url(JSON)>``（扩展默认产出，单行不易误改）；
+      2) 裸 JSON：``{"cookie": "...", "web_protect": "...", "keys": "...", "ua": "..."}``。
+
+    内层 JSON 字段名兼容 ``ua`` / ``user_agent``。任一缺失则对应值为空串。
+
+    Raises:
+        ValueError: 串为空、base64/JSON 解析失败、或顶层不是对象。
+    """
+    s = (raw or "").strip()
+    if not s:
+        raise ValueError("一键导入串为空")
+
+    payload: Any
+    if s.startswith(_BUNDLE_PREFIX):
+        b64 = s[len(_BUNDLE_PREFIX):].strip()
+        try:
+            pad = "=" * (-len(b64) % 4)
+            decoded = base64.urlsafe_b64decode(b64 + pad).decode("utf-8")
+        except Exception as e:  # noqa: BLE001
+            raise ValueError(f"一键导入串 base64 解码失败：{e}") from e
+        try:
+            payload = json.loads(decoded)
+        except (json.JSONDecodeError, TypeError) as e:
+            raise ValueError(f"一键导入串内层不是合法 JSON：{e}") from e
+    else:
+        try:
+            payload = json.loads(s)
+        except (json.JSONDecodeError, TypeError) as e:
+            raise ValueError(
+                "无法识别的一键导入串（应以 DYCRED1. 开头，或为 {cookie,web_protect,keys} JSON）："
+                f"{e}"
+            ) from e
+
+    if not isinstance(payload, dict):
+        raise ValueError("一键导入串顶层不是对象")
+
+    return {
+        "cookie": str(payload.get("cookie") or ""),
+        "web_protect": str(payload.get("web_protect") or ""),
+        "keys": str(payload.get("keys") or ""),
+        "user_agent": str(payload.get("user_agent") or payload.get("ua") or ""),
+    }
 
 
 def _b64url_json(raw: str) -> dict[str, Any]:
@@ -168,7 +227,7 @@ def merge_storage_state(
     bd: dict[str, str] = dict(base.get("_bd_ticket") or {})
     bd.update(parse_bd_ticket_from_cookie(cookies))
     wp = parse_web_protect(web_protect)
-    for key in ("ticket", "ts_sign", "client_cert"):  # 显式 web_protect 覆盖自动值
+    for key in ("ticket", "ts_sign", "client_cert", "create_time"):  # 显式 web_protect 覆盖自动值
         if wp.get(key):
             bd[key] = wp[key]
     ks = parse_keys(keys)

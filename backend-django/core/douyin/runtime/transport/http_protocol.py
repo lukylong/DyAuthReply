@@ -5,7 +5,9 @@
 @Desc: HttpProtocolTransport —— 纯 HTTP 协议 transport（无浏览器）
 
 设计：
-  - 每账号一份；持有自己的签名后端（JsSignProvider / LocalSignProvider）和共享 httpx 客户端
+  - 每账号一份独立实例；持有自己的签名后端（JsSignProvider / LocalSignProvider），
+    后端内部为该账号创建专属 httpx 客户端（带该账号 cookie/代理/UA，每请求注入 cookie，
+    非 client 级 cookie jar），账号之间不共享连接，杜绝 cookie 串号
   - scan_inbox / send_reply / send_text 三个 verb 全部走 HTTP 协议路径
   - 协议路径不可用 / 签名机不健康时直接抛错（STRICT 模式，无任何浏览器兜底）
 
@@ -17,6 +19,7 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Optional
 
@@ -36,6 +39,7 @@ from core.douyin.runtime.transport.wire.codec import (
     iter_fields,
 )
 from core.douyin.runtime.transport.sign_types import (
+    LoginExpiredError,
     SignedResponse,
     SignerUnavailable,
 )
@@ -365,6 +369,18 @@ class HttpProtocolTransport(AccountTransport):
         # 注：这是进程内状态，worker 重启会丢，重启后第一轮等同于 cursor=0。
         # 真要持久化，可以接 redis 或 DouyinAccount.last_scan_cursor_us 字段。
         self._scan_cursor_us: dict[str, int] = {}
+        # 信息隔离防线：start() 绑定该实例服务的账号 id；之后所有 verb 校验传入账号
+        # 必须与绑定账号一致，杜绝误用他账号 transport 造成消息穿插。
+        self._bound_account_id: Optional[str] = None
+
+    def _assert_account_bound(self, account: "DouyinAccount", verb: str) -> None:
+        """校验传入账号与本 transport 绑定账号一致（信息隔离硬约束）。"""
+        incoming = str(getattr(account, "id", "") or "")
+        if self._bound_account_id and incoming and incoming != self._bound_account_id:
+            raise RuntimeError(
+                f"transport 账号绑定不一致（疑似账号穿插）：bound={self._bound_account_id} "
+                f"incoming={incoming} verb={verb}"
+            )
 
     @staticmethod
     def _resolve_flag(explicit: Optional[bool], setting_name: str) -> bool:
@@ -379,6 +395,7 @@ class HttpProtocolTransport(AccountTransport):
 
     # ---------------- 生命周期 ----------------
     async def start(self, account: "DouyinAccount") -> None:
+        self._bound_account_id = str(getattr(account, "id", "") or "") or None
         try:
             await self._sign.start(account)
         except Exception as e:  # noqa: BLE001
@@ -413,6 +430,7 @@ class HttpProtocolTransport(AccountTransport):
         include_recent_without_unread: bool = False,
         conversation_hint: Optional[str] = None,
     ) -> List["ScannedMessage"]:
+        self._assert_account_bound(account, "scan_inbox")
         # 模式 1：HTTP 主路径开（SCAN_INBOX=true）→ 协议路径，落库
         if (
             self._http_scan_inbox_enabled
@@ -443,6 +461,9 @@ class HttpProtocolTransport(AccountTransport):
                     raise RuntimeError(
                         f"HTTP scan_inbox 严格模式失败（signer 不可用）: {e}"
                     ) from e
+            except LoginExpiredError:
+                # 登录失效：保留类型透传给 worker 打回账号
+                raise
             except Exception as e:  # noqa: BLE001
                 if self._http_scan_strict:
                     raise RuntimeError(
@@ -469,6 +490,7 @@ class HttpProtocolTransport(AccountTransport):
         rule: "DouyinRule",
         peer_nickname: str = "",
     ) -> str:
+        self._assert_account_bound(account, "send_reply")
         if self._http_send_reply_enabled and self._http_send_strict and not self._signer_healthy():
             raise RuntimeError(
                 "HTTP send_reply 严格模式失败（signer 未就绪或失败次数超阈值）"
@@ -490,6 +512,9 @@ class HttpProtocolTransport(AccountTransport):
                     raise RuntimeError(
                         f"HTTP send_reply 严格模式失败（signer 不可用）: {e}"
                     ) from e
+            except LoginExpiredError:
+                # 登录失效：保留类型透传给 worker 打回账号，不要包成通用 RuntimeError
+                raise
             except ValueError:
                 raise
             except Exception as e:  # noqa: BLE001
@@ -510,6 +535,7 @@ class HttpProtocolTransport(AccountTransport):
         conversation_id: str,
         text: str,
     ) -> str:
+        self._assert_account_bound(account, "send_text")
         if self._http_send_text_enabled and self._http_send_strict and not self._signer_healthy():
             raise RuntimeError(
                 "HTTP send_text 严格模式失败（signer 未就绪或失败次数超阈值）"
@@ -529,6 +555,9 @@ class HttpProtocolTransport(AccountTransport):
                     raise RuntimeError(
                         f"HTTP send_text 严格模式失败（signer 不可用）: {e}"
                     ) from e
+            except LoginExpiredError:
+                # 登录失效：保留类型透传给 worker 打回账号，不要包成通用 RuntimeError
+                raise
             except ValueError:
                 # 调用方传错参数（空 text / 空 conv），透传
                 raise
@@ -542,7 +571,80 @@ class HttpProtocolTransport(AccountTransport):
             f"signer_ready={self._sign.is_ready}）"
         )
 
+    async def probe_credential(self, account: "DouyinAccount"):
+        """轻量只读探活：判定该账号 cookie 是否仍有效（不落库、不动 scan cursor）。
+
+        用 get_by_user(limit=1, cursor=now) 只验证登录态。返回 health.ProbeResult，
+        由 scheduler 探活任务据此刷新 credential_state / 打回失效账号。
+        """
+        from core.douyin.runtime.health import (
+            ProbeResult,
+            PROBE_INCONCLUSIVE,
+            classify_signed_response,
+        )
+
+        self._assert_account_bound(account, "probe")
+        if not self._signer_healthy():
+            return ProbeResult(status=PROBE_INCONCLUSIVE, detail="signer 未就绪")
+
+        cursor_us = int(time.time() * 1_000_000)
+        body, _seq_id = encode_get_by_user_request(cursor_us=cursor_us, limit=1)
+        try:
+            resp: SignedResponse = await self._sign.signed_fetch(
+                method="POST",
+                url=_ENDPOINTS["get_by_user"]["url"],
+                body=body,
+                headers=_BASE_IM_HEADERS,
+            )
+        except SignerUnavailable as e:
+            return ProbeResult(status=PROBE_INCONCLUSIVE, detail=f"signer 不可用: {e}")
+        except Exception as e:  # noqa: BLE001
+            return ProbeResult(status=PROBE_INCONCLUSIVE, detail=f"网络异常: {type(e).__name__}: {e}")
+
+        proto_status: Optional[int] = None
+        proto_msg: Optional[str] = None
+        if resp.ok and resp.content:
+            try:
+                decoded = decode_get_by_user_response(resp.content)
+                proto_status = decoded.status_code
+                proto_msg = decoded.status_msg
+            except Exception:  # noqa: BLE001
+                proto_status = None
+
+        status = classify_signed_response(resp.status, proto_status, proto_msg)
+        detail = "" if status == "valid" else (resp.text or "")[:200]
+        return ProbeResult(
+            status=status,
+            http_status=resp.status,
+            proto_status_code=proto_status,
+            detail=detail,
+        )
+
     # ---------------- 内部：信号 / 健康 ----------------
+    @staticmethod
+    def _raise_if_login_expired(
+        http_status: Optional[int],
+        proto_status_code: Optional[int],
+        *,
+        context: str,
+        proto_status_msg: Optional[str] = None,
+    ) -> None:
+        """若 HTTP/协议状态被判定为登录失效，抛 LoginExpiredError（worker 据此打回账号）。
+
+        否则什么都不做，由调用方继续抛通用 RuntimeError 走重试/记错。
+        """
+        from core.douyin.runtime.health import classify_signed_response, PROBE_LOGIN_EXPIRED
+        from core.douyin.runtime.transport.sign_types import LoginExpiredError
+
+        if classify_signed_response(
+            http_status, proto_status_code, proto_status_msg
+        ) == PROBE_LOGIN_EXPIRED:
+            raise LoginExpiredError(
+                context,
+                http_status=http_status,
+                proto_status_code=proto_status_code,
+            )
+
     def _signer_healthy(self) -> bool:
         if not self._sign.is_ready:
             return False
@@ -911,6 +1013,10 @@ class HttpProtocolTransport(AccountTransport):
                 f"[transport.http] {log_tag} HTTP 非 2xx account={account.id} "
                 f"status={resp.status} text_preview={resp.text[:200]!r}"
             )
+            self._raise_if_login_expired(
+                resp.status, None,
+                context=f"{log_tag} http status={resp.status}",
+            )
             raise RuntimeError(f"{log_tag} http status={resp.status}")
 
         if not resp.content:
@@ -933,6 +1039,14 @@ class HttpProtocolTransport(AccountTransport):
                 f"[transport.http] {log_tag} 协议层失败 account={account.id} "
                 f"status_code={result.status_code} status_msg={result.status_msg!r} "
                 f"server_msg_id={result.server_msg_id} client_msg_id={result.client_msg_id}"
+            )
+            self._raise_if_login_expired(
+                resp.status, result.status_code,
+                proto_status_msg=result.status_msg,
+                context=(
+                    f"{log_tag} protocol status={result.status_code} "
+                    f"msg={result.status_msg!r}"
+                ),
             )
             raise RuntimeError(
                 f"{log_tag} protocol status={result.status_code} "
@@ -1230,6 +1344,10 @@ class HttpProtocolTransport(AccountTransport):
                 headers=_BASE_IM_HEADERS,
             )
             if not resp.ok:
+                self._raise_if_login_expired(
+                    resp.status, None,
+                    context=f"scan_inbox(conv) http status={resp.status} preview={resp.text[:200]!r}",
+                )
                 raise RuntimeError(
                     f"scan_inbox(conv) http status={resp.status} preview={resp.text[:200]!r}"
                 )
@@ -1465,6 +1583,10 @@ class HttpProtocolTransport(AccountTransport):
             headers=_BASE_IM_HEADERS,
         )
         if not resp.ok:
+            self._raise_if_login_expired(
+                resp.status, None,
+                context=f"scan_inbox http status={resp.status} preview={resp.text[:200]!r}",
+            )
             raise RuntimeError(
                 f"scan_inbox http status={resp.status} preview={resp.text[:200]!r}"
             )
@@ -1477,6 +1599,14 @@ class HttpProtocolTransport(AccountTransport):
             raise RuntimeError(f"scan_inbox decode failed: {e}") from e
 
         if result.status_code != 0:
+            self._raise_if_login_expired(
+                resp.status, result.status_code,
+                proto_status_msg=result.status_msg,
+                context=(
+                    f"scan_inbox 协议层失败 status_code={result.status_code} "
+                    f"msg={result.status_msg!r}"
+                ),
+            )
             raise RuntimeError(
                 f"scan_inbox 协议层失败 status_code={result.status_code} "
                 f"msg={result.status_msg!r}"

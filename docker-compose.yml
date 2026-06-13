@@ -163,17 +163,22 @@ services:
     networks:
       - zq-net
 
-  # 抖音 worker：M2 里程碑之前以 idle 模式运行（入口脚本会自动降级为 tail -f）
-  # 实现完成后移除下面的 profiles 行即可随 compose up 默认启动。
+  # 抖音 worker：默认单实例托管全部账号（SHARD_COUNT=1）。
+  # 横向扩展（200+ 账号）：见 DEPLOY.zh-CN.md「多 worker 分片」——为每个分片复制一份
+  # 该服务并设置不同的 DOUYIN_WORKER_SHARD_INDEX，同时开启 DOUYIN_WORKER_LEASE_ENABLED。
+  # 不再固定 container_name，便于 docker compose 多实例命名与扩展。
   douyin-worker:
     image: zq-platform/backend:dev
-    container_name: zq-douyin-worker
     restart: unless-stopped
     profiles: ["douyin"]
     environment:
       <<: *backend-env
       ROLE: douyin-worker
       AUTO_MIGRATE: "false"
+      # 分片/租约（默认单实例：COUNT=1 托管全部，租约关闭）。多实例部署时覆盖这些值。
+      DOUYIN_WORKER_SHARD_COUNT: "${DOUYIN_WORKER_SHARD_COUNT:-1}"
+      DOUYIN_WORKER_SHARD_INDEX: "${DOUYIN_WORKER_SHARD_INDEX:-0}"
+      DOUYIN_WORKER_LEASE_ENABLED: "${DOUYIN_WORKER_LEASE_ENABLED:-false}"
     command: ["douyin-worker"]
     volumes:
       - ./backend-django:/app

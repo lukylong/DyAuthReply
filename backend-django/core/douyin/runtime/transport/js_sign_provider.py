@@ -61,13 +61,16 @@ _IMAPI_WRITE_PATHS = (
 class JsSignProvider:
     """每账号一份；用 dy_ab.js 做 a_bogus + bd-ticket-guard 签名，httpx 直发，无浏览器。"""
 
-    def __init__(self, *, request_timeout_s: float = 15.0, verify_tls: bool = True) -> None:
+    def __init__(self, *, request_timeout_s: Optional[float] = None, verify_tls: bool = True) -> None:
         self._account_id: Optional[str] = None
         self._client: "Optional[httpx.AsyncClient]" = None
         self._cookies: dict[str, str] = {}
         self._bd_ticket: dict[str, str] = {}  # {private_key, ticket, ts_sign}
         self._user_agent: str = _DEFAULT_UA
         self._proxy_url: Optional[str] = None
+        # 超时默认值统一从 settings 读取（DOUYIN_HTTP_TIMEOUT_S），便于规模化调参
+        if request_timeout_s is None:
+            request_timeout_s = _setting_float("DOUYIN_HTTP_TIMEOUT_S", 15.0)
         self._timeout_s = float(request_timeout_s)
         self._verify_tls = bool(verify_tls)
         self._ready = False
@@ -97,11 +100,18 @@ class JsSignProvider:
             )
 
         try:
+            # 统一连接池上限：每账号独立 client，限制单账号并发连接，避免规模化时句柄/连接爆炸
+            limits = httpx.Limits(
+                max_connections=_setting_int("DOUYIN_HTTP_MAX_CONNECTIONS", 8),
+                max_keepalive_connections=_setting_int("DOUYIN_HTTP_MAX_KEEPALIVE", 4),
+                keepalive_expiry=_setting_float("DOUYIN_HTTP_KEEPALIVE_EXPIRY_S", 30.0),
+            )
             self._client = httpx.AsyncClient(
                 timeout=self._timeout_s,
                 proxy=self._proxy_url,
                 follow_redirects=True,
                 verify=self._verify_tls,
+                limits=limits,
                 headers={"user-agent": self._user_agent},
             )
         except Exception as e:  # noqa: BLE001
@@ -280,6 +290,22 @@ class JsSignProvider:
 
 
 # ──────────────────────── helpers ────────────────────────
+
+
+def _setting_float(name: str, default: float) -> float:
+    try:
+        from django.conf import settings
+        return float(getattr(settings, name, default))
+    except Exception:  # noqa: BLE001
+        return default
+
+
+def _setting_int(name: str, default: int) -> int:
+    try:
+        from django.conf import settings
+        return int(getattr(settings, name, default))
+    except Exception:  # noqa: BLE001
+        return default
 
 
 @sync_to_async

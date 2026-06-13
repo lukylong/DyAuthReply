@@ -48,6 +48,7 @@ from core.douyin.runtime.message_store import (
 from core.douyin.runtime.account_status import mark_account_login_invalid
 from core.douyin.runtime.matcher import match as match_rule
 from core.douyin.runtime.transport import AccountTransport, build_transport
+from core.douyin.runtime.transport.sign_types import LoginExpiredError
 from core.douyin.runtime.ws_notify import push_event_log, push_to_user
 
 if TYPE_CHECKING:
@@ -60,19 +61,43 @@ logger = logging.getLogger(__name__)
 CMD_CHANNEL_PATTERN = "douyin:cmd:*"
 
 
+class _NullGuard:
+    """空 async 上下文：未配置并发上限时占位，使 `async with guard` 零开销直通。"""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+_NULL_GUARD = _NullGuard()
+
+
 # -------------------- DB 辅助 --------------------
 @sync_to_async
 def _load_managed_accounts() -> list[dict]:
-    """加载所有需要 worker 托管的账号（快照为 dict 避免 ORM 对象跨线程）"""
+    """加载本分片需要托管的账号（快照为 dict 避免 ORM 对象跨线程）。
+
+    多 worker 部署时按 account_id 稳定哈希分片，只取属于本分片的账号；
+    单 worker（SHARD_COUNT=1）时 owns() 恒为 True，行为与之前一致。
+    """
     from core.douyin.douyin_account_model import DouyinAccount
+    from core.douyin.runtime.sharding import owns, shard_count, shard_index
 
     qs = DouyinAccount.objects.filter(
         status__in=[0, 1, 2],
         work_mode__in=['auto', 'hybrid'],
         is_deleted=False,
     ).exclude(status=3).order_by('-priority', '-sort')
+    n = shard_count()
+    i = shard_index()
     rows: list[dict] = []
+    skipped = 0
     for a in qs:
+        if not owns(str(a.id), index=i, count=n):
+            skipped += 1
+            continue
         rows.append({
             'id': str(a.id),
             'owner_id': str(a.owner_id) if a.owner_id else '',
@@ -92,6 +117,8 @@ def _load_managed_accounts() -> list[dict]:
                 if a.pending_verification_until else None
             ),
         })
+    if n > 1:
+        logger.info(f"[worker] 分片 {i}/{n} 托管 {len(rows)} 账号（跳过其它分片 {skipped} 个）")
     return rows
 
 
@@ -106,6 +133,27 @@ def _fetch_account_orm(account_id: str):
 def _fetch_conversation(account_id: str, conversation_id: str):
     from core.douyin.douyin_conversation_model import DouyinConversation
     return DouyinConversation.objects.filter(id=conversation_id, account_id=account_id).first()
+
+
+@sync_to_async
+def _conversation_belongs_to_account(account_id: str, conversation_id: str) -> bool:
+    """信息隔离硬约束：确认该 DB 会话确实属于该账号，防止跨账号消息穿插。"""
+    if not conversation_id:
+        return False
+    from core.douyin.douyin_conversation_model import DouyinConversation
+    return DouyinConversation.objects.filter(
+        id=conversation_id, account_id=account_id
+    ).exists()
+
+
+@sync_to_async
+def _mark_credential_invalid(account_id: str, detail: str) -> None:
+    """凭证失效时把账号 credential_state 置为 invalid，并记录失败原因（供面板标红）。"""
+    from core.douyin.douyin_account_model import DouyinAccount
+    DouyinAccount.objects.filter(id=account_id).update(
+        credential_state='invalid',
+        last_probe_error=(detail or '')[:255] or None,
+    )
 
 
 @sync_to_async
@@ -272,9 +320,31 @@ def _upsert_session(account_id: str, worker_id: str, status: str, metrics: dict)
         'errors_today': metrics.get('errors_today', 0),
         'proxy_url': acc.proxy_url or None,
         'started_at': metrics.get('started_at') or timezone.now(),
+        'error_message': (metrics.get('last_error') or '')[:1000] or None,
     }
+    last_msg_at = metrics.get('last_message_at')
+    if last_msg_at:
+        defaults['last_message_at'] = last_msg_at
     DouyinSession.objects.update_or_create(account=acc, defaults=defaults)
     DouyinAccount.objects.filter(id=account_id).update(last_heartbeat=timezone.now())
+
+
+@sync_to_async
+def _set_session_status(account_id: str, status: str) -> None:
+    """单独更新会话状态（pause/resume 即时反映到面板，不等下一次心跳）。"""
+    from core.douyin.douyin_session_model import DouyinSession
+    DouyinSession.objects.filter(account_id=account_id).update(
+        status=status, last_heartbeat=timezone.now(),
+    )
+
+
+@sync_to_async
+def _mark_worker_sessions_stopped(worker_id: str) -> int:
+    """worker 关停时把本进程名下未停止的会话标记为 stopped。"""
+    from core.douyin.douyin_session_model import DouyinSession
+    return DouyinSession.objects.filter(worker_id=worker_id).exclude(
+        status='stopped'
+    ).update(status='stopped')
 
 
 @sync_to_async
@@ -360,8 +430,20 @@ class DouyinWorker:
         self._account_metrics: dict[str, dict] = {}
         # 每个账号一把命令串行锁：同账号命令（logout / manual_reply 等）串行执行，避免竞态。
         self._account_command_locks: dict[str, asyncio.Lock] = {}
+        # 暂停集合：pause 命令把 account_id 放进来，_account_loop 据此跳过扫描/回复（不停协程，
+        # resume 即时恢复，无需重启协程）。配套把 DouyinSession.status 写成 paused。
+        self._paused_accounts: set[str] = set()
         self._redis = None
         self._stop = asyncio.Event()
+
+        # 规模化并发治理：全局信号量限制同一时刻并发 scan/send，避免 N 个账号齐发把
+        # 签名进程池 / httpx / 抖音风控打爆。0/None 表示不限制。延迟到事件循环内创建。
+        self._max_concurrent_io = int(getattr(settings, 'DOUYIN_MAX_CONCURRENT_IO', 16) or 0)
+        self._io_sem: Optional[asyncio.Semaphore] = None
+        # 账号启动错峰最大抖动秒数：避免所有协程在同一刻进入首轮扫描造成尖峰。
+        self._startup_jitter_max = float(getattr(settings, 'DOUYIN_STARTUP_JITTER_S', 8) or 0)
+        # 资源阈值告警（去重用）：上次告警时间戳。
+        self._last_resource_alert_ts = 0.0
 
         # transport 层：每账号一份实例。
         #   Phase 1: BrowserTransport（DOM 扫描 + 文本框输入）
@@ -388,19 +470,29 @@ class DouyinWorker:
 
     # ---------------- 主入口 ----------------
     async def run(self) -> None:
-        logger.info(f"[worker] 启动 DouyinWorker worker_id={self.worker_id}")
+        from core.douyin.runtime.sharding import describe as _shard_desc
+        logger.info(f"[worker] 启动 DouyinWorker worker_id={self.worker_id} {_shard_desc()}")
         await self._connect_redis()
+        await _log_event(None, 'worker_started', 'info', 'Worker 启动',
+                         f"worker_id={self.worker_id} {_shard_desc()}", self.worker_id)
 
         try:
             await asyncio.gather(
                 self._loop_refresh_accounts(),
                 self._loop_heartbeat(),
                 self._loop_redis_commands(),
+                self._loop_renew_leases(),
             )
         finally:
             logger.info("[worker] 进入关停流程")
             for aid in list(self._tasks.keys()):
                 await self._stop_account(aid)
+            # 关停时把本 worker 名下会话标记为 stopped，避免面板长期显示"运行中"的僵尸会话
+            with suppress(Exception):
+                await _mark_worker_sessions_stopped(self.worker_id)
+            with suppress(Exception):
+                await _log_event(None, 'worker_stopped', 'warning', 'Worker 停止',
+                                 f"worker_id={self.worker_id}", self.worker_id)
             if self._redis is not None:
                 with suppress(Exception):
                     await self._redis.close()
@@ -414,15 +506,30 @@ class DouyinWorker:
             try:
                 accounts = await _load_managed_accounts()
                 wanted_ids = {a['id'] for a in accounts}
+
+                # 清理已结束的协程（如登录失效后 _account_loop return / 被取消）：
+                # 通过 _stop_account 摘除 task + 停掉并丢弃缓存的 transport/signer + 释放租约。
+                # 这样用户重新导入凭证（status 重新置 1）后，无需重启 worker 即可在下面被当作
+                # "未托管"重新拉起——用最新 storage 凭证起一份全新 transport/signer 恢复托管，
+                # 彻底解决"重导后旧 signer 还在内存里继续失败、必须重启 worker 才生效"。
+                for aid in [k for k, t in self._tasks.items() if t.done()]:
+                    logger.info(f"[worker] 协程已结束，回收待重拉 account={aid}")
+                    await self._stop_account(aid)
                 existing = set(self._tasks.keys())
 
-                # 新增
+                # 新增（多 worker 开启租约时，需先抢到账号租约才托管，避免重复托管）
                 for a in accounts:
-                    if a['id'] not in existing:
-                        self._tasks[a['id']] = asyncio.create_task(
-                            self._account_loop(a), name=f"dy-acc-{a['id'][:8]}"
+                    if a['id'] in existing:
+                        continue
+                    if not await self._try_acquire_lease(a['id']):
+                        logger.debug(
+                            f"[worker] 账号租约被其它 worker 持有，跳过 {a['nickname']} ({a['id']})"
                         )
-                        logger.info(f"[worker] 启动账号协程 {a['nickname']} ({a['id']})")
+                        continue
+                    self._tasks[a['id']] = asyncio.create_task(
+                        self._account_loop(a), name=f"dy-acc-{a['id'][:8]}"
+                    )
+                    logger.info(f"[worker] 启动账号协程 {a['nickname']} ({a['id']})")
 
                 # 移除
                 for aid in existing - wanted_ids:
@@ -443,19 +550,48 @@ class DouyinWorker:
                         'messages_today': 0, 'replies_today': 0, 'errors_today': 0,
                         'started_at': timezone.now(),
                     })
+                    session_status = 'paused' if aid in self._paused_accounts else 'running'
                     await _upsert_session(
                         account_id=aid,
                         worker_id=self.worker_id,
-                        status='running' if aid in self._tasks else 'idle',
+                        status=session_status,
                         metrics={
                             'cpu': cpu / per_account,
                             'mem': total_mem / per_account,
                             **metrics,
                         },
                     )
+                await self._maybe_alert_resource(total_mem, cpu, per_account)
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[worker] heartbeat error: {e}")
             await self._sleep_or_stop(self.heartbeat_interval)
+
+    async def _maybe_alert_resource(self, total_mem_mb: float, cpu_pct: float, account_count: int) -> None:
+        """进程级内存/CPU 超阈值时发去重的 risk_alert，提示扩容/降并发/分片。
+
+        阈值由 settings 配置：DOUYIN_MEM_ALERT_MB（默认 1500MB）、
+        DOUYIN_CPU_ALERT_PCT（默认 85%）。同一进程至少间隔 5 分钟才再次告警。
+        """
+        mem_limit = float(getattr(settings, 'DOUYIN_MEM_ALERT_MB', 1500) or 0)
+        cpu_limit = float(getattr(settings, 'DOUYIN_CPU_ALERT_PCT', 85) or 0)
+        over_mem = mem_limit > 0 and total_mem_mb >= mem_limit
+        over_cpu = cpu_limit > 0 and cpu_pct >= cpu_limit
+        if not (over_mem or over_cpu):
+            return
+        now = time.monotonic()
+        if now - self._last_resource_alert_ts < 300:
+            return
+        self._last_resource_alert_ts = now
+        detail = (
+            f"worker={self.worker_id} accounts={account_count} "
+            f"mem={total_mem_mb:.0f}MB(limit={mem_limit:.0f}) "
+            f"cpu={cpu_pct:.0f}%(limit={cpu_limit:.0f})"
+        )
+        logger.warning(f"[worker] ⚠ 资源超阈值告警 {detail}")
+        await _log_event(
+            None, 'risk_alert', 'warning',
+            'Worker 资源超阈值（建议降并发/扩容/分片）', detail, self.worker_id,
+        )
 
     async def _loop_redis_commands(self) -> None:
         """订阅 douyin:cmd:* 频道并派发"""
@@ -505,6 +641,17 @@ class DouyinWorker:
         if len(parts) < 4:
             return
         _, _, action, account_id = parts[0], parts[1], parts[2], parts[3]
+
+        # 命令定向路由：命令经 Redis Pub/Sub 广播给所有 worker，但账号只被一个 worker 托管。
+        # 多 worker（分片/租约生效）时，仅托管该账号的 worker 执行，其余忽略，避免重复执行
+        # （如 manual_reply 被多实例各发一遍造成重复消息）。单 worker 时 _routing_active 为 False，
+        # 行为不变（_tasks 含全部账号，且开机瞬间也不丢命令）。
+        if self._routing_active() and account_id not in self._tasks:
+            logger.debug(
+                f"[worker] 忽略非本实例托管账号的命令 action={action} account={account_id}"
+            )
+            return
+
         logger.info(f"[worker] 收到命令 action={action} account={account_id} payload={payload}")
 
         # 同一账号的命令必须串行执行，避免如下竞态：
@@ -553,8 +700,18 @@ class DouyinWorker:
             logger.info(f"[worker] session 命令 account={account_id} sub={sub}")
             if sub in ('stop', 'restart'):
                 await self._stop_account(account_id)
-            # pause / resume 当前版本简单处理：只改 DB 状态；
-            # 主循环下一轮 refresh 会根据 status 重新决定是否启停
+            elif sub == 'pause':
+                self._paused_accounts.add(account_id)
+                await _set_session_status(account_id, 'paused')
+                await _log_event(account_id, 'session_paused', 'info', '会话已暂停',
+                                 '由后台命令暂停，停止扫描/自动回复', self.worker_id)
+                logger.info(f"[worker] ⏸ 账号已暂停（停止扫描/回复）account={account_id}")
+            elif sub == 'resume':
+                self._paused_accounts.discard(account_id)
+                await _set_session_status(account_id, 'running')
+                await _log_event(account_id, 'session_resumed', 'info', '会话已恢复',
+                                 '由后台命令恢复扫描/自动回复', self.worker_id)
+                logger.info(f"[worker] ▶ 账号已恢复 account={account_id}")
 
     async def _stop_account(self, account_id: str) -> None:
         task = self._tasks.pop(account_id, None)
@@ -571,7 +728,44 @@ class DouyinWorker:
                     await transport.stop(acc_row)
             except Exception as e:  # noqa: BLE001
                 logger.debug(f"[worker] transport.stop 异常 account={account_id} err={e}")
+        await self._release_lease(account_id)
         logger.info(f"[worker] 已停止账号协程 {account_id}")
+
+    def _routing_active(self) -> bool:
+        """是否处于多 worker 模式（命令需按账号归属定向执行）。"""
+        from core.douyin.runtime import lease
+        from core.douyin.runtime.sharding import shard_count
+        return lease.lease_enabled() or shard_count() > 1
+
+    # ---------------- 账号租约（多 worker 防重复托管 + 崩溃转移） ----------------
+    async def _try_acquire_lease(self, account_id: str) -> bool:
+        from core.douyin.runtime import lease
+        if not lease.lease_enabled():
+            return True
+        return await lease.acquire(self._redis, account_id, self.worker_id)
+
+    async def _release_lease(self, account_id: str) -> None:
+        from core.douyin.runtime import lease
+        if not lease.lease_enabled():
+            return
+        await lease.release(self._redis, account_id, self.worker_id)
+
+    async def _loop_renew_leases(self) -> None:
+        """周期续约本 worker 持有的账号租约；续约失败（锁被转移）则停掉本地托管。"""
+        from core.douyin.runtime import lease
+        if not lease.lease_enabled():
+            return
+        interval = max(5, lease.lease_ttl() // 3)
+        while not self._stop.is_set():
+            for aid in list(self._tasks.keys()):
+                try:
+                    ok = await lease.renew(self._redis, aid, self.worker_id)
+                except Exception:  # noqa: BLE001
+                    ok = True
+                if not ok:
+                    logger.warning(f"[worker] 账号租约丢失（被其它 worker 接管），停掉本地托管 account={aid}")
+                    await self._stop_account(aid)
+            await self._sleep_or_stop(interval)
 
     async def _get_or_create_transport(self, account: "DouyinAccount") -> AccountTransport:
         """
@@ -624,6 +818,24 @@ class DouyinWorker:
                 f"[reply] ✔ 手动回复成功 account={account_id} peer={conv.peer_nickname!r} "
                 f"conv={conversation_id} log={log_id}"
             )
+        except LoginExpiredError as e:
+            logger.warning(
+                f"[reply] ✘ 手动回复遇登录失效，打回账号 account={account_id} "
+                f"http={e.http_status} proto={e.proto_status_code}: {e}"
+            )
+            await mark_account_login_invalid(
+                account_id,
+                f"手动发送被判定为登录失效（http={e.http_status} proto={e.proto_status_code}）：{e}",
+            )
+            await _mark_credential_invalid(
+                account_id, f"http={e.http_status} proto={e.proto_status_code}: {e}"
+            )
+            with suppress(Exception):
+                await push_to_user(account.owner_id, 'login_expired', {
+                    'account_id': account_id,
+                    'reason': '凭证已失效，请重新导入登录态',
+                    'source': 'manual_send',
+                })
         except Exception as e:  # noqa: BLE001
             logger.exception(f"[reply] ✘ 手动回复失败 account={account_id} conv={conversation_id}: {e}")
             await push_to_user(account.owner_id, 'reply_failed', {
@@ -649,6 +861,18 @@ class DouyinWorker:
         )
         await self._handle_one_message(account, synthetic, rules, str(account.owner_id))
 
+    # ---------------- 并发治理 ----------------
+    def _io_guard(self):
+        """返回全局 IO 信号量的 async 上下文；未配置上限时返回空守卫（不限流）。
+
+        信号量延迟到事件循环内创建（asyncio 原语绑定 loop），多账号共享同一把。
+        """
+        if self._max_concurrent_io <= 0:
+            return _NULL_GUARD
+        if self._io_sem is None:
+            self._io_sem = asyncio.Semaphore(self._max_concurrent_io)
+        return self._io_sem
+
     # ---------------- 单账号循环 ----------------
     async def _account_loop(self, a: dict) -> None:
         account_id = a['id']
@@ -666,6 +890,11 @@ class DouyinWorker:
             f"interval=[{a.get('min_interval_seconds')},{a.get('max_interval_seconds')}]s "
             f"quota={a.get('daily_reply_quota')} today={a.get('reply_today')}"
         )
+
+        # 启动错峰：N 个账号协程同时被 gather 起来，若不抖动会在同一刻齐发首轮扫描，
+        # 形成签名/网络尖峰。随机延迟 [0, jitter) 秒后再进入循环。
+        if self._startup_jitter_max > 0:
+            await asyncio.sleep(random.uniform(0, self._startup_jitter_max))
 
         # 未登录/失效账号不再在 worker 启动时自动弹登录，避免用户还未点击登录就打开浏览器。
         # 登录流程仅由前端显式点击“扫码登录”后通过 Redis 命令触发。
@@ -704,6 +933,12 @@ class DouyinWorker:
         while not self._stop.is_set():
             loop_count += 1
             try:
+                # 暂停：被 pause 命令置入暂停集合时，停止扫描/回复，但保持协程存活，
+                # 等 resume 即时恢复（无需重启协程）。
+                if account_id in self._paused_accounts:
+                    logger.debug(f"[worker] ⏸ 账号暂停中，跳过本轮 account={account_id}")
+                    await asyncio.sleep(10)
+                    continue
                 # 静默时段不扫描
                 if _in_silent_window(a.get('silent_start'), a.get('silent_end')):
                     logger.info(
@@ -752,16 +987,20 @@ class DouyinWorker:
                     f"[worker] #{loop_count} 开始扫描收件箱 account={account_id} ({nickname}) "
                     f"backfill={'Y' if backfill_mode else 'N'} transport={transport.name}"
                 )
-                new_msgs: list[ScannedMessage] = await transport.scan_inbox(
-                    acc_row,
-                    include_recent_without_unread=backfill_mode,
-                    conversation_hint=pending_scan_hint,
-                )
+                # 全局并发闸：限制同一时刻并发扫描的账号数，错峰削峰
+                async with self._io_guard():
+                    new_msgs: list[ScannedMessage] = await transport.scan_inbox(
+                        acc_row,
+                        include_recent_without_unread=backfill_mode,
+                        conversation_hint=pending_scan_hint,
+                    )
                 pending_scan_hint = None
                 if backfill_mode:
                     await _mark_history_sync_completed(account_id)
                     logger.info(f"[worker] 已完成首次历史会话补扫标记 account={account_id}")
                 self._account_metrics[account_id]['messages_today'] += len(new_msgs)
+                # 扫描成功即视为本路健康，清掉上一次的错误描述，避免面板长期残留旧错误
+                self._account_metrics[account_id]['last_error'] = None
                 logger.info(
                     f"[worker] #{loop_count} 扫描完成 account={account_id} "
                     f"new_msgs={len(new_msgs)} messages_today={self._account_metrics[account_id]['messages_today']}"
@@ -842,11 +1081,39 @@ class DouyinWorker:
                 )
                 await asyncio.sleep(15)
                 return
+            except LoginExpiredError as e:
+                # 明确的登录态失效信号（HTTP 401/403 或显式配置的协议失效码）：
+                # 打回账号 + 标记凭证失效 + WS 推送，引导用户重新导入登录态，停止本轮托管。
+                logger.warning(
+                    f"[worker] 账号登录态失效，打回重新导入 account={account_id} "
+                    f"http={e.http_status} proto={e.proto_status_code} err={e}"
+                )
+                self._account_metrics[account_id]['errors_today'] += 1
+                self._account_metrics[account_id]['last_error'] = (
+                    f"登录失效 http={e.http_status} proto={e.proto_status_code}: {e}"
+                )
+                await mark_account_login_invalid(
+                    account_id,
+                    f"请求被判定为登录失效（http={e.http_status} proto={e.proto_status_code}）：{e}",
+                )
+                await _mark_credential_invalid(
+                    account_id,
+                    f"http={e.http_status} proto={e.proto_status_code}: {e}",
+                )
+                with suppress(Exception):
+                    await push_to_user(owner_id, 'login_expired', {
+                        'account_id': account_id,
+                        'reason': '凭证已失效，请重新导入登录态',
+                        'source': 'scan_send',
+                    })
+                await asyncio.sleep(15)
+                return
             except asyncio.CancelledError:
                 logger.info(f"[worker] 账号协程被取消 {account_id}")
                 raise
             except Exception as e:  # noqa: BLE001
                 self._account_metrics[account_id]['errors_today'] += 1
+                self._account_metrics[account_id]['last_error'] = f"{type(e).__name__}: {e}"
                 await _log_event(account_id, 'unknown_error', 'error', '账号循环异常', str(e), self.worker_id)
                 logger.exception(f"[worker] account_loop error account={account_id}: {e}")
                 await asyncio.sleep(20)
@@ -862,6 +1129,8 @@ class DouyinWorker:
         account_id = str(account.id)
         peer = msg.peer_nickname or msg.peer_sec_uid or '?'
         preview = (msg.text or '')[:40].replace('\n', ' ')
+        if account_id in self._account_metrics:
+            self._account_metrics[account_id]['last_message_at'] = timezone.now()
         logger.info(
             f"[reply] ▶ 处理入向消息 account={account_id} peer={peer!r} "
             f"msg_id={msg.message_id} text={preview!r}"
@@ -957,6 +1226,23 @@ class DouyinWorker:
                              f"rule={rule.name}", self.worker_id)
             return
 
+        # 信息隔离硬约束：发送前确认这条消息的会话确实属于当前账号，
+        # 任何不一致都拒发并记 risk_alert，杜绝跨账号消息穿插。
+        if not await _conversation_belongs_to_account(account_id, msg.conversation_id):
+            logger.error(
+                f"[reply] ✘ 拒发：会话不属于当前账号（疑似穿插）account={account_id} "
+                f"conv={msg.conversation_id} msg_id={msg.message_id} peer={peer!r}"
+            )
+            await _log_event(
+                account_id,
+                'risk_alert',
+                'error',
+                '拒发：会话归属校验失败（信息隔离防护）',
+                f"conv={msg.conversation_id} msg_id={msg.message_id}",
+                self.worker_id,
+            )
+            return
+
         # 纯协议发送：transport 直发，不依赖页面会话定位；失败直接记错不回退 DOM。
         transport_conversation_id = (
             str((msg.raw or {}).get('conversation_id') or '').strip()
@@ -985,6 +1271,9 @@ class DouyinWorker:
                 'rule': rule.name,
                 'text_preview': (msg.text or '')[:60],
             })
+        except LoginExpiredError:
+            # 登录失效：交给 _account_loop 统一打回账号（标记失效 + WS 推送），不在此吞掉
+            raise
         except Exception as e:  # noqa: BLE001
             self._account_metrics[account_id]['errors_today'] += 1
             logger.exception(

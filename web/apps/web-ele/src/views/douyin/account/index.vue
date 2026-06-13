@@ -54,9 +54,29 @@ const router = useRouter();
 const STATUS_TAG_TYPE: Record<number, string> = {
   0: 'info',
   1: 'success',
-  2: 'warning',
-  3: 'danger',
+  2: 'danger',
+  3: 'info',
 };
+
+// 凭证三态徽标：可发送 / 仅接收 / 已失效 / 未知
+const CREDENTIAL_TAG: Record<string, { label: string; type: string }> = {
+  sendable: { label: '可发送', type: 'success' },
+  receive_only: { label: '仅接收', type: 'warning' },
+  invalid: { label: '已失效', type: 'danger' },
+  unknown: { label: '未探测', type: 'info' },
+};
+
+function credentialTag(row: DouyinAccount) {
+  return CREDENTIAL_TAG[row.credential_state || 'unknown'] || CREDENTIAL_TAG.unknown;
+}
+
+// 失效账号整行标红（登录失效 status=2 或凭证 invalid），让运维一眼看出谁掉线了
+function rowClassName({ row }: { row: DouyinAccount }) {
+  if (row.status === 2 || row.credential_state === 'invalid') {
+    return 'dy-row-invalid';
+  }
+  return '';
+}
 
 const loading = ref(false);
 const tableData = ref<DouyinAccount[]>([]);
@@ -272,7 +292,9 @@ const importDialogVisible = ref(false);
 const importAccountId = ref<string>('');
 const importAccountName = ref<string>('');
 const importSubmitting = ref(false);
+const importAdvanced = ref(false);
 const importForm = reactive({
+  bundle: '',
   cookie: '',
   web_protect: '',
   keys: '',
@@ -282,24 +304,28 @@ const importForm = reactive({
 function openImport(row: DouyinAccount) {
   importAccountId.value = row.id;
   importAccountName.value = row.nickname;
+  importForm.bundle = '';
   importForm.cookie = '';
   importForm.web_protect = '';
   importForm.keys = '';
   importForm.user_agent = '';
+  importAdvanced.value = false;
   importDialogVisible.value = true;
 }
 
 async function onImportSubmit() {
+  const bundle = importForm.bundle.trim();
   const cookie = importForm.cookie.trim();
   const webProtect = importForm.web_protect.trim();
   const keys = importForm.keys.trim();
-  if (!cookie && !webProtect && !keys) {
-    ElMessage.warning('请至少粘贴 Cookie，或填写要补充的 web_protect / keys');
+  if (!bundle && !cookie && !webProtect && !keys) {
+    ElMessage.warning('请粘贴扩展生成的「一键导入串」，或展开手动填写 Cookie');
     return;
   }
   importSubmitting.value = true;
   try {
     const res = await importDouyinCredentialApi(importAccountId.value, {
+      bundle: bundle || undefined,
       cookie: cookie || undefined,
       web_protect: webProtect || undefined,
       keys: keys || undefined,
@@ -398,6 +424,7 @@ onMounted(loadData);
           border
           stripe
           height="calc(100vh - 320px)"
+          :row-class-name="rowClassName"
           @selection-change="onSelectionChange"
         >
           <ElTableColumn type="selection" width="44" />
@@ -406,6 +433,22 @@ onMounted(loadData);
             <template #default="{ row }">
               <ElTag :type="STATUS_TAG_TYPE[row.status] as any">
                 {{ row.status_display }}
+              </ElTag>
+            </template>
+          </ElTableColumn>
+          <ElTableColumn label="凭证" width="150">
+            <template #default="{ row }">
+              <ElTooltip
+                v-if="row.last_probe_error"
+                :content="`失败原因：${row.last_probe_error}`"
+                placement="top"
+              >
+                <ElTag :type="credentialTag(row).type as any">
+                  {{ row.credential_state_display || credentialTag(row).label }}
+                </ElTag>
+              </ElTooltip>
+              <ElTag v-else :type="credentialTag(row).type as any">
+                {{ row.credential_state_display || credentialTag(row).label }}
               </ElTag>
             </template>
           </ElTableColumn>
@@ -449,6 +492,16 @@ onMounted(loadData);
             show-overflow-tooltip
           />
           <ElTableColumn
+            prop="last_probe_at"
+            label="最近探活"
+            width="170"
+            show-overflow-tooltip
+          >
+            <template #default="{ row }">
+              {{ row.last_probe_at || '—' }}
+            </template>
+          </ElTableColumn>
+          <ElTableColumn
             prop="remark"
             label="备注"
             min-width="160"
@@ -458,11 +511,19 @@ onMounted(loadData);
             <template #default="{ row }">
               <ElButton
                 link
-                type="primary"
+                :type="
+                  row.status === 2 || row.credential_state === 'invalid'
+                    ? 'danger'
+                    : 'primary'
+                "
                 size="small"
                 @click="openImport(row)"
               >
-                导入Cookie
+                {{
+                  row.status === 2 || row.credential_state === 'invalid'
+                    ? '重新导入'
+                    : '导入Cookie'
+                }}
               </ElButton>
               <ElButton
                 link
@@ -610,39 +671,57 @@ onMounted(loadData);
         destroy-on-close
       >
         <ElForm label-width="96px">
-          <ElFormItem label="Cookie">
+          <ElFormItem label="一键导入串">
             <ElInput
-              v-model="importForm.cookie"
+              v-model="importForm.bundle"
               type="textarea"
               :rows="4"
-              placeholder="从浏览器 F12 → 网络 → 任意 douyin.com 请求复制的 Cookie 整行（首次导入必填，须含 sessionid；补 web_protect/keys 时可留空以复用已导入 Cookie）"
+              placeholder="用「抖音登录态提取器」浏览器扩展抓取后，点『复制一键导入串』，在此粘贴（DYCRED1. 开头）。一次粘贴即含 Cookie + web_protect + keys。"
             />
           </ElFormItem>
-          <ElFormItem label="web_protect">
-            <ElInput
-              v-model="importForm.web_protect"
-              type="textarea"
-              :rows="2"
-              placeholder="bd-ticket-guard 的 web_protect JSON（发送私信才需要；仅监控可留空）"
-            />
-          </ElFormItem>
-          <ElFormItem label="keys">
-            <ElInput
-              v-model="importForm.keys"
-              type="textarea"
-              :rows="2"
-              placeholder="含 ec_privateKey 的 keys JSON（发送私信才需要；仅监控可留空）"
-            />
-          </ElFormItem>
-          <ElFormItem label="User-Agent">
-            <ElInput
-              v-model="importForm.user_agent"
-              placeholder="可选，与导出 Cookie 的浏览器一致的 UA"
-            />
-          </ElFormItem>
+          <div class="text-xs text-gray-400" style="margin-bottom: 8px">
+            推荐用浏览器扩展生成的「一键导入串」，粘贴一次即可，避免逐项粘贴误操作。
+            <ElButton link type="primary" @click="importAdvanced = !importAdvanced">
+              {{ importAdvanced ? '收起手动填写' : '手动填写（高级）' }}
+            </ElButton>
+          </div>
+
+          <template v-if="importAdvanced">
+            <ElFormItem label="Cookie">
+              <ElInput
+                v-model="importForm.cookie"
+                type="textarea"
+                :rows="4"
+                placeholder="浏览器复制的 Cookie 整行（须含 sessionid；与一键导入串二选一，单项填了会覆盖串里的同名字段）"
+              />
+            </ElFormItem>
+            <ElFormItem label="web_protect">
+              <ElInput
+                v-model="importForm.web_protect"
+                type="textarea"
+                :rows="2"
+                placeholder="bd-ticket-guard 的 web_protect JSON（发送私信才需要；仅监控可留空）"
+              />
+            </ElFormItem>
+            <ElFormItem label="keys">
+              <ElInput
+                v-model="importForm.keys"
+                type="textarea"
+                :rows="2"
+                placeholder="含 ec_privateKey 的 keys JSON（发送私信才需要；仅监控可留空）"
+              />
+            </ElFormItem>
+            <ElFormItem label="User-Agent">
+              <ElInput
+                v-model="importForm.user_agent"
+                placeholder="可选，与导出 Cookie 的浏览器一致的 UA"
+              />
+            </ElFormItem>
+          </template>
+
           <div class="text-xs text-gray-400">
-            仅监控/接收消息只需 Cookie；发送私信需额外填 web_protect 与 keys（bd-ticket-guard）。
-            已导入过 Cookie 后再来补 web_protect/keys 时，Cookie 可留空（自动复用），未填的字段保留上次的值。
+            仅监控/接收消息只需 Cookie；发送私信需额外的 web_protect 与 keys（bd-ticket-guard），
+            一键导入串已包含三者。补凭据时 Cookie 可留空（自动复用），未填字段保留上次的值。
           </div>
         </ElForm>
         <template #footer>
@@ -659,3 +738,13 @@ onMounted(loadData);
     </div>
   </Page>
 </template>
+
+<style scoped>
+/* 失效账号整行标红，运维一眼定位掉线/失效账号 */
+:deep(.dy-row-invalid) {
+  --el-table-tr-bg-color: var(--el-color-danger-light-9);
+}
+:deep(.dy-row-invalid:hover > td) {
+  background-color: var(--el-color-danger-light-8) !important;
+}
+</style>

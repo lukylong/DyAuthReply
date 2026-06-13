@@ -2,9 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 @File: douyin_session_model.py
-@Desc: Douyin Session - 抖音并发会话运行时模型
-        每个登录并运行中的浏览器上下文一条记录；worker 定期心跳上报。
+@Desc: Douyin Session - 抖音并发会话运行时模型（纯 HTTP 协议，无浏览器）
+        每个被 worker 托管并运行中的账号一条记录；worker 定期心跳上报。
         支撑"多账号并发托管"能力，后台可见每路会话的实时状态。
+        多 worker 分片部署时，account 与 worker 一一对应，账号迁移到新 worker 后
+        由新 worker 的心跳覆盖 worker_id（OneToOne，键为 account）。
 """
 from django.db import models
 
@@ -12,10 +14,10 @@ from common.fu_model import RootModel
 
 
 class DouyinSession(RootModel):
-    """抖音并发会话
+    """抖音并发会话（纯 HTTP 协议托管）
 
-    一个 worker 进程可以托管多个账号（每个账号一个浏览器 context），
-    每个 context 对应一条 DouyinSession 记录。
+    一个 worker 进程可以托管多个账号（每账号一路协程 + 独立签名/httpx），
+    每个账号对应一条 DouyinSession 记录。
     """
 
     SESSION_STATUS = [
@@ -43,7 +45,7 @@ class DouyinSession(RootModel):
 
     context_id = models.CharField(
         max_length=64,
-        help_text="浏览器上下文 ID（Playwright BrowserContext._guid）",
+        help_text="会话运行时标识（纯 HTTP 协议下为 ctx_<account 前缀>，保留字段兼容历史）",
     )
 
     status = models.CharField(

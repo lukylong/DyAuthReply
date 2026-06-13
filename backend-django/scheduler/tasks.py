@@ -194,6 +194,47 @@ def douyin_reset_daily_quota():
         return {"success": False, "error": error_msg}
 
 
+def douyin_probe_credentials():
+    """主动探活在线抖音账号的 cookie 有效性（cookie 池凭证生命周期治理）。
+
+    对 status=1（在线）账号用轻量只读接口（get_by_user limit=1）探测登录态：
+      - 失效 → 打回 status=2 + WS 推送 login_expired + credential_state=invalid
+      - 正常 → 刷新 credential_state（可发送/仅接收）与 last_probe_at
+      - 不确定（网络/5xx）→ 仅记录，不误伤
+
+    任务代码：scheduler.tasks.douyin_probe_credentials
+    建议 cron：*/15 * * * *（每 15 分钟）。
+    """
+    from core.douyin.runtime.health import run_credential_probe
+    return run_credential_probe()
+
+
+def douyin_cleanup_stale_sessions():
+    """清理僵尸会话 + worker 存活巡检（多账号资源稳定性治理）。
+
+    心跳超时的会话置 stopped 并告警；在线账号无存活会话也告警，便于及时发现掉线/漏消息。
+
+    任务代码：scheduler.tasks.douyin_cleanup_stale_sessions
+    建议 cron：*/2 * * * *（每 2 分钟）。
+    """
+    from core.douyin.runtime.health import cleanup_stale_sessions
+    return cleanup_stale_sessions()
+
+
+def douyin_ticket_autorenew():
+    """bd-ticket 自动续期（默认关闭）。
+
+    需 PoC（manage.py douyin_renew_poc）人工确认续期端点与字段语义后，再置
+    settings.DOUYIN_TICKET_AUTORENEW_ENABLED=True 开启；否则本任务直接跳过，
+    凭证生命周期仍由探活告警 + 引导重导入保底。
+
+    任务代码：scheduler.tasks.douyin_ticket_autorenew
+    建议 cron：*/30 * * * *（每 30 分钟）。
+    """
+    from core.douyin.runtime.health import run_ticket_autorenew
+    return run_ticket_autorenew()
+
+
 def douyin_aggregate_daily_stats():
     """
     每小时聚合"今日"数据到 DouyinDailyStat（便于前端 Dashboard 快速读取）。

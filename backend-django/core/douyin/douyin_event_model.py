@@ -33,10 +33,12 @@ class DouyinEvent(RootModel):
         ('message_received', '收到消息'),
         ('reply_sent', '已发送回复'),
         ('reply_failed', '回复失败'),
+        ('reply_skipped', '跳过回复'),
         ('risk_alert', '风控告警'),
         ('rate_limit', '触发限流'),
         ('quota_exceeded', '配额超限'),
         ('blacklist_hit', '命中黑名单'),
+        ('identity_mismatch', '账号身份漂移'),
         ('unknown_error', '未知异常'),
     ]
 

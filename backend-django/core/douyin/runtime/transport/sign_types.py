@@ -22,6 +22,21 @@ class SignerUnavailable(RuntimeError):
     """
 
 
+class LoginExpiredError(RuntimeError):
+    """账号登录态已失效（cookie/凭证过期）—— 明确的失效信号。
+
+    scan/send 在响应被 health.classify_signed_response 判定为 login_expired 时抛出，
+    worker 捕获后调用 mark_account_login_invalid 把账号打回（status=2）并 WS 推送，
+    而不是笼统记成 unknown_error。携带 http_status / proto_status_code 便于排障。
+    """
+
+    def __init__(self, message: str, *, http_status: int | None = None,
+                 proto_status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+        self.proto_status_code = proto_status_code
+
+
 @dataclass
 class SignedResponse:
     """signed_fetch 的标准化返回。

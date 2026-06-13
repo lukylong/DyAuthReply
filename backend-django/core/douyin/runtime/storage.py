@@ -104,6 +104,33 @@ def load_storage_state(account_id: str) -> Optional[dict]:
         return None
 
 
+def update_bd_ticket(account_id: str, **fields: str) -> bool:
+    """把若干 bd-ticket 字段增量写回 storage_state 的 _bd_ticket（仅覆盖非空值）。
+
+    用于自动续期：刷新到新的 ts_sign / client_cert / ticket 后写回，private_key 等未提供的
+    字段保持不变。state 不存在则不创建（必须先有登录态），返回是否写入成功。
+    """
+    state = load_storage_state(account_id)
+    if not state or not isinstance(state, dict):
+        logger.warning(f"[storage] update_bd_ticket 跳过：account={account_id} 无登录态")
+        return False
+    bd = dict(state.get("_bd_ticket") or {})
+    changed = False
+    for key, value in fields.items():
+        if value:
+            bd[key] = str(value)
+            changed = True
+    if not changed:
+        return False
+    state["_bd_ticket"] = bd
+    save_storage_state(account_id, state)
+    logger.info(
+        f"[storage] bd-ticket 已续期写回: account={account_id} "
+        f"fields={[k for k, v in fields.items() if v]}"
+    )
+    return True
+
+
 def delete_storage_state(account_id: str) -> None:
     """删除账号登录态（登出时调用）"""
     path = _storage_file(account_id)

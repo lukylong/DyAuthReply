@@ -92,11 +92,41 @@ def list_session_conversations(request, session_id: str):
 def list_session_messages(request, session_id: str, conversation_id: str):
     session = get_object_or_404(DouyinSession, id=session_id)
     conv = get_object_or_404(DouyinConversation, id=conversation_id, account_id=session.account_id)
-    return (
+    messages = list(
         DouyinMessage.objects
         .filter(conversation_id=conv.id)
         .order_by('-received_at', '-sys_create_datetime')[:100]
     )
+
+    # 增强消息数据：添加发送者信息
+    result = []
+    for msg in messages:
+        msg_dict = {
+            'id': str(msg.id),
+            'direction': msg.direction,
+            'content_type': msg.content_type,
+            'content': msg.content,
+            'received_at': msg.received_at,
+            'processed': msg.processed,
+        }
+
+        # 根据消息方向填充发送者信息
+        if msg.direction == 'in':
+            # 对方发来的消息
+            msg_dict['sender_name'] = conv.peer_nickname or conv.peer_sec_uid
+            msg_dict['sender_avatar'] = conv.peer_avatar
+        else:
+            # 我方发出的消息
+            try:
+                msg_dict['sender_name'] = session.account.nickname if session.account else '我'
+                msg_dict['sender_avatar'] = session.account.avatar if session.account else None
+            except Exception:
+                msg_dict['sender_name'] = '我'
+                msg_dict['sender_avatar'] = None
+
+        result.append(msg_dict)
+
+    return result
 
 
 @router.post(

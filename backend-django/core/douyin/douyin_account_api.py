@@ -28,6 +28,13 @@ from core.douyin.douyin_account_schema import (
     DouyinAccountSimpleOut,
     DouyinCredentialImportIn,
 )
+# 导入消息回复模块需要的 schema
+from core.douyin.douyin_session_schema import (
+    DouyinConversationItemOut,
+    DouyinManualReplyIn,
+    DouyinMessageItemOut,
+    DouyinSessionControlOut,
+)
 
 router = Router()
 
@@ -127,17 +134,37 @@ def import_credential(request, account_id: str, data: DouyinCredentialImportIn):
     """
     from django.utils import timezone
 
-    from core.douyin.runtime.credential import has_send_credential, merge_storage_state
+    from core.douyin.runtime.credential import (
+        has_send_credential,
+        merge_storage_state,
+        parse_credential_bundle,
+    )
     from core.douyin.runtime.storage import load_storage_state, save_storage_state
 
     account = get_object_or_404(DouyinAccount, id=account_id)
+
+    # 一键导入串：先展开为 cookie/web_protect/keys/ua，单项字段若显式提供则覆盖（单项优先）。
+    cookie = data.cookie or ""
+    web_protect = data.web_protect or ""
+    keys = data.keys or ""
+    user_agent = data.user_agent or ""
+    if data.bundle:
+        try:
+            unpacked = parse_credential_bundle(data.bundle)
+        except ValueError as e:
+            raise HttpError(400, f"一键导入串解析失败：{e}")
+        cookie = cookie or unpacked["cookie"]
+        web_protect = web_protect or unpacked["web_protect"]
+        keys = keys or unpacked["keys"]
+        user_agent = user_agent or unpacked["user_agent"]
+
     base_state = load_storage_state(str(account_id))
     try:
         state = merge_storage_state(
             base_state,
-            data.cookie or "",
-            web_protect=data.web_protect or "",
-            keys=data.keys or "",
+            cookie,
+            web_protect=web_protect,
+            keys=keys,
         )
     except ValueError as e:
         raise HttpError(400, f"凭证解析失败：{e}")
@@ -146,16 +173,19 @@ def import_credential(request, account_id: str, data: DouyinCredentialImportIn):
     if not ({"sessionid", "sessionid_ss"} & cookies.keys()):
         raise HttpError(400, "Cookie 缺少 sessionid，请确认已登录抖音后再从浏览器复制完整 Cookie")
 
+    can_send = has_send_credential(state)
     account.storage_state_path = save_storage_state(str(account_id), state)
     account.status = 1  # 在线
     account.last_login_at = timezone.now()
+    # 录入即刷新凭证三态：有 bd-ticket 三要素 → 可发送，否则仅接收；清掉历史失效原因
+    account.credential_state = 'sendable' if can_send else 'receive_only'
+    account.last_probe_error = None
     if data.nickname:
         account.nickname = data.nickname
-    if data.user_agent:
-        account.user_agent = data.user_agent
+    if user_agent:
+        account.user_agent = user_agent
     account.save()
 
-    can_send = has_send_credential(state)
     msg = (
         "登录态已导入：可监控与发送私信。"
         if can_send
@@ -196,3 +226,127 @@ def trigger_logout(request, account_id: str):
     ])
     command_publisher.send_logout(str(account_id))
     return DouyinAccountActionOut(success=True, message="登出指令已下发")
+
+
+# ============ 消息回复模块专用 API（账号级别，不依赖 session）============
+
+
+@router.get(
+    "/account/{account_id}/conversations",
+    response=List[DouyinConversationItemOut],
+    summary="获取账号的会话列表（消息回复模块）",
+)
+def list_account_conversations(request, account_id: str):
+    """
+    获取指定账号的所有会话列表（用于消息回复界面）
+    不依赖 session，直接通过 account_id 查询
+    """
+    from core.douyin.douyin_conversation_model import DouyinConversation
+
+    account = get_object_or_404(DouyinAccount, id=account_id)
+    rows = list(
+        DouyinConversation.objects
+        .filter(account_id=account.id)
+        .order_by('-last_message_at', '-sys_create_datetime')[:100]
+    )
+
+    # 去重逻辑（与 session API 保持一致）
+    deduped: list = []
+    seen: set[str] = set()
+    for row in rows:
+        if row.peer_sec_uid.startswith('fallback_') and row.peer_nickname:
+            key = f"nick:{row.peer_nickname}"
+        else:
+            key = f"uid:{row.peer_sec_uid}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+
+    return deduped[:50]
+
+
+@router.get(
+    "/account/{account_id}/conversation/{conversation_id}/messages",
+    response=List[DouyinMessageItemOut],
+    summary="获取会话消息（消息回复模块）",
+)
+def list_account_messages(request, account_id: str, conversation_id: str):
+    """
+    获取指定会话的消息列表（用于消息回复界面）
+    不依赖 session，直接通过 account_id 和 conversation_id 查询
+    """
+    from core.douyin.douyin_conversation_model import DouyinConversation
+    from core.douyin.douyin_message_model import DouyinMessage
+
+    account = get_object_or_404(DouyinAccount, id=account_id)
+    conv = get_object_or_404(
+        DouyinConversation,
+        id=conversation_id,
+        account_id=account.id
+    )
+
+    messages = list(
+        DouyinMessage.objects
+        .filter(conversation_id=conv.id)
+        .order_by('received_at', 'sys_create_datetime')[:100]
+    )
+
+    # 增强消息数据：添加发送者信息
+    result = []
+    for msg in messages:
+        msg_dict = {
+            'id': str(msg.id),
+            'direction': msg.direction,
+            'content_type': msg.content_type,
+            'content': msg.content,
+            'received_at': msg.received_at,
+            'processed': msg.processed,
+        }
+
+        # 根据消息方向填充发送者信息
+        if msg.direction == 'in':
+            # 对方发来的消息
+            msg_dict['sender_name'] = conv.peer_nickname or conv.peer_sec_uid
+            msg_dict['sender_avatar'] = conv.peer_avatar
+        else:
+            # 我方发出的消息
+            msg_dict['sender_name'] = account.nickname
+            msg_dict['sender_avatar'] = account.avatar
+
+        result.append(msg_dict)
+
+    return result
+
+
+@router.post(
+    "/account/{account_id}/manual-reply",
+    response=DouyinSessionControlOut,
+    summary="发送手动回复（消息回复模块）",
+)
+def send_account_manual_reply(request, account_id: str, data: DouyinManualReplyIn):
+    """
+    通过账号发送手动回复（用于消息回复界面）
+    不依赖 session，直接通过 account_id 操作
+    """
+    from core.douyin.douyin_conversation_model import DouyinConversation
+
+    account = get_object_or_404(DouyinAccount, id=account_id)
+    conv = get_object_or_404(
+        DouyinConversation,
+        id=data.conversation_id,
+        account_id=account.id
+    )
+
+    text = (data.text or '').strip()
+    if not text:
+        return DouyinSessionControlOut(success=False, message="回复内容不能为空")
+
+    ok = command_publisher.send_manual_reply(str(account.id), str(conv.id), text)
+    if not ok:
+        return DouyinSessionControlOut(
+            success=False,
+            message="Redis 不可用，未能下发手动回复指令"
+        )
+
+    return DouyinSessionControlOut(success=True, message="手动回复指令已下发")

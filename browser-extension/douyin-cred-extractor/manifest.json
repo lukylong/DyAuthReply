@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "抖音登录态提取器 (DyAuthReply)",
+  "version": "1.0.0",
+  "description": "一键抓取抖音 Cookie / web_protect / keys，用于 DyAuthReply 后台「导入登录态」。Cookie 通过浏览器 API 读取，可拿到 document.cookie 取不到的 HttpOnly sessionid。",
+  "permissions": ["cookies", "scripting", "activeTab", "tabs"],
+  "host_permissions": [
+    "*://*.douyin.com/*"
+  ],
+  "action": {
+    "default_title": "抓取抖音登录态",
+    "default_popup": "popup.html"
+  }
+}

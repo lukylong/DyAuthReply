@@ -203,6 +203,35 @@ class DouyinAccount(RootModel):
 
     reply_today = models.IntegerField(default=0, help_text="今日已回复数（每日 0 点由调度器重置）")
 
+    # ---------- 凭证生命周期治理（cookie 池） ----------
+    CREDENTIAL_STATE_CHOICES = [
+        ('unknown', '未知'),
+        ('sendable', '可发送'),
+        ('receive_only', '仅接收'),
+        ('invalid', '已失效'),
+    ]
+
+    credential_state = models.CharField(
+        max_length=16,
+        choices=CREDENTIAL_STATE_CHOICES,
+        default='unknown',
+        db_index=True,
+        help_text="凭证能力分级（可发送/仅接收/已失效），由探活与录入更新",
+    )
+
+    last_probe_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="最近一次凭证探活时间",
+    )
+
+    last_probe_error = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="最近一次探活/请求失败原因（用于面板标红与排障）",
+    )
+
     class Meta:
         db_table = 'core_douyin_account'
         verbose_name = '抖音账号'

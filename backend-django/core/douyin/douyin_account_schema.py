@@ -72,6 +72,7 @@ class DouyinAccountSchemaPatch(Schema):
 class DouyinAccountSchemaOut(ModelSchema):
     """抖音账号输出模式"""
     status_display: Optional[str] = None
+    credential_state_display: Optional[str] = None
     owner_id: Optional[str] = None
     owner_name: Optional[str] = None
 
@@ -82,6 +83,13 @@ class DouyinAccountSchemaOut(ModelSchema):
     @staticmethod
     def resolve_status_display(obj):
         return obj.get_status_display()
+
+    @staticmethod
+    def resolve_credential_state_display(obj):
+        try:
+            return obj.get_credential_state_display()
+        except Exception:
+            return None
 
     @staticmethod
     def resolve_owner_id(obj):
@@ -126,6 +134,13 @@ class DouyinAccountActionOut(Schema):
 
 class DouyinCredentialImportIn(Schema):
     """粘贴 Cookie 录入登录态的输入（替代扫码登录）。"""
+    bundle: Optional[str] = Field(
+        None,
+        description=(
+            "一键导入串（浏览器扩展产出，DYCRED1. 开头）。提供后自动展开为 cookie/web_protect/keys，"
+            "无需再逐项粘贴；与单项字段并存时，单项非空值优先。"
+        ),
+    )
     cookie: Optional[str] = Field(
         None,
         description="浏览器复制的 Cookie 整行（首次导入必填，须含 sessionid；补凭据时可留空以复用已导入 Cookie）",

@@ -84,6 +84,14 @@ function statusLabel(status: string) {
   );
 }
 
+// 异常/已停止会话整行标红，便于快速定位掉线/出错的账号
+function rowClassName({ row }: { row: DouyinSession }) {
+  if (row.status === 'error' || row.status === 'stopped') {
+    return 'dy-session-bad';
+  }
+  return '';
+}
+
 async function onControl(
   row: DouyinSession,
   action: 'pause' | 'restart' | 'resume' | 'stop',
@@ -203,7 +211,7 @@ onUnmounted(() => {
 <template>
   <Page
     title="并发会话监控"
-    description="实时显示 worker 托管的每个账号浏览器会话状态，5 秒自动刷新"
+    description="实时显示 worker 托管的每个账号（纯 HTTP 协议）会话状态，5 秒自动刷新"
   >
     <ElCard shadow="never">
       <template #header>
@@ -216,7 +224,12 @@ onUnmounted(() => {
         </div>
       </template>
 
-      <ElTable :data="sessions" v-loading="loading" stripe>
+      <ElTable
+        :data="sessions"
+        v-loading="loading"
+        stripe
+        :row-class-name="rowClassName"
+      >
         <ElTableColumn prop="account_nickname" label="账号" min-width="140" />
         <ElTableColumn label="状态" width="90">
           <template #default="{ row }">
@@ -268,6 +281,18 @@ onUnmounted(() => {
           </template>
         </ElTableColumn>
         <ElTableColumn prop="proxy_url" label="代理" min-width="140" show-overflow-tooltip />
+        <ElTableColumn label="最近错误" min-width="160" show-overflow-tooltip>
+          <template #default="{ row }">
+            <ElTooltip
+              v-if="row.error_message"
+              :content="row.error_message"
+              placement="top"
+            >
+              <span class="text-danger">{{ row.error_message }}</span>
+            </ElTooltip>
+            <span v-else>-</span>
+          </template>
+        </ElTableColumn>
         <ElTableColumn label="操作" width="320" fixed="right">
           <template #default="{ row }">
             <ElButton
@@ -455,6 +480,14 @@ onUnmounted(() => {
 
 .text-warning {
   color: #e6a23c;
+}
+
+.text-danger {
+  color: var(--el-color-danger);
+}
+
+:deep(.dy-session-bad) {
+  --el-table-tr-bg-color: var(--el-color-danger-light-9);
 }
 
 .manual-layout {

@@ -175,7 +175,7 @@ DOUYIN_TRANSPORT_WS_INBOUND = _env('DOUYIN_TRANSPORT_WS_INBOUND', 'false').lower
 # 切到 'http_protocol' 之前请确认：
 #   1) 已经跑过 sniffer 抓到完整协议地图（manage.py douyin_sniff_analyze）
 #   2) 至少打开下面一个 DOUYIN_HTTP_PROTOCOL_* 开关
-DOUYIN_TRANSPORT_BACKEND = _env('DOUYIN_TRANSPORT_BACKEND', 'browser')
+DOUYIN_TRANSPORT_BACKEND = _env('DOUYIN_TRANSPORT_BACKEND', 'http_protocol')
 
 # 签名后端（仅当 DOUYIN_TRANSPORT_BACKEND=http_protocol 时生效）：
 #   'browser'（默认）: SignProvider —— 每账号一个浏览器 context 做签名（重）
@@ -185,16 +185,16 @@ DOUYIN_TRANSPORT_BACKEND = _env('DOUYIN_TRANSPORT_BACKEND', 'browser')
 #                      bd-ticket-guard 齐全，私信可收可发，无浏览器（推荐的脱浏览器后端）
 # local/js 为灰度路径：imapi 是否接受需用真实 cookie/抓包验证；未就绪/失败时
 # HttpProtocolTransport 仍会 fallback 到 BrowserTransport，零回归。
-DOUYIN_SIGN_BACKEND = _env('DOUYIN_SIGN_BACKEND', 'browser')
+DOUYIN_SIGN_BACKEND = _env('DOUYIN_SIGN_BACKEND', 'js')
 
 # Verb 级灰度开关（仅当 DOUYIN_TRANSPORT_BACKEND=http_protocol 时生效）
 # 任一开关打开后，对应的 verb 走 HTTP 协议路径；失败自动 fallback 到 BrowserTransport。
 # 推荐切量顺序：send_text → send_reply → scan_inbox（出向比入向幂等性高）
-DOUYIN_HTTP_PROTOCOL_SEND_TEXT = _env('DOUYIN_HTTP_PROTOCOL_SEND_TEXT', 'false').lower() == 'true'
-DOUYIN_HTTP_PROTOCOL_SEND_REPLY = _env('DOUYIN_HTTP_PROTOCOL_SEND_REPLY', 'false').lower() == 'true'
-DOUYIN_HTTP_PROTOCOL_SEND_STRICT = _env('DOUYIN_HTTP_PROTOCOL_SEND_STRICT', 'false').lower() == 'true'
-DOUYIN_HTTP_PROTOCOL_SCAN_INBOX = _env('DOUYIN_HTTP_PROTOCOL_SCAN_INBOX', 'false').lower() == 'true'
-DOUYIN_HTTP_PROTOCOL_SCAN_STRICT = _env('DOUYIN_HTTP_PROTOCOL_SCAN_STRICT', 'false').lower() == 'true'
+DOUYIN_HTTP_PROTOCOL_SEND_TEXT = _env('DOUYIN_HTTP_PROTOCOL_SEND_TEXT', 'true').lower() == 'true'
+DOUYIN_HTTP_PROTOCOL_SEND_REPLY = _env('DOUYIN_HTTP_PROTOCOL_SEND_REPLY', 'true').lower() == 'true'
+DOUYIN_HTTP_PROTOCOL_SEND_STRICT = _env('DOUYIN_HTTP_PROTOCOL_SEND_STRICT', 'true').lower() == 'true'
+DOUYIN_HTTP_PROTOCOL_SCAN_INBOX = _env('DOUYIN_HTTP_PROTOCOL_SCAN_INBOX', 'true').lower() == 'true'
+DOUYIN_HTTP_PROTOCOL_SCAN_STRICT = _env('DOUYIN_HTTP_PROTOCOL_SCAN_STRICT', 'true').lower() == 'true'
 # scan_inbox 双跑对账：HTTP 解析 + DOM 扫描同时跑，对账后再翻 SCAN_INBOX=true
 # 让 HTTP 主路径接管。开启时 worker 日志会出现 [transport.scan_dual_run] ... 对账输出
 DOUYIN_HTTP_PROTOCOL_SCAN_INBOX_DUAL_RUN = _env(

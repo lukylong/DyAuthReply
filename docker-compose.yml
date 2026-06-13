@@ -60,18 +60,15 @@ x-backend-env: &backend-env
   DOUYIN_SNIFFER_URL_KEYWORDS: ${DOUYIN_SNIFFER_URL_KEYWORDS:-}
   # Phase 2 transport：true 时启用 WS 入向消息快路径（默认关闭，灰度开启）
   DOUYIN_TRANSPORT_WS_INBOUND: ${DOUYIN_TRANSPORT_WS_INBOUND:-false}
-  # Phase 3 transport：'browser' (默认) / 'http_protocol' (浏览器仅签名，业务流量走 HTTP)
-  DOUYIN_TRANSPORT_BACKEND: ${DOUYIN_TRANSPORT_BACKEND:-browser}
-  # 签名后端：'browser' / 'local' / 'js'(dy_ab.js + bd-ticket-guard，脱浏览器，推荐)
+  # 脱浏览器：默认 http_protocol（纯协议，浏览器子系统已移除）
+  DOUYIN_TRANSPORT_BACKEND: ${DOUYIN_TRANSPORT_BACKEND:-http_protocol}
+  # 签名后端：'js'(dy_ab.js + bd-ticket-guard，脱浏览器，唯一支持)
   # 必须在此显式声明，compose 才会把 .env 里的 DOUYIN_SIGN_BACKEND 传进容器
-  DOUYIN_SIGN_BACKEND: ${DOUYIN_SIGN_BACKEND:-browser}
-  # Verb 级灰度开关（仅当 DOUYIN_TRANSPORT_BACKEND=http_protocol 时生效）
-  # 任一开关失败时自动 fallback 到 BrowserTransport，灰度安全
-  # 发送主路回退浏览器：接口扫描已稳定，纯协议发送仍会命中业务层 7905。
-  # 这里默认关闭 HTTP send，只保留 HTTP scan。
-  DOUYIN_HTTP_PROTOCOL_SEND_TEXT: ${DOUYIN_HTTP_PROTOCOL_SEND_TEXT:-false}
-  DOUYIN_HTTP_PROTOCOL_SEND_REPLY: ${DOUYIN_HTTP_PROTOCOL_SEND_REPLY:-false}
-  DOUYIN_HTTP_PROTOCOL_SEND_STRICT: ${DOUYIN_HTTP_PROTOCOL_SEND_STRICT:-false}
+  DOUYIN_SIGN_BACKEND: ${DOUYIN_SIGN_BACKEND:-js}
+  # Verb 级开关：纯协议默认全开 + strict（失败直接报错，不再回退 DOM）
+  DOUYIN_HTTP_PROTOCOL_SEND_TEXT: ${DOUYIN_HTTP_PROTOCOL_SEND_TEXT:-true}
+  DOUYIN_HTTP_PROTOCOL_SEND_REPLY: ${DOUYIN_HTTP_PROTOCOL_SEND_REPLY:-true}
+  DOUYIN_HTTP_PROTOCOL_SEND_STRICT: ${DOUYIN_HTTP_PROTOCOL_SEND_STRICT:-true}
   DOUYIN_HTTP_PROTOCOL_SCAN_INBOX: ${DOUYIN_HTTP_PROTOCOL_SCAN_INBOX:-true}
   DOUYIN_HTTP_PROTOCOL_SCAN_STRICT: ${DOUYIN_HTTP_PROTOCOL_SCAN_STRICT:-true}
   # scan_inbox 双跑对账：HTTP 解析 + DOM 扫描同时跑，对账后再翻 SCAN_INBOX=true

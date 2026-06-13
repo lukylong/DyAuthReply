@@ -38,14 +38,16 @@ from django.conf import settings
 from django.utils import timezone
 
 from core.douyin.runtime.browser import BrowserManager
-from core.douyin.runtime.inbox import (
+from core.douyin.runtime.message_store import (
     AccountIdentityMismatch,
     LoginGateDetected,
     ScannedMessage,
     _norm_for_compare,
-    _read_visible_conversation_snapshot,
     _recent_outbound_replies_log,
     _recent_outbound_texts,
+)
+from core.douyin.runtime.inbox import (
+    _read_visible_conversation_snapshot,
     _switch_im_tab,
 )
 from core.douyin.runtime.account_status import mark_account_login_invalid

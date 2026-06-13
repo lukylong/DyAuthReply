@@ -68,7 +68,7 @@ from core.douyin.runtime.transport.wire import (
 if TYPE_CHECKING:
     from core.douyin.douyin_account_model import DouyinAccount
     from core.douyin.douyin_rule_model import DouyinRule
-    from core.douyin.runtime.inbox import ScannedMessage
+    from core.douyin.runtime.message_store import ScannedMessage
 
 logger = logging.getLogger(__name__)
 
@@ -1273,7 +1273,7 @@ class HttpProtocolTransport(AccountTransport):
         # 延迟 import，规避循环依赖（inbox → transport → inbox）
         from datetime import datetime, timezone
 
-        from core.douyin.runtime.inbox import (
+        from core.douyin.runtime.message_store import (
             ScannedMessage,
             _norm_for_compare,
             _recent_outbound_replies_log,
@@ -1828,7 +1828,7 @@ class HttpProtocolTransport(AccountTransport):
             namespace 导致看不出对应关系
         """
         try:
-            from core.douyin.runtime.inbox import _norm_for_compare
+            from core.douyin.runtime.message_store import _norm_for_compare
 
             account_id = str(account.id)
             http_candidates = getattr(self, "_last_dry_run_candidates", []) or []

@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, List, Optional
 if TYPE_CHECKING:
     from core.douyin.douyin_account_model import DouyinAccount
     from core.douyin.douyin_rule_model import DouyinRule
-    from core.douyin.runtime.inbox import ScannedMessage
+    from core.douyin.runtime.message_store import ScannedMessage
 
 
 @dataclass

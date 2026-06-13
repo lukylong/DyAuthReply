@@ -72,8 +72,7 @@ Docker Compose 内部：
 
 Douyin 持久化数据非常关键，包含：
 
-- Playwright `user_data_dir`
-- 加密后的 `storage_state`
+- 加密后的账号登录态凭证（Cookie + web_protect/keys）
 
 默认在容器中挂载到：
 
@@ -151,13 +150,14 @@ AUTO_LOADDATA=false
 UVICORN_RELOAD=
 
 DOUYIN_STORAGE_ENCRYPTION_KEY=<必须保留原值，若是迁移老环境>
-DOUYIN_WORKER_HEADLESS=True
+DOUYIN_TRANSPORT_BACKEND=http_protocol
+DOUYIN_SIGN_BACKEND=js
 ```
 
 注意：
 
 - 如果你要恢复老环境的抖音登录态，`DOUYIN_STORAGE_ENCRYPTION_KEY` 必须和老环境完全一致。
-- 改了这个 key 之后，老的 `storage_state` 会全部失效。
+- 改了这个 key 之后，老的加密凭证会全部失效，需要重新导入登录态。
 
 ---
 
@@ -298,7 +298,7 @@ docker compose logs -f douyin-worker
   -> 服务器公网 IP
   -> Nginx :80/:443
   -> 证书挂在 Nginx 上
-  -> Nginx 再把 / 和 /basic-api/ /ws/ /vnc/ 分发到前端、Django 或 noVNC
+  -> Nginx 再把 / 和 /basic-api/ /ws/ 分发到前端或 Django
 ```
 
 ### 8.1 推荐域名方案
@@ -314,7 +314,6 @@ your-domain.com
 - `/` 前端
 - `/basic-api/` Django API
 - `/ws/` Django WebSocket
-- `/vnc/` noVNC 监管页
 
 也可以双域名：
 
@@ -419,7 +418,6 @@ Nginx 配置里就引用这两个文件。
 - 前端访问 `https://your-domain.com/`
 - API 走 `https://your-domain.com/basic-api/`
 - WebSocket 走 `wss://your-domain.com/ws/`
-- noVNC 监管页走 `https://your-domain.com/vnc/vnc.html?autoconnect=1&resize=scale&path=vnc/websockify`
 
 这种情况下最省事。
 
@@ -430,31 +428,12 @@ Nginx 配置里就引用这两个文件。
 
 ### 8.6 Douyin Worker 和域名的关系
 
-`douyin-worker` 一般不需要独立公网域名。
-
-只有在你要暴露 noVNC 监管页时，才需要单独考虑：
-
-- 可以临时开放一个受限入口
-- 或挂到子路径/子域名
-- 生产上不建议长期对公网裸露
-
-当前推荐直接挂到单域名子路径：
-
-```text
-https://your-domain.com/vnc/
-```
-
-更准确的监管页地址是：
-
-```text
-https://your-domain.com/vnc/vnc.html?autoconnect=1&resize=scale&path=vnc/websockify
-```
+`douyin-worker` 是纯协议进程，不对外暴露任何端口，也不需要独立公网域名。
 
 默认情况下：
 
 - 外部域名只服务前端、API、WebSocket
-- `douyin-worker` 留在 Docker 内部运行
-- noVNC 通过 Nginx 转发到宿主机 `127.0.0.1:6080`
+- `douyin-worker` 留在 Docker 内部运行，仅通过 Redis 与后端通信
 
 ---
 
@@ -465,7 +444,6 @@ https://your-domain.com/vnc/vnc.html?autoconnect=1&resize=scale&path=vnc/websock
 - `/` 指向前端静态目录
 - `/basic-api/` 反代到 Django
 - `/ws/` 反代到 Django WebSocket
-- `/vnc/` 反代到 noVNC `127.0.0.1:6080`
 
 示例：
 
@@ -509,17 +487,6 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
-
-    location /vnc/ {
-        proxy_pass http://127.0.0.1:6080/;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
 }
 ```
 
@@ -547,18 +514,6 @@ http://127.0.0.1:8000
 - Django 容器把 `8000` 映射到了宿主机
 - Nginx 跑在宿主机上
 
-noVNC 监管页则是：
-
-```text
-http://127.0.0.1:6080
-```
-
-前提是：
-
-- `douyin-worker` 已启动
-- compose 把 `6080` 映射到了宿主机
-- Nginx 跑在宿主机上
-
 不是指向：
 
 - `https://your-domain.com/basic-api`
@@ -577,54 +532,7 @@ http://127.0.0.1:6080
 | `ssl_certificate_key` | 私钥文件 |
 | `/basic-api/` | `127.0.0.1:8000` |
 | `/ws/` | `127.0.0.1:8000` |
-| `/vnc/` | `127.0.0.1:6080` |
 | Douyin worker | 不需要独立公网域名，内部跑 |
-
-### 9.3 `/vnc/` 建议加访问限制
-
-`/vnc/` 不建议直接裸露给公网。
-
-至少做一层限制：
-
-- Basic Auth
-- IP 白名单
-- VPN / 零信任网关
-
-最简单的是 Basic Auth：
-
-```bash
-sudo apt install -y apache2-utils
-sudo htpasswd -c /etc/nginx/.htpasswd-vnc admin
-```
-
-然后在 `/vnc/` location 里加：
-
-```nginx
-location /vnc/ {
-    auth_basic "Restricted VNC";
-    auth_basic_user_file /etc/nginx/.htpasswd-vnc;
-
-    proxy_pass http://127.0.0.1:6080/;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host $host;
-}
-```
-
-如果你还有固定办公 IP，建议再叠加白名单：
-
-```nginx
-location /vnc/ {
-    allow 1.2.3.4;
-    deny all;
-
-    auth_basic "Restricted VNC";
-    auth_basic_user_file /etc/nginx/.htpasswd-vnc;
-
-    proxy_pass http://127.0.0.1:6080/;
-}
-```
 
 ---
 

@@ -10,7 +10,8 @@
     docker compose run --rm douyin-worker
 
 依赖：
-    必须先跑 `playwright install chromium`（已在 Dockerfile 或本地环境安装）。
+    纯 HTTP 协议，无浏览器；JS 签名走 Node.js（dy_ab.js + bd-ticket-guard），
+    确保运行环境已安装 Node.js。
 """
 import asyncio
 import logging

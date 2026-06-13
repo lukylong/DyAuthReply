@@ -1,6 +1,6 @@
 # 部署文档（DyAuthReply / zq-platform）
 
-本项目包含三类进程：**Django Web（ASGI）**、**APScheduler（后台调度）**、**Douyin Worker（Playwright 浏览器自动化）**，前端是 **Vue 3 + Vite** 打包产物。文档覆盖：本地开发、本地打包产物、Linux 服务器部署、Nginx 反向代理、域名解析与 HTTPS 证书、抖音模块特殊注意点。
+本项目包含三类进程：**Django Web（ASGI）**、**APScheduler（后台调度）**、**Douyin Worker（纯 HTTP 协议直连抖音 imapi，无浏览器）**，前端是 **Vue 3 + Vite** 打包产物。文档覆盖：本地开发、本地打包产物、Linux 服务器部署、Nginx 反向代理、域名解析与 HTTPS 证书、抖音模块特殊注意点。
 
 > 目录索引
 >
@@ -47,8 +47,8 @@
                                         │ Pub/Sub
                                 ┌───────▼─────────────────┐
                                 │ Douyin Worker           │
-                                │ Playwright + Chromium   │
-                                │ 每账号一个 Context      │
+                                │ 纯 HTTP 协议 + JS 签名  │
+                                │ 每账号一个协程          │
                                 └─────────────────────────┘
 ```
 
@@ -70,9 +70,8 @@
 
 - **操作系统**：macOS / Linux / Windows（WSL2）
 - **Python** ≥ 3.11
-- **Node.js** ≥ 20 + **pnpm** ≥ 9
+- **Node.js** ≥ 20 + **pnpm** ≥ 9（Node.js 同时供 worker 的 JS 签名使用）
 - **PostgreSQL** ≥ 14、**Redis** ≥ 6（或直接 `docker compose up postgres redis`）
-- **Chromium**（Playwright 安装）
 
 ### 2.2 一键 Docker Compose（推荐开发方式）
 
@@ -90,8 +89,7 @@ docker compose logs -f backend
 抖音 worker 需要显式加 profile：
 
 ```bash
-# 本地首次扫码调试推荐关闭无头：改 .env 里 DOUYIN_WORKER_HEADLESS=False，
-# 并在宿主机跑（容器里跑无头登录则保持 True）
+# 纯协议 worker，无需浏览器；导入登录态后即可托管
 docker compose --profile douyin up -d douyin-worker
 ```
 
@@ -102,14 +100,13 @@ docker compose --profile douyin up -d douyin-worker
 cd backend-django
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-playwright install chromium       # Playwright 浏览器
 python manage.py migrate
 python manage.py runserver 0.0.0.0:8000
 
 # 调度器（另开终端）
 python start_scheduler.py
 
-# 抖音 worker（另开终端，首次扫码需 DOUYIN_WORKER_HEADLESS=False）
+# 抖音 worker（另开终端，纯协议，需 Node.js 供 JS 签名）
 python start_douyin_worker.py
 
 # 前端
@@ -176,9 +173,9 @@ docker push  registry.example.com/zq-platform/backend:v1.0.0
 | --- | --- | --- | --- | --- |
 | 全部混部（小规模） | 2 核 | 4 GB | 40 GB | ≤ 5 个抖音账号 |
 | 生产推荐 | 4 核 | 8 GB | 80 GB + SSD | ≤ 20 个抖音账号 |
-| 每多 10 个抖音账号 | +1 核 | +1 GB | — | Chromium 常驻进程耗资源 |
+| 每多 10 个抖音账号 | +1 核 | +1 GB | — | 纯协议常驻协程，资源占用远低于浏览器方案 |
 
-**操作系统**：Ubuntu 22.04 LTS / Debian 12（其他发行版 Playwright 容器已内置依赖，推荐 Docker 方案）。
+**操作系统**：Ubuntu 22.04 LTS / Debian 12（推荐 Docker 方案，镜像已内置依赖）。
 
 **开放端口**（云厂商安全组）：**仅 22 / 80 / 443**，其他所有端口不要对公网开放。
 
@@ -226,7 +223,11 @@ AUTO_LOADDATA=false             # 首次以外都设 false
 
 # 抖音 Fernet 登录态加密密钥（生成命令见下）
 DOUYIN_STORAGE_ENCRYPTION_KEY=<Fernet.generate_key()>
-DOUYIN_WORKER_HEADLESS=True     # 生产必须 True；扫码通过 WS 推前端完成
+# 纯协议后端（默认值，确认即可）
+DOUYIN_TRANSPORT_BACKEND=http_protocol
+DOUYIN_SIGN_BACKEND=js
+DOUYIN_SEND_STRICT=true
+DOUYIN_SCAN_STRICT=true
 ```
 
 生成 Fernet 密钥：
@@ -374,7 +375,6 @@ sudo -u zq git clone <your-repo-url> /opt/zq-platform
 cd /opt/zq-platform/backend-django
 sudo -u zq python3.11 -m venv .venv
 sudo -u zq .venv/bin/pip install -r requirements.txt
-sudo -u zq .venv/bin/playwright install --with-deps chromium
 ```
 
 把环境变量写到 `/etc/zq-platform.env`（systemd 会读取）：
@@ -395,7 +395,8 @@ JWT_ACCESS_SECRET_KEY=<...>
 JWT_REFRESH_SECRET_KEY=<...>
 DOUYIN_DATA_DIR=/var/lib/zq-platform/douyin
 DOUYIN_STORAGE_ENCRYPTION_KEY=<...>
-DOUYIN_WORKER_HEADLESS=True
+DOUYIN_TRANSPORT_BACKEND=http_protocol
+DOUYIN_SIGN_BACKEND=js
 ```
 
 ### 6.2 三个 systemd 单元
@@ -456,7 +457,7 @@ EnvironmentFile=/etc/zq-platform.env
 ExecStart=/opt/zq-platform/backend-django/.venv/bin/python start_douyin_worker.py
 Restart=on-failure
 RestartSec=10
-# Chromium 崩溃不要无限重启
+# worker 异常不要无限重启
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
@@ -577,14 +578,14 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    # --- WebSocket（抖音二维码推送 + 实时通知 + 心跳） ---
+    # --- WebSocket（抖音账号事件 + 实时通知 + 心跳） ---
     # 前端直接连 wss://{host}/ws/*（见 web/apps/web-ele/src/api/core/websocket.ts）
     # 通道：
-    #   /ws/douyin/         抖音账号事件（扫码二维码、登录成功/失败、回复日志）
+    #   /ws/douyin/         抖音账号事件（登录失效、回复日志、心跳状态）
     #   /ws/notifications/  通用系统通知
     #   /ws/test/           连通性探针（部署完成后可用来验证 ws 是否通）
     # 关键点：必须开启 HTTP/1.1 + Upgrade 头，且 proxy_read_timeout 拉长，
-    # 否则 60s 无消息就会被 Nginx 默默踢断，二维码刷新期间容易掉线。
+    # 否则 60s 无消息就会被 Nginx 默默踢断，实时推送容易掉线。
     location /ws/ {
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
@@ -717,17 +718,17 @@ curl -I https://zq.example.com
 
 ## 10. 抖音 worker 部署要点
 
-1. **资源隔离**：Chromium 单实例 ≈ 150–300 MB 内存，生产环境建议 worker 独立一台 / 独立容器，避免和 web 抢 CPU
+1. **资源占用**：纯协议 worker 每账号仅一个 asyncio 协程 + httpx 连接，内存/CPU 占用远低于浏览器方案；JS 签名走 Node.js，确保镜像/主机已装 Node.js
 2. **登录态目录**：`DOUYIN_DATA_DIR=/var/lib/zq-platform/douyin/` **必须持久化**（Docker 已用命名卷 `douyin-data`；裸机部署自己做定期备份）
-3. **Fernet 密钥**：`DOUYIN_STORAGE_ENCRYPTION_KEY` 一旦丢失，所有已保存的登录态作废，所有账号需要重新扫码。**强烈建议把这个 key 离线备份**
-4. **首次扫码**：生产环境保持 `DOUYIN_WORKER_HEADLESS=True`，二维码会通过 WebSocket 推到前端 `/douyin/account` 页面，用抖音 APP 扫。**扫码前务必先验证 `/ws/douyin/` 通畅**：打开前端页面，浏览器 DevTools → Network → WS 过滤器，应该看到一条 `wss://<your-domain>/ws/douyin/?token=***` 的连接并处于 **101 Switching Protocols** 状态，否则二维码不会显示（对应排错：第 12 节"WebSocket 连不上"那行）
+3. **Fernet 密钥**：`DOUYIN_STORAGE_ENCRYPTION_KEY` 一旦丢失，所有已保存的登录态作废，所有账号需要重新导入。**强烈建议把这个 key 离线备份**
+4. **导入登录态**：在浏览器登录抖音创作者中心，导出 Cookie，并从 `localStorage` 取出 `security-sdk/s_sdk_crypt_sdk`（keys）与 `security-sdk/s_sdk_sign_data_key/web_protect`，在 `/douyin/account` 点击"导入登录态"粘贴保存。凭证过期需重新导入
 5. **代理 / UA**：在 `/douyin/account` 为每个账号单独配置 `proxy_url` 与 `user_agent`，worker 会自动应用
 6. **调度任务**：登录到 `/scheduler` 页面添加两个内置任务：
 
    - `scheduler.tasks.douyin_reset_daily_quota` — `cron: 0 0 * * *`
    - `scheduler.tasks.douyin_aggregate_daily_stats` — `cron: 5 * * * *`
 
-7. **DOM 失效**：抖音创作者中心页面会不定期改版，若扫描失败，优先更新 `backend-django/core/douyin/runtime/selectors.py`，不需要重新部署其他组件
+7. **签名/风控失效**：抖音签名算法（`backend-django/core/douyin/runtime/transport/sign/js/dy_ab.js`、bd-ticket-guard）或风控策略改版可能导致扫描/发送失败；优先排查签名与凭证有效性，必要时更新签名脚本
 
 ---
 
@@ -779,9 +780,9 @@ cat .env | grep DOUYIN_STORAGE_ENCRYPTION_KEY
 | 前端打开白屏 | 1) 浏览器 Network 看静态资源是否 200；2) `VITE_BASE` 与部署子路径一致；3) Nginx `root` 路径正确 |
 | 所有接口 404 / Network 里 URL 形如 `/api/api/...` | `VITE_GLOB_API_URL` 设成了 `/api/` 导致前缀重复。必须用 `/basic-api/`（末尾带 `/`），与 Nginx `location /basic-api/` 对齐 |
 | 登录接口 CORS / 跨域 | `VITE_GLOB_API_URL` 必须 **同源 + /basic-api/**，或后端 `CORS_ALLOWED_ORIGINS` 显式允许当前域名 |
-| WebSocket 连不上（二维码不显示 / 回复日志不实时） | 1) Nginx `/ws/` 缺 `Upgrade` / `Connection: upgrade` 头；2) `proxy_read_timeout` 短于心跳间隔（需 ≥60s，建议 3600s）；3) 前端浏览器控制台报 `WebSocket is closed before the connection is established`；4) 云厂商安全组未放行 443；5) 自建证书是自签名，浏览器默认拒绝 wss |
+| WebSocket 连不上（回复日志不实时 / 状态不更新） | 1) Nginx `/ws/` 缺 `Upgrade` / `Connection: upgrade` 头；2) `proxy_read_timeout` 短于心跳间隔（需 ≥60s，建议 3600s）；3) 前端浏览器控制台报 `WebSocket is closed before the connection is established`；4) 云厂商安全组未放行 443；5) 自建证书是自签名，浏览器默认拒绝 wss |
 | 开发环境 vite 报 `ws proxy error: This socket has been ended...` | 已知无害噪声，vite.config 已吞掉；若仍刷屏，重启 `pnpm --filter @vben/web-ele dev` |
-| 抖音扫码后立刻掉线 | 服务器时间漂移（`timedatectl`）；IP 段被风控，配 `proxy_url` |
+| 抖音导入后立刻掉线 | 凭证过期需重新导入；服务器时间漂移（`timedatectl`）；IP 段被风控，配 `proxy_url` |
 | `migrate` 卡住 | PostgreSQL 连接超限；上一次进程锁未释放：`docker compose restart backend` |
 | worker 频繁 OOM | 内存不足；减少同时托管账号数；或升配至 8 GB |
 | Let's Encrypt 续签失败 | `/var/www/certbot` 路径被 Nginx 其他 location 拦截；`/.well-known` 必须可直接访问 |

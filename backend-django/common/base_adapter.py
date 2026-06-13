@@ -2,7 +2,7 @@
 统一平台 Adapter 接口
 
 所有社交平台（抖音、快手等）的 Adapter 都实现此接口，
-Worker 层不关心底层是 Playwright 还是 HTTP API。
+Worker 层不关心底层用什么协议实现。
 """
 
 from abc import ABC, abstractmethod

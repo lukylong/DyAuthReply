@@ -2,23 +2,14 @@
 # -*- coding: utf-8 -*-
 """
 @File: transport/http_protocol.py
-@Desc: HttpProtocolTransport —— Phase 3 hybrid 协议化 transport（骨架）
+@Desc: HttpProtocolTransport —— 纯 HTTP 协议 transport（无浏览器）
 
 设计：
-  - 每账号一份；持有自己的 SignProvider（浏览器签名服务）和共享 httpx 客户端
-  - scan_inbox / send_reply / send_text 三个 verb 走 HTTP 协议路径
-  - 当协议路径**不可用**或**未实现**时，自动 fallback 到内嵌的 BrowserTransport
-    （即 DOM 兜底）；这样灰度切换风险可控
+  - 每账号一份；持有自己的签名后端（JsSignProvider / LocalSignProvider）和共享 httpx 客户端
+  - scan_inbox / send_reply / send_text 三个 verb 全部走 HTTP 协议路径
+  - 协议路径不可用 / 签名机不健康时直接抛错（STRICT 模式，无任何浏览器兜底）
 
-当前版本（Phase 3.2a 骨架）：
-  - 所有 verb 默认走 fallback；HTTP 实现由 _impl_*_via_http 占位
-  - 等 sniff 报告把接口字段填进 _ENDPOINTS / _impl_* 后即可逐个开启
-  - 对 worker 的可见行为：与 BrowserTransport 完全等价（零回归风险）
-
-Phase 3.2b 将逐个 verb 切：
-  send_text  → 第一个切（没有副作用范围最小，最容易回滚）
-  send_reply → 第二个切（仍然是出向）
-  scan_inbox → 最后切（涉及历史拉取 + 落库幂等，最复杂）
+发送编码走 protobuf（im_send_pb2），入向扫描解析 imapi JSON 落库。
 """
 from __future__ import annotations
 

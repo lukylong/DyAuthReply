@@ -4,17 +4,15 @@
 @File: transport/frontier_ws.py
 @Desc: FrontierWsDecorator —— 主动连 frontier-im WebSocket 的实时入站信号（无浏览器）
 
-对标 ws_decorator.WsInboundDecorator，但区别关键：
-    WsInboundDecorator : 监听**浏览器 BrowserContext** 上的 IM WS（依赖 Playwright）
-    FrontierWsDecorator: **主动**连 wss://frontier-im.douyin.com/ws/v2（纯 cookie，无浏览器）
+    **主动**连 wss://frontier-im.douyin.com/ws/v2（纯 cookie，无浏览器）。
 
 借鉴 DouYin_Spider/dy_apis/douyin_recv_msg.py 的鉴权（只需 cookie）：
     device_id = 用 cookie + a_bogus 调 query/user 拿
     access_key = md5(fpId + appKey + device_id + 盐)
     WS url = wss://.../ws/v2?aid&device_platform&fpid&device_id&token=cookie[sessionid]&access_key
 
-策略与 WsInboundDecorator 一致（fallback）：WS 帧只作"有新消息"信号，正文落库仍走
-inner.scan_inbox（已用 JS 签名 + HTTP 验证过 status_code=0），避免 protobuf 解错入错库。
+策略：WS 帧只作"有新消息"信号，正文落库仍走 inner.scan_inbox（已用 JS 签名 + HTTP
+验证过 status_code=0），避免 protobuf 解错入错库。
 """
 from __future__ import annotations
 

@@ -4,20 +4,20 @@
 @File: worker.py
 @Desc: Douyin Worker - 常驻 worker 主循环
 
-职责：
+职责（纯 HTTP 协议，无浏览器）：
   - 每 `refresh_interval` 秒扫描 DB：挑出需要托管的账号
       * status=1（在线） & work_mode in ('auto', 'hybrid')
       * 新增账号 → 启动 _account_loop 协程
-      * 已移除账号 → 取消协程 + 关 context
+      * 已移除账号 → 取消协程 + 停 transport
   - 订阅 Redis pubsub，接收后台 API 下发的即时指令：
-      * douyin:cmd:login:{account_id}     → 跑扫码登录
-      * douyin:cmd:logout:{account_id}    → 关 context + 清登录态
+      * douyin:cmd:logout:{account_id}    → 停 transport + 清登录态
       * douyin:cmd:session:{account_id}:{pause|resume|stop|restart}
+      （login/login_cancel/focus 等浏览器指令已废弃，账号接入改为前端导入凭证）
   - 每 `heartbeat_interval` 秒向 DouyinSession 写心跳（供前端"并发会话监控"看）
 
 每个账号的 _account_loop：
-  - 若 status=0（未登录）且被明确 kick → 跑一次 scan_qrcode_login
-  - 若 status=1（在线）→ 按 account.min/max_interval 随机节流，循环 scan_inbox → 回复
+  - status=1（在线）→ 按 account.min/max_interval 随机节流，循环 scan_inbox → 回复
+  - cookie 失效由 scan_inbox 的 HTTP 错误暴露，打回登录态失效并提示重新导入
 """
 from __future__ import annotations
 
@@ -800,9 +800,9 @@ class DouyinWorker:
                         f"hint={evt.conversation_hint!r}"
                     )
             except AccountIdentityMismatch as e:
-                # 同一个 user_data_dir 上换号扫码 / cookies 被外部覆盖：
-                # 必须把 storage_state + user_data_dir 一并清掉，否则下一轮 ctx 重启
-                # 还会从残留 cookies 拉到错号的会话，形成死循环且持续污染 DB。
+                # 导入的 cookies 与系统记录的账号不一致（换号导入 / cookie 被外部覆盖）：
+                # 必须把残留登录态清掉，否则下一轮还会从残留 cookies 拉到错号的会话，
+                # 形成死循环且持续污染 DB。
                 logger.warning(
                     f"[worker] 账号身份漂移，强制下线 + 清理本地登录态 "
                     f"account={account_id} expected={e.expected[:24]}… actual={e.actual[:24]}…"
@@ -812,8 +812,8 @@ class DouyinWorker:
                 delete_account_runtime_state(account_id)
                 await mark_account_login_invalid(
                     account_id,
-                    f"账号身份漂移：浏览器内 sec_uid={e.actual[:24]}… 与系统记录的不一致，"
-                    f"已清理登录态，请重新扫码登录。",
+                    f"账号身份漂移：登录态 sec_uid={e.actual[:24]}… 与系统记录的不一致，"
+                    f"已清理登录态，请重新导入登录态。",
                     keep_pending_verification=False,
                 )
                 await _log_event(

@@ -393,21 +393,21 @@ pnpm build:ele
 ### 抖音私信自动回复（`core.douyin`）
 
 **基础能力**
-- **账号托管**: 扫码登录创作者中心，加密保存 Playwright `storage_state`，支持多账号并发多会话
+- **账号托管**: 导入登录态（粘贴浏览器 Cookie + `web_protect` / `keys`），加密保存凭证，支持多账号并发；**纯 HTTP 协议，无浏览器**
 - **关键词规则**: 包含/正则/兜底三类匹配，可引用模板或直接配置文本 + 多链接、优先级与冷却时间
 - **风控策略**: 每日回复上限、最小/最大间隔、静默时段、失败熔断
 - **实时监控**: WebSocket 推送新消息 / 登录失效 / 心跳状态，前端实时展示
 - **审计日志**: 每次回复的命中规则、耗时、结果、失败原因完整留痕
-- **独立 worker**: Playwright 常驻进程（`start_douyin_worker.py`）托管每个账号一个浏览器上下文，订阅 Redis 命令、扫描收件箱、匹配规则并人类化发送回复
+- **独立 worker**: 常驻进程（`start_douyin_worker.py`），用 JS 签名（`dy_ab.js` 算 a_bogus + bd-ticket-guard）+ httpx 直连抖音 imapi，订阅 Redis 命令、扫描收件箱、匹配规则并发送回复（protobuf 编解码，无 Chromium/Playwright）
 
 **多账号托管增强（已交付）**
 
 | 模块 | 说明 | 路径 |
 | --- | --- | --- |
 | 托管看板 | 今日实时概览（账号/会话/消息/成功率）、近 7 日趋势、账号排行、规则命中分布 | `/douyin/dashboard` |
-| 账号管理 | 多账号录入、扫码登录、状态切换、批量导入（JSON/CSV），支持标签、代理、UA、优先级、工作模式（全自动/人工/混合） | `/douyin/account` |
+| 账号管理 | 多账号录入、导入登录态（Cookie + web_protect/keys）、状态切换、批量导入（JSON/CSV），支持标签、代理、UA、优先级、工作模式（全自动/人工/混合） | `/douyin/account` |
 | 账号分组 | 按业务线/团队分组，分组内统一下发默认策略（日上限、间隔、静默时段） | `/douyin/account-group` |
-| 会话监控 | 实时显示 worker 托管的每个浏览器会话（心跳、CPU、内存、今日消息/回复/错误），支持暂停/恢复/重启/停止 | `/douyin/session` |
+| 会话监控 | 实时显示 worker 托管的每个账号会话（心跳、CPU、内存、今日消息/回复/错误），支持暂停/恢复/重启/停止 | `/douyin/session` |
 | 回复模板 | 可复用的"文本 + 链接 + 变量占位符（`{{nickname}}` 等）"，分类管理，支持预览渲染；规则与快捷回复均可引用 | `/douyin/template` |
 | 快捷回复 | 人工客服介入时的短语片段，带快捷键（`/hi`、`/price`） | `/douyin/quick-reply` |
 | 回复规则 | 关键词/正则匹配，引用模板，支持时间窗口、周规则、渠道（私信/评论） | `/douyin/rule` |
@@ -436,36 +436,37 @@ GET  /api/core/douyin/dashboard/account-rank   # 账号排行
 
 #### 启动抖音 Worker（业务引擎）
 
-`backend-django` 仅提供管理后台与 API，真正跑浏览器自动化的是独立进程 `start_douyin_worker.py`。它会：
+`backend-django` 仅提供管理后台与 API，真正跑抖音协议交互的是独立进程 `start_douyin_worker.py`。它会：
 
-- 订阅 Redis `douyin:cmd:*` 频道接收登录/登出/会话控制指令
+- 订阅 Redis `douyin:cmd:*` 频道接收登出/会话控制指令
 - 每 15 秒扫描 DB，按账号 `status + work_mode + priority` 决定启停协程
-- 每账号一个 Playwright `BrowserContext`（独立 user_data_dir + storage_state）
-- 扫码登录时把二维码实时推送到前端的 `/ws/douyin/`
-- 循环扫描私信 → 规则匹配 → 冷却/黑名单/配额校验 → 人类化输入发送 → 写回复日志
+- 每账号用导入的登录态（Cookie + web_protect/keys）直连抖音 imapi（httpx + JS 签名，无浏览器）
+- 循环扫描私信 → 规则匹配 → 冷却/黑名单/配额校验 → protobuf 编码发送 → 写回复日志
 
-**本地启动（需先 `pip install -r requirements.txt` 并 `playwright install chromium`）：**
+**本地启动（需先 `pip install -r requirements.txt`，并装好 Node.js 供 JS 签名使用）：**
 
 ```bash
 # 1. 生成 Fernet 登录态加密密钥，写入 .env
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 # 把输出粘贴到 .env 的 DOUYIN_STORAGE_ENCRYPTION_KEY=...
 
-# 2. 首次扫码登录需要有头浏览器
-echo "DOUYIN_WORKER_HEADLESS=False" >> .env
+# 2. 锁定纯协议后端（已是默认值，确认即可）
+# DOUYIN_TRANSPORT_BACKEND=http_protocol
+# DOUYIN_SIGN_BACKEND=js
+# DOUYIN_SEND_STRICT=true  DOUYIN_SCAN_STRICT=true
 
 # 3. 启动 worker
 cd backend-django
 python start_douyin_worker.py
 ```
 
-**前端扫码登录操作流程：**
+**前端导入登录态操作流程：**
 
 1. `/douyin/account` 页面点击"新增账号"录入一个抖音账号（昵称任意）
-2. 点击该账号行的"扫码登录"按钮
-3. 弹窗内会实时显示二维码（通过 WebSocket `/ws/douyin/` 推送），用抖音 APP 扫码即可
-4. 登录成功后 worker 自动保存加密登录态并开始托管
-5. 之后进入"会话监控"可看到账号的 CPU/内存/心跳等实时状态
+2. 在浏览器登录抖音创作者中心，导出 Cookie，并从 `localStorage` 取出 `security-sdk/s_sdk_crypt_sdk`（keys）与 `security-sdk/s_sdk_sign_data_key/web_protect`
+3. 在账号行点击"导入登录态"，把 Cookie + keys + web_protect 粘贴进去保存
+4. worker 自动加密保存凭证并开始纯协议托管
+5. 之后进入"会话监控"可看到账号的心跳/今日消息/回复等实时状态
 
 **调度任务（建议在 APScheduler 里配置）：**
 
@@ -474,7 +475,7 @@ python start_douyin_worker.py
 | `scheduler.tasks.douyin_reset_daily_quota` | `0 0 * * *` | 每日零点重置所有账号的 `reply_today` 与会话日计数 |
 | `scheduler.tasks.douyin_aggregate_daily_stats` | `5 * * * *` | 每小时聚合当日消息/回复/错误指标到 `DouyinDailyStat` |
 
-> 抖音创作者中心页面会改版，`core/douyin/runtime/selectors.py` 集中维护了所有 DOM 选择器，每类都给了多个候选；若扫描失败请优先更新此文件。
+> 纯协议模式依赖抖音 imapi 与签名算法（`core/douyin/runtime/transport/sign/js/` 下的 `dy_ab.js`、bd-ticket-guard）；若抖音风控/签名改版导致扫描或发送失败，优先排查签名与凭证（Cookie/keys/web_protect 是否过期）。
 
 ## 🔐 API 文档
 

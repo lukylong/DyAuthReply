@@ -5,15 +5,13 @@
 @Desc: AccountTransport 抽象层
 
 为 douyin worker 把"如何收/发消息"这件事抽象成一个 Transport 接口，
-允许后续在不修改 worker 主逻辑的前提下：
+让 worker 主逻辑与底层协议实现解耦：
 
-  - BrowserTransport: 现有的 Playwright DOM 扫描 + 文本框输入
-  - WsInboundDecorator(BrowserTransport): 用 WS 帧做"有新消息"信号，
-      第一时间唤醒 BrowserTransport.scan_inbox 把内容真正落库（fallback 策略）
-  - 未来可扩展: HttpProtocolTransport（直接用 HTTP IM 接口收发）
+  - HttpProtocolTransport: 纯 HTTP 协议直连抖音 imapi（默认且唯一实现）
+  - FrontierWsDecorator(HttpProtocolTransport): 用 IM WebSocket 帧做"有新消息"
+      信号，第一时间唤醒 scan_inbox（低延时入向快路径）
 
-Phase 2 第一步：先把接口立起来；BrowserTransport 是默认实现，
-行为与改造前完全一致；feature flag 不开就是零侵入。
+所有实现均无浏览器依赖。
 """
 from __future__ import annotations
 

@@ -4,10 +4,8 @@
 @File: runtime/message_store.py
 @Desc: 入向消息 / 会话的数据结构与 DB 落库辅助 —— 中性模块，不依赖浏览器/Playwright。
 
-历史上这些类型和 DB helper 定义在 inbox.py（DOM 扫描模块）里，被纯协议路径
-（http_protocol / dual_run / frontier_ws / worker）共用。脱浏览器后这些消费方不应
-再 import inbox.py（它顶部 import BrowserManager/humanize/selectors），故把数据结构与
-DB helper 下沉到本模块。inbox.py 仍 re-export 以兼容其内部 DOM 代码。
+入向消息的数据结构（ScannedMessage 等）与会话/消息落库 helper 定义在此，
+被纯协议路径（http_protocol / dual_run / frontier_ws / worker）共用。
 """
 from __future__ import annotations
 

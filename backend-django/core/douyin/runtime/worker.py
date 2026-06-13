@@ -54,7 +54,6 @@ from core.douyin.runtime.account_status import mark_account_login_invalid
 from core.douyin.runtime.login import is_login_valid, scan_qrcode_login
 from core.douyin.runtime.humanize import human_click
 from core.douyin.runtime.matcher import match as match_rule
-from core.douyin.runtime.sender import dump_manual_reply_debug
 from core.douyin.runtime.transport import AccountTransport, build_transport
 from core.douyin.runtime.ws_notify import push_event_log, push_to_user
 

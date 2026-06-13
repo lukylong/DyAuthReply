@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any, List, Optional
 
 from asgiref.sync import sync_to_async
 
-from core.douyin.runtime.sender import (
+from core.douyin.runtime.reply_helpers import (
     _build_segments,
     _record_auto_outbound_message,
     _write_reply_log,

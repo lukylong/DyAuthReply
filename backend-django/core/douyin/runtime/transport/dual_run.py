@@ -130,7 +130,7 @@ class DualRunDecorator(AccountTransport):
         # 但本装饰器目的是"协议格式对账"，不要求 segments 与主路径完全一致；
         # 主路径自己会再调一次 _build_segments，那里产生的 segments 才是真发的。
         try:
-            from core.douyin.runtime.sender import _build_segments
+            from core.douyin.runtime.reply_helpers import _build_segments
 
             segments = _build_segments(rule, peer_nickname)
         except Exception as e:  # noqa: BLE001

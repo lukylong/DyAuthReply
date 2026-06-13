@@ -4,15 +4,10 @@ import type {
   DouyinAccountCreateInput,
 } from '#/api/core/douyin';
 
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
 
 import { Page } from '@vben/common-ui';
-
-import {
-  createDouyinWebSocket,
-  type WebSocketManager,
-} from '#/api/core/websocket';
 
 import {
   ElButton,
@@ -39,13 +34,10 @@ import {
   batchDeleteDouyinAccountApi,
   createDouyinAccountApi,
   deleteDouyinAccountApi,
-  focusDouyinAccountApi,
   getDouyinAccountListApi,
   importDouyinCredentialApi,
   patchDouyinAccountApi,
-  triggerDouyinLoginApi,
   triggerDouyinLogoutApi,
-  cancelDouyinLoginApi,
   updateDouyinAccountApi,
 } from '#/api/core/douyin';
 
@@ -256,204 +248,7 @@ function openReplyHistory(row: DouyinAccount) {
   });
 }
 
-// ---------------- 扫码登录弹窗 ----------------
-const qrDialogVisible = ref(false);
-const qrImage = ref('');
-const qrHint = ref('正在打开监管页面，请稍候…');
-const qrStage = ref<'supervise' | 'verification'>('supervise');
-const qrAccountName = ref('');
-const qrLoading = ref(false);
-const loginPendingAccountId = ref<string>('');
-let douyinWs: null | WebSocketManager = null;
-let supervisionWindow: null | Window = null;
-const isLoginFlowActive = computed(() => !!loginPendingAccountId.value);
-const supervisionUrl = computed(() => {
-  const url = new URL(window.location.origin);
-  url.pathname = '/vnc/vnc.html';
-  url.search = 'autoconnect=1&resize=scale&path=vnc/websockify';
-  url.hash = '';
-  return url.toString();
-});
-const qrFootnote = computed(() =>
-  qrStage.value === 'verification'
-    ? '检测到安全校验，请在浏览器窗口中手动完成验证；完成后保持页面打开等待系统自动放行'
-    : '系统将打开监管页面并自动连线到 Docker 内浏览器；请在该页面完成扫码和验证码操作',
-);
-
-function openSupervisionPage(accountId?: string) {
-  const targetAccountId = accountId || loginPendingAccountId.value || '';
-  supervisionWindow = window.open(
-    supervisionUrl.value,
-    `douyin-supervision-${targetAccountId || 'pending'}`,
-  );
-  if (targetAccountId) {
-    void focusAccountPage(targetAccountId);
-  }
-}
-
-async function focusAccountPage(accountId: string) {
-  try {
-    await focusDouyinAccountApi(accountId);
-  } catch (error) {
-    console.error('聚焦账号监管页失败', error);
-  }
-}
-
-function openSupervisionPageDirect(row: DouyinAccount) {
-  openSupervisionPage(row.id);
-}
-
-async function ensureWsConnected() {
-  if (douyinWs && douyinWs.isConnected) return;
-  if (douyinWs) douyinWs.close();
-  douyinWs = createDouyinWebSocket({
-    onMessage: handleDouyinEvent,
-    onClose: () => {
-      // 重连由管理器自动处理
-    },
-  });
-  try {
-    await douyinWs.connect();
-    douyinWs.send({ type: 'subscribe' });
-  } catch (error) {
-    console.error('连接抖音 WS 失败', error);
-    ElMessage.error('连接实时推送通道失败，请刷新页面重试');
-  }
-}
-
-function handleDouyinEvent(message: any) {
-  // 后端 DouyinConsumer 会把事件以 send_message(event, ...) 包装，
-  // 结构形如 { type: 'qr_image', data: { event, payload, ... } }
-  const eventType = message?.type || message?.data?.event;
-  const payload = message?.data?.payload || message?.data || {};
-  switch (eventType) {
-    case 'qr_image': {
-      qrLoading.value = false;
-      qrImage.value = '';
-      qrHint.value =
-        '监管页中的 Docker 浏览器已打开登录页，请直接在监管页完成扫码，不再在后台弹窗内展示二维码。';
-      break;
-    }
-    case 'verification_required': {
-      qrDialogVisible.value = true;
-      qrLoading.value = false;
-      qrStage.value = 'verification';
-      if (payload.image_base64) {
-        qrImage.value = `data:image/jpeg;base64,${payload.image_base64}`;
-      }
-      const title = payload.title ? `页面：${payload.title}` : '';
-      const text = payload.text_excerpt ? `线索：${payload.text_excerpt}` : '';
-      qrHint.value = [payload.hint, title, text].filter(Boolean).join(' ');
-      ElMessage.warning(
-        `检测到${payload.kind_label || '安全验证'}，请在浏览器窗口中手动完成后等待自动登录`,
-      );
-      break;
-    }
-    case 'login_success': {
-      ElMessage.success(`账号 ${payload.nickname || ''} 登录成功`);
-      qrDialogVisible.value = false;
-      loginPendingAccountId.value = '';
-      supervisionWindow?.close();
-      supervisionWindow = null;
-      loadData();
-      break;
-    }
-    case 'login_failed': {
-      const reason = payload.reason || '未知错误';
-      ElMessage.error(`登录失败：${reason}`);
-      if (reason.includes('弱登录态') || reason.includes('风控')) {
-        qrHint.value =
-          '登录失败：当前被抖音风控拦截（仅弱登录态）。请等待 10-30 分钟后重试，避免频繁点登录。';
-      } else {
-        qrHint.value = `登录失败：${reason}`;
-      }
-      loginPendingAccountId.value = '';
-      supervisionWindow?.close();
-      supervisionWindow = null;
-      break;
-    }
-    case 'login_progress': {
-      const elapsed = Number(payload.elapsed || 0);
-      const remain = Number(payload.remain || 0);
-      const cookies = Array.isArray(payload.session_cookies)
-        ? payload.session_cookies
-        : [];
-      const cookiesText = cookies.length > 0 ? cookies.join(', ') : '无';
-      qrHint.value =
-        payload.status_hint ||
-        `等待扫码确认中… 已等待 ${elapsed}s，剩余 ${remain}s，cookie=${cookiesText}`;
-      break;
-    }
-    case 'reply_sent': {
-      ElMessage.info(
-        `已回复 ${payload.peer_nickname || ''}（规则：${payload.rule || '-'}）`,
-      );
-      break;
-    }
-  }
-}
-
-async function onLogin(row: DouyinAccount) {
-  if (isLoginFlowActive.value) {
-    ElMessage.warning('已有扫码流程进行中，请先完成当前流程');
-    return;
-  }
-  loginPendingAccountId.value = row.id;
-  qrAccountName.value = row.nickname;
-  qrImage.value = '';
-  qrHint.value = '正在打开监管页面，请稍候…';
-  qrStage.value = 'supervise';
-  qrLoading.value = true;
-  qrDialogVisible.value = true;
-  try {
-    openSupervisionPage(row.id);
-    await ensureWsConnected();
-    const res = await triggerDouyinLoginApi(row.id);
-    ElMessage.success(res.message || '已下发扫码登录指令');
-    qrLoading.value = false;
-    qrHint.value =
-      '请在新打开的监管页面中操作 Docker 浏览器完成扫码/验证码；本页将实时显示登录状态。';
-    loadData();
-  } catch (error: any) {
-    qrDialogVisible.value = false;
-    loginPendingAccountId.value = '';
-    supervisionWindow?.close();
-    supervisionWindow = null;
-    ElMessage.error(error?.response?.data?.detail || '登录指令下发失败');
-  }
-}
-
-async function onCloseQrDialog() {
-  const accountId = loginPendingAccountId.value;
-  qrDialogVisible.value = false;
-  qrImage.value = '';
-  qrStage.value = 'supervise';
-  loginPendingAccountId.value = '';
-  supervisionWindow?.close();
-  supervisionWindow = null;
-  if (accountId) {
-    try {
-      await cancelDouyinLoginApi(accountId);
-    } catch (error) {
-      console.error('取消扫码登录失败', error);
-    }
-  }
-}
-
-onBeforeUnmount(() => {
-  supervisionWindow?.close();
-  supervisionWindow = null;
-  if (douyinWs) {
-    douyinWs.close();
-    douyinWs = null;
-  }
-});
-
 async function onLogout(row: DouyinAccount) {
-  if (isLoginFlowActive.value) {
-    ElMessage.warning('扫码登录进行中，暂不可登出');
-    return;
-  }
   try {
     await ElMessageBox.confirm(
       `确定要登出账号「${row.nickname}」吗？`,
@@ -590,10 +385,10 @@ onMounted(loadData);
             </ElButton>
           </ElSpace>
           <ElTooltip
-            content="扫码登录走 docker 内 worker；监管页会打开当前账号对应的 Docker 浏览器窗口"
+            content="登录态通过「导入Cookie」获取（粘贴浏览器 Cookie + web_protect/keys），无需扫码"
             placement="top"
           >
-            <ElTag type="info">提示：请在对应账号的监管页中完成扫码和验证</ElTag>
+            <ElTag type="info">提示：通过「导入Cookie」导入登录态</ElTag>
           </ElTooltip>
         </div>
 
@@ -807,42 +602,7 @@ onMounted(loadData);
         </template>
       </ElDialog>
 
-      <!-- 监管式扫码登录弹窗：引导用户前往 noVNC 监管页完成登录 -->
-      <ElDialog
-        v-model="qrDialogVisible"
-        :title="`监管登录 · ${qrAccountName}`"
-        width="420px"
-        :close-on-click-modal="false"
-        destroy-on-close
-        @close="onCloseQrDialog"
-      >
-        <div class="flex flex-col items-center gap-3 py-2">
-          <div
-            v-loading="qrLoading"
-            class="flex min-h-40 w-full items-center justify-center rounded border bg-white px-4 py-6"
-          >
-            <div class="space-y-3 text-center">
-              <div class="text-sm text-gray-500">
-                {{ qrHint }}
-              </div>
-              <div class="text-xs text-gray-400 break-all">
-                {{ supervisionUrl }}
-              </div>
-              <ElButton type="primary" @click="() => openSupervisionPage()">
-                打开监管页面
-              </ElButton>
-            </div>
-          </div>
-          <div class="text-xs text-gray-400">
-            {{ qrFootnote }}
-          </div>
-        </div>
-        <template #footer>
-          <ElButton @click="onCloseQrDialog">关闭</ElButton>
-        </template>
-      </ElDialog>
-
-      <!-- 导入 Cookie 登录态弹窗（替代扫码登录，无浏览器）-->
+      <!-- 导入 Cookie 登录态弹窗（无浏览器）-->
       <ElDialog
         v-model="importDialogVisible"
         :title="`导入登录态 · ${importAccountName}`"

@@ -154,33 +154,6 @@ export async function batchDeleteDouyinAccountApi(ids: string[]) {
 }
 
 /**
- * 触发扫码登录
- */
-export async function triggerDouyinLoginApi(accountId: string) {
-  return requestClient.post<DouyinAccountActionResponse>(
-    `/api/core/douyin/account/${accountId}/login`,
-  );
-}
-
-/**
- * 取消扫码登录
- */
-export async function cancelDouyinLoginApi(accountId: string) {
-  return requestClient.post<DouyinAccountActionResponse>(
-    `/api/core/douyin/account/${accountId}/login/cancel`,
-  );
-}
-
-/**
- * 聚焦账号监管页
- */
-export async function focusDouyinAccountApi(accountId: string) {
-  return requestClient.post<DouyinAccountActionResponse>(
-    `/api/core/douyin/account/${accountId}/focus`,
-  );
-}
-
-/**
  * 触发登出
  */
 export async function triggerDouyinLogoutApi(accountId: string) {

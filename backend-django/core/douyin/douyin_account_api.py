@@ -165,44 +165,6 @@ def import_credential(request, account_id: str, data: DouyinCredentialImportIn):
 
 
 @router.post(
-    "/account/{account_id}/login",
-    response=DouyinAccountActionOut,
-    summary="触发扫码登录",
-)
-def trigger_login(request, account_id: str):
-    """
-    触发扫码登录：
-      1. 把账号置为"未登录"态
-      2. 通过 Redis pubsub 向 worker 进程发送登录命令
-      3. 前端需连接 WebSocket `/ws/douyin/` 以接收 qr_image / login_success 事件
-    若 Redis 不可用则只改 DB 状态（worker 启动时会自动轮询到本账号也能登录）。
-    """
-    account = get_object_or_404(DouyinAccount, id=account_id)
-    if account.status == 3:
-        raise HttpError(400, "该账号已禁用，无法登录")
-    account.status = 0
-    account.storage_state_path = ''
-    account.pending_verification_type = None
-    account.pending_verification_at = None
-    account.pending_verification_until = None
-    account.save(update_fields=[
-        'status',
-        'storage_state_path',
-        'pending_verification_type',
-        'pending_verification_at',
-        'pending_verification_until',
-        'sys_update_datetime',
-    ])
-
-    ok = command_publisher.send_login(str(account_id))
-    if ok:
-        msg = "已下发扫码登录指令，请在前端扫码弹窗中用抖音 APP 扫描二维码"
-    else:
-        msg = "已标记账号待登录。Redis 不可用，worker 会在下次轮询到后执行登录"
-    return DouyinAccountActionOut(success=True, message=msg)
-
-
-@router.post(
     "/account/{account_id}/logout",
     response=DouyinAccountActionOut,
     summary="登出抖音账号",
@@ -234,42 +196,3 @@ def trigger_logout(request, account_id: str):
     ])
     command_publisher.send_logout(str(account_id))
     return DouyinAccountActionOut(success=True, message="登出指令已下发")
-
-
-@router.post(
-    "/account/{account_id}/login/cancel",
-    response=DouyinAccountActionOut,
-    summary="取消扫码登录",
-)
-def cancel_login(request, account_id: str):
-    """取消当前账号的扫码登录流程（若存在）"""
-    account = get_object_or_404(DouyinAccount, id=account_id)
-    ok = command_publisher.send_cancel_login(str(account_id))
-    if ok:
-        msg = f"已请求取消账号 {account.nickname} 的扫码登录流程"
-    else:
-        msg = f"Redis 不可用，未能取消账号 {account.nickname} 的扫码登录流程"
-    return DouyinAccountActionOut(success=ok, message=msg)
-
-
-@router.post(
-    "/account/{account_id}/focus",
-    response=DouyinAccountActionOut,
-    summary="聚焦抖音账号监管页",
-)
-def focus_account(request, account_id: str):
-    account = get_object_or_404(DouyinAccount, id=account_id)
-    # 状态守卫：未登录账号不允许聚焦监管页。
-    # 否则会让 worker 用残留 user_data_dir + cookies 拉起一个看似登录的 chromium 窗口，
-    # 表现为"刚登出，点监管页又看到已登录页"。前端看到的是 success=False 提示。
-    if int(account.status or 0) != 1:
-        return DouyinAccountActionOut(
-            success=False,
-            message=f"账号 {account.nickname} 当前未登录，请先扫码登录后再聚焦监管页",
-        )
-    ok = command_publisher.send_focus_account(str(account_id))
-    if ok:
-        msg = f"已请求聚焦账号 {account.nickname} 的监管页"
-    else:
-        msg = f"Redis 不可用，无法立即聚焦账号 {account.nickname} 的监管页"
-    return DouyinAccountActionOut(success=ok, message=msg)

@@ -197,6 +197,18 @@ DOUYIN_SESSION_STALE_SECONDS = int(_env('DOUYIN_SESSION_STALE_SECONDS', '120'))
 # 凭证临期告警：bd-ticket 年龄超过该小时数发提前告警。
 DOUYIN_TICKET_WARN_AGE_HOURS = float(_env('DOUYIN_TICKET_WARN_AGE_HOURS', '24'))
 
+# ---- 接收侧加固：防误打回（瞬时抖动不当作真失效）+ 错峰退避 ----
+# 登录失效「二次确认」阈值：连续命中失效信号多少次才真正打回账号（=1 即一次失效即打回）。
+DOUYIN_LOGIN_EXPIRE_CONFIRM_TIMES = int(_env('DOUYIN_LOGIN_EXPIRE_CONFIRM_TIMES', '3'))
+# 接收侧错误指数退避：base*2^(n-1) 截到 cap，再叠加 [0,base) 抖动。
+DOUYIN_RECV_BACKOFF_BASE_S = float(_env('DOUYIN_RECV_BACKOFF_BASE_S', '10'))
+DOUYIN_RECV_BACKOFF_CAP_S = float(_env('DOUYIN_RECV_BACKOFF_CAP_S', '120'))
+# scheduler 主动探活：首探判失效后是否再复核一次，两次都失效才打回（防误判）。
+DOUYIN_PROBE_RECONFIRM = _env('DOUYIN_PROBE_RECONFIRM', 'true').lower() == 'true'
+DOUYIN_PROBE_RECONFIRM_DELAY_S = float(_env('DOUYIN_PROBE_RECONFIRM_DELAY_S', '3'))
+# signer 半开熔断冷却秒数：失败累计达阈值后降级，冷却到期放一次试探，成功即自愈（无需重启）。
+DOUYIN_SIGNER_DEGRADE_COOLDOWN_S = float(_env('DOUYIN_SIGNER_DEGRADE_COOLDOWN_S', '60'))
+
 # 自动续期（默认关闭门控，PoC 验证通过后再开）：超过 REFRESH_AGE 小时尝试续期 bd-ticket。
 DOUYIN_TICKET_AUTORENEW_ENABLED = _env('DOUYIN_TICKET_AUTORENEW_ENABLED', 'false').lower() == 'true'
 DOUYIN_TICKET_REFRESH_AGE_HOURS = float(_env('DOUYIN_TICKET_REFRESH_AGE_HOURS', '18'))

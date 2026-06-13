@@ -341,49 +341,6 @@ def list_all_menu(request):
     return query_set
 
 
-@router.get("/menu/{menu_id}", response=MenuSchemaOut, summary="获取菜单详情")
-def get_menu(request, menu_id: str):
-    """获取单个菜单的详细信息"""
-    menu = get_object_or_404(
-        Menu.objects.select_related('parent'),
-        id=menu_id
-    )
-    return menu
-
-
-@router.get("/menu/by/parent/{parent_id}", response=List[dict], summary="根据父菜单ID获取子菜单")
-def get_menu_by_parent(request, parent_id: str):
-    """
-    根据父菜单ID获取直接子菜单
-    
-    改进点：
-    - 支持根菜单查询（parent_id="null"）
-    - 返回子菜单数量
-    """
-    if parent_id == "null":
-        parent_id = None
-
-    query_set = Menu.objects.filter(parent_id=parent_id)
-
-    result = []
-    for menu in query_set:
-        menu_dict = {
-            'id': str(menu.id),
-            'name': menu.name,
-            'title': menu.title,
-            'path': menu.path,
-            'type': menu.type,
-            'icon': menu.icon,
-            'order': menu.order,
-            'level': menu.get_level(),
-            'parent_id': str(menu.parent_id) if menu.parent_id else None,
-            'child_count': menu.get_child_count(),
-        }
-        result.append(menu_dict)
-
-    return result
-
-
 @router.get("/menu/search", response=List[dict], summary="搜索菜单")
 def search_menu(request, keyword: str):
     """
@@ -448,6 +405,74 @@ def search_menu(request, keyword: str):
     return roots
 
 
+@router.get("/menu/stats", response=MenuStatsOut, summary="获取菜单统计信息")
+def get_menu_stats(request):
+    """
+    获取菜单统计信息
+    
+    改进点：
+    - 提供全局统计数据
+    """
+    total_count = Menu.objects.count()
+
+    # 按类型统计
+    type_stats = {}
+    type_choices = [
+        ('catalog', '目录'),
+        ('menu', '菜单'),
+        ('external', '外部链接'),
+    ]
+    for type_code, type_name in type_choices:
+        count = Menu.objects.filter(type=type_code).count()
+        type_stats[type_name] = count
+
+    # 计算最大层级
+    max_level = 0
+    for menu in Menu.objects.all():
+        level = menu.get_level()
+        if level > max_level:
+            max_level = level
+
+    return MenuStatsOut(
+        total_count=total_count,
+        type_stats=type_stats,
+        max_level=max_level,
+    )
+
+
+@router.get("/menu/by/parent/{parent_id}", response=List[dict], summary="根据父菜单ID获取子菜单")
+def get_menu_by_parent(request, parent_id: str):
+    """
+    根据父菜单ID获取直接子菜单
+    
+    改进点：
+    - 支持根菜单查询（parent_id="null"）
+    - 返回子菜单数量
+    """
+    if parent_id == "null":
+        parent_id = None
+
+    query_set = Menu.objects.filter(parent_id=parent_id)
+
+    result = []
+    for menu in query_set:
+        menu_dict = {
+            'id': str(menu.id),
+            'name': menu.name,
+            'title': menu.title,
+            'path': menu.path,
+            'type': menu.type,
+            'icon': menu.icon,
+            'order': menu.order,
+            'level': menu.get_level(),
+            'parent_id': str(menu.parent_id) if menu.parent_id else None,
+            'child_count': menu.get_child_count(),
+        }
+        result.append(menu_dict)
+
+    return result
+
+
 @router.get("/menu/path/{menu_id}", response=MenuPathOut, summary="获取菜单路径")
 def get_menu_path(request, menu_id: str):
     """
@@ -489,39 +514,14 @@ def get_menu_path(request, menu_id: str):
     )
 
 
-@router.get("/menu/stats", response=MenuStatsOut, summary="获取菜单统计信息")
-def get_menu_stats(request):
-    """
-    获取菜单统计信息
-    
-    改进点：
-    - 提供全局统计数据
-    """
-    total_count = Menu.objects.count()
-
-    # 按类型统计
-    type_stats = {}
-    type_choices = [
-        ('catalog', '目录'),
-        ('menu', '菜单'),
-        ('external', '外部链接'),
-    ]
-    for type_code, type_name in type_choices:
-        count = Menu.objects.filter(type=type_code).count()
-        type_stats[type_name] = count
-
-    # 计算最大层级
-    max_level = 0
-    for menu in Menu.objects.all():
-        level = menu.get_level()
-        if level > max_level:
-            max_level = level
-
-    return MenuStatsOut(
-        total_count=total_count,
-        type_stats=type_stats,
-        max_level=max_level,
+@router.get("/menu/{menu_id}", response=MenuSchemaOut, summary="获取菜单详情")
+def get_menu(request, menu_id: str):
+    """获取单个菜单的详细信息"""
+    menu = get_object_or_404(
+        Menu.objects.select_related('parent'),
+        id=menu_id
     )
+    return menu
 
 
 @router.post("/menu/check/name", response=MenuCheckOut, summary="检查菜单名称是否存在")

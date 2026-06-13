@@ -12,6 +12,7 @@ import { Page } from '@vben/common-ui';
 import {
   ElButton,
   ElDialog,
+  ElDivider,
   ElForm,
   ElFormItem,
   ElInput,
@@ -37,6 +38,7 @@ import {
   getDouyinAccountListApi,
   importDouyinCredentialApi,
   patchDouyinAccountApi,
+  quickCreateDouyinAccountApi,
   triggerDouyinLogoutApi,
   updateDouyinAccountApi,
 } from '#/api/core/douyin';
@@ -92,7 +94,7 @@ const searchForm = reactive<{ nickname?: string; status?: number | null }>({
 });
 
 const dialogVisible = ref(false);
-const dialogMode = ref<'create' | 'edit'>('create');
+const dialogMode = ref<'create' | 'edit' | 'import'>('create');
 const currentId = ref<string | null>(null);
 const formRef = ref();
 const form = reactive<DouyinAccountCreateInput>(createEmptyForm());
@@ -151,10 +153,18 @@ function onReset() {
 }
 
 function openCreate() {
-  dialogMode.value = 'create';
-  currentId.value = null;
-  Object.assign(form, createEmptyForm());
-  dialogVisible.value = true;
+  dialogMode.value = 'import';
+  importAccountId.value = null;
+  Object.assign(importForm, {
+    bundle: '',
+    cookie: '',
+    web_protect: '',
+    keys: '',
+    user_agent: '',
+  });
+  resetImportSettings();
+  importAdvanced.value = false;
+  importDialogVisible.value = true;
 }
 
 function openEdit(row: DouyinAccount) {
@@ -289,7 +299,7 @@ async function onLogout(row: DouyinAccount) {
 
 // ---------------- 导入 Cookie 登录态（替代扫码登录，无浏览器）----------------
 const importDialogVisible = ref(false);
-const importAccountId = ref<string>('');
+const importAccountId = ref<string | null>(null);
 const importAccountName = ref<string>('');
 const importSubmitting = ref(false);
 const importAdvanced = ref(false);
@@ -300,6 +310,27 @@ const importForm = reactive({
   keys: '',
   user_agent: '',
 });
+const importSettings = reactive({
+  auto_reply_enabled: true,
+  daily_reply_quota: 200,
+  min_interval_seconds: 8,
+  max_interval_seconds: 25,
+  silent_start: '22:00:00',
+  silent_end: '08:00:00',
+  remark: '',
+});
+
+function resetImportSettings() {
+  Object.assign(importSettings, {
+    auto_reply_enabled: true,
+    daily_reply_quota: 200,
+    min_interval_seconds: 8,
+    max_interval_seconds: 25,
+    silent_start: '22:00:00',
+    silent_end: '08:00:00',
+    remark: '',
+  });
+}
 
 function openImport(row: DouyinAccount) {
   importAccountId.value = row.id;
@@ -324,18 +355,40 @@ async function onImportSubmit() {
   }
   importSubmitting.value = true;
   try {
-    const res = await importDouyinCredentialApi(importAccountId.value, {
-      bundle: bundle || undefined,
-      cookie: cookie || undefined,
-      web_protect: webProtect || undefined,
-      keys: keys || undefined,
-      user_agent: importForm.user_agent.trim() || undefined,
-    });
-    ElMessage.success(res.message || '登录态已导入');
+    // 判断是新建还是更新
+    if (importAccountId.value === null) {
+      await quickCreateDouyinAccountApi({
+        bundle: bundle || undefined,
+        cookie: cookie || undefined,
+        web_protect: webProtect || undefined,
+        keys: keys || undefined,
+        user_agent: importForm.user_agent.trim() || undefined,
+        auto_reply_enabled: importSettings.auto_reply_enabled,
+        daily_reply_quota: importSettings.daily_reply_quota,
+        min_interval_seconds: importSettings.min_interval_seconds,
+        max_interval_seconds: importSettings.max_interval_seconds,
+        silent_start: importSettings.silent_start,
+        silent_end: importSettings.silent_end,
+        remark: importSettings.remark.trim() || undefined,
+      });
+      ElMessage.success(
+        '账号创建成功；若昵称仍为「临时_xxx」，说明自动拉取超时，可在列表中手动修改',
+      );
+    } else {
+      // 更新模式：调用 import-credential
+      const res = await importDouyinCredentialApi(importAccountId.value, {
+        bundle: bundle || undefined,
+        cookie: cookie || undefined,
+        web_protect: webProtect || undefined,
+        keys: keys || undefined,
+        user_agent: importForm.user_agent.trim() || undefined,
+      });
+      ElMessage.success(res.message || '登录态已导入');
+    }
     importDialogVisible.value = false;
     loadData();
   } catch (error: any) {
-    ElMessage.error(error?.response?.data?.detail || '导入失败');
+    ElMessage.error(error?.response?.data?.detail || '操作失败');
   } finally {
     importSubmitting.value = false;
   }
@@ -666,11 +719,11 @@ onMounted(loadData);
       <!-- 导入 Cookie 登录态弹窗（无浏览器）-->
       <ElDialog
         v-model="importDialogVisible"
-        :title="`导入登录态 · ${importAccountName}`"
-        width="600px"
+        :title="importAccountId === null ? '新增账号（导入Cookie自动获取昵称）' : `导入登录态 · ${importAccountName}`"
+        width="640px"
         destroy-on-close
       >
-        <ElForm label-width="96px">
+        <ElForm label-width="110px">
           <ElFormItem label="一键导入串">
             <ElInput
               v-model="importForm.bundle"
@@ -715,6 +768,60 @@ onMounted(loadData);
               <ElInput
                 v-model="importForm.user_agent"
                 placeholder="可选，与导出 Cookie 的浏览器一致的 UA"
+              />
+            </ElFormItem>
+          </template>
+
+          <template v-if="importAccountId === null">
+            <ElDivider content-position="left">回复策略</ElDivider>
+            <ElFormItem label="自动回复">
+              <ElSwitch v-model="importSettings.auto_reply_enabled" />
+            </ElFormItem>
+            <ElFormItem label="日回复上限">
+              <ElInputNumber
+                v-model="importSettings.daily_reply_quota"
+                :min="0"
+                :max="10000"
+              />
+            </ElFormItem>
+            <ElFormItem label="回复间隔（秒）">
+              <div class="flex items-center gap-2">
+                <ElInputNumber
+                  v-model="importSettings.min_interval_seconds"
+                  :min="1"
+                  :max="600"
+                />
+                <span>~</span>
+                <ElInputNumber
+                  v-model="importSettings.max_interval_seconds"
+                  :min="1"
+                  :max="600"
+                />
+              </div>
+            </ElFormItem>
+            <ElFormItem label="静默时段">
+              <div class="flex items-center gap-2">
+                <ElTimePicker
+                  v-model="importSettings.silent_start"
+                  value-format="HH:mm:ss"
+                  format="HH:mm"
+                  placeholder="开始"
+                />
+                <span>~</span>
+                <ElTimePicker
+                  v-model="importSettings.silent_end"
+                  value-format="HH:mm:ss"
+                  format="HH:mm"
+                  placeholder="结束"
+                />
+              </div>
+            </ElFormItem>
+            <ElFormItem label="备注">
+              <ElInput
+                v-model="importSettings.remark"
+                type="textarea"
+                :rows="2"
+                placeholder="可选"
               />
             </ElFormItem>
           </template>

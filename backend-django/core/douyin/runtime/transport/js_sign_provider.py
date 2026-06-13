@@ -157,13 +157,23 @@ class JsSignProvider:
         headers: Optional[dict[str, str]] = None,
         timeout_ms: Optional[int] = None,
         use_xhr: bool = False,  # noqa: ARG002  本地无浏览器，xhr/fetch 区分无意义
+        base_params: Optional[str] = None,
+        extra_params: Optional[dict[str, str]] = None,
     ) -> SignedResponse:
         """JS 签名 + httpx 直发。
+
+        Args:
+            base_params: 覆盖默认 host 公共参数串（不含 msToken/a_bogus）。bd-ticket 续期端点
+                （creator user_token/v2）的公共参数与 webapp/aid=6383 不同（device_platform=web、
+                aid=2906、app_name=aweme_creator_platform），需用本参数传入续期专用参数集。
+            extra_params: 追加到查询串的额外键值（值会做 URL 编码），如 certificate=<base64(CSR)>。
+                这些参数会一并参与 a_bogus 计算，确保与浏览器一致。
 
         Raises:
             SignerUnavailable: 引擎/客户端未就绪、签名抛错或 httpx 网络异常（上层 fallback）。
         """
         import httpx
+        from urllib.parse import quote
 
         if not self.is_ready or self._client is None:
             raise SignerUnavailable("JsSignProvider 未就绪")
@@ -172,10 +182,14 @@ class JsSignProvider:
         host = parsed.netloc.lower()
         path = parsed.path
 
-        # ① host 公共参数 → ② 补 msToken → ③ dy_ab.js 算 a_bogus
-        base_params = _common_params_for(host, self._user_agent)
+        # ① host 公共参数（可被 base_params 覆盖）→ ② 补 msToken → ③ 追加 extra_params
+        #  → ④ dy_ab.js 对最终查询串算 a_bogus（extra_params 一并入参，与浏览器对齐）
+        base = base_params if base_params is not None else _common_params_for(host, self._user_agent)
         token = resolve_mstoken(self._cookies)
-        params_with_token = f"{base_params}&msToken={token}"
+        params_with_token = f"{base}&msToken={token}"
+        if extra_params:
+            extra = "&".join(f"{k}={quote(str(v), safe='')}" for k, v in extra_params.items())
+            params_with_token = f"{params_with_token}&{extra}"
         try:
             a_bogus = await sync_to_async(js_signer.get_ab)(params_with_token, "")
         except js_signer.JsSignerUnavailable as e:

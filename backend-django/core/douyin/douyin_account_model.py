@@ -247,6 +247,12 @@ class DouyinAccount(RootModel):
     def __str__(self):
         return f"{self.nickname} [{self.get_status_display()}]"
 
+    def save(self, *args, **kwargs):
+        # sec_uid 有 unique 约束：空串 '' 在 PostgreSQL 会互相冲突，未登录/登出应存 NULL。
+        if self.sec_uid is not None and not str(self.sec_uid).strip():
+            self.sec_uid = None
+        super().save(*args, **kwargs)
+
     def is_online(self) -> bool:
         """判断账号是否在线"""
         return self.status == 1

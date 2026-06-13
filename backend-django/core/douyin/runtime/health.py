@@ -245,8 +245,22 @@ async def _probe_and_apply(account, stats: dict) -> None:
     stats["checked"] += 1
 
     if result.status == PROBE_LOGIN_EXPIRED:
-        stats["login_expired"] += 1
-        await _on_probe_expired(account, result)
+        # 失效前二次确认：单次探活判失效有可能是瞬时抖动（网络/签名进程瞬态）。再探一次，
+        # 两次都失效才打回，避免把好号误打成失效（与 worker 接收循环同一保守取向）。
+        confirmed = await _reconfirm_probe_expired(account, result)
+        if confirmed.status == PROBE_LOGIN_EXPIRED:
+            stats["login_expired"] += 1
+            await _on_probe_expired(account, confirmed)
+        else:
+            stats["inconclusive"] += 1
+            await sync_to_async(_update_probe_inconclusive)(
+                account_id,
+                f"首探判失效但二次未复现（second={confirmed.status}）：{confirmed.detail[:140]}",
+            )
+            logger.info(
+                f"[probe] 失效二次未复现，按未知处理不打回 account={account_id} "
+                f"first_detail={result.detail[:80]}"
+            )
         return
 
     if result.status == PROBE_VALID:
@@ -259,6 +273,27 @@ async def _probe_and_apply(account, stats: dict) -> None:
     # inconclusive：仅记录探活时间与原因，不改账号状态
     stats["inconclusive"] += 1
     await sync_to_async(_update_probe_inconclusive)(account_id, result.detail)
+
+
+async def _reconfirm_probe_expired(account, first: ProbeResult) -> ProbeResult:
+    """对「首探判失效」做一次复核探活；默认开启，可用 DOUYIN_PROBE_RECONFIRM=False 关闭。
+
+    返回复核结果：复核仍 login_expired 才视为真失效；否则把结果当作非失效（交由调用方按
+    inconclusive 处理，不打回）。复核异常时也按非失效处理（保守，不误伤）。
+    """
+    from django.conf import settings
+
+    if not getattr(settings, "DOUYIN_PROBE_RECONFIRM", True):
+        return first
+    delay = float(getattr(settings, "DOUYIN_PROBE_RECONFIRM_DELAY_S", 3) or 0)
+    if delay > 0:
+        await asyncio.sleep(delay)
+    second = await probe_account_credential(account)
+    logger.info(
+        f"[probe] 失效二次确认 account={account.id} first={first.status} "
+        f"second={second.status}"
+    )
+    return second
 
 
 async def _on_probe_expired(account, result: ProbeResult) -> None:
@@ -383,8 +418,9 @@ def _maybe_warn_ticket_aging(account_id: str) -> None:
 
 # ──────────────────────── bd-ticket 自动续期（默认关闭，PoC 验证通过后开启） ────────────────────────
 
-# 续期端点与响应里可刷新的字段名（与 douyin_renew_poc 一致）
-_RENEW_URL_DEFAULT = "https://creator.douyin.com/aweme/v1/creator/im/user_token/v2"
+# 续期端点与响应里可刷新的字段名（与 douyin_renew_poc 一致）。
+# 真实端点为 GET，需带 certificate=base64(CSR) 与 creator 专属公共参数（见 http_protocol）。
+_RENEW_URL_DEFAULT = "https://creator.douyin.com/aweme/v1/creator/im/user_token/v2/"
 _RENEW_FIELD_KEYS = ("ts_sign", "client_cert", "ticket", "token", "sdk_cert")
 
 
@@ -431,25 +467,41 @@ async def _autorenew_all_async() -> dict:
 
 
 async def _renew_one(account) -> bool:
-    """对单账号尝试续期：调用续期端点，解析刷新字段，写回 storage 的 _bd_ticket。"""
+    """对单账号尝试续期：调用续期端点，解析刷新字段，写回 storage 的 _bd_ticket。
+
+    真实形态：GET user_token/v2，带 certificate=base64(CSR) 与 creator 专属公共参数。
+    缺 csr（老登录态未存）则跳过，靠告警保底。
+    """
+    import base64
     import json
     from asgiref.sync import sync_to_async
     from django.conf import settings
     from core.douyin.runtime.transport.http_protocol import (
+        CREATOR_USER_TOKEN_URL,
         _BASE_CREATOR_JSON_HEADERS,
         HttpProtocolTransport,
+        creator_token_base_params,
     )
+    from core.douyin.runtime.storage import load_storage_state
     from core.douyin.runtime.transport.sign_types import SignerUnavailable
 
     account_id = str(account.id)
     url = getattr(settings, "DOUYIN_TICKET_RENEW_URL", _RENEW_URL_DEFAULT)
+    state = await sync_to_async(load_storage_state)(account_id) or {}
+    csr = str(((state.get("_bd_ticket") or {}).get("csr") or "")).strip()
+    if not csr:
+        logger.info(f"[renew] 跳过续期：account={account_id} storage 无 csr（请重新导入含 ec_csr 的 keys）")
+        return False
+    certificate = base64.b64encode(csr.encode("utf-8")).decode("ascii")
     transport = HttpProtocolTransport()
     try:
         await transport.start(account)
         if not transport._signer_healthy():  # noqa: SLF001
             return False
         resp = await transport._sign.signed_fetch(  # noqa: SLF001
-            method="POST", url=url, body=b"{}", headers=_BASE_CREATOR_JSON_HEADERS,
+            method="GET", url=url, body=None, headers=_BASE_CREATOR_JSON_HEADERS,
+            base_params=creator_token_base_params(getattr(account, "user_agent", "") or ""),
+            extra_params={"certificate": certificate},
         )
     except SignerUnavailable:
         return False
@@ -483,7 +535,13 @@ async def _renew_one(account) -> bool:
 
 
 def _extract_renew_fields(payload) -> dict:
-    """从续期响应里抽取可写回的 bd-ticket 字段（仅取已知非空字段）。"""
+    """从续期响应里抽取可写回的 bd-ticket 字段（仅取已知非空字段）。
+
+    ⚠ 待核对（wire_send）：实测响应字段为 token / ts_sign / sdk_cert（v2 形态），
+    而发送编码器 im_send_pb2 读的是 _bd_ticket 的 ticket / ts_sign / client_cert（v1 形态：
+    req.token=ticket、req.sdk_cert=base64(client_cert)）。两套格式是否等价、能否直接互喂，
+    必须用 douyin_renew_poc 实跑 + 真实发送验证后再定写回映射；在此之前自动续期保持默认关闭。
+    """
     out: dict[str, str] = {}
 
     def _walk(obj):

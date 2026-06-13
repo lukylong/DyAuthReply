@@ -55,6 +55,13 @@ class DouyinAccountSchemaIn(ModelSchema):
             raise ValueError('回复间隔至少 1 秒')
         return v
 
+    @field_validator('sec_uid', check_fields=False)
+    @classmethod
+    def normalize_sec_uid(cls, v):
+        if v is not None and not str(v).strip():
+            return None
+        return v
+
 
 class DouyinAccountSchemaPatch(Schema):
     """抖音账号部分更新模式"""
@@ -71,6 +78,7 @@ class DouyinAccountSchemaPatch(Schema):
 
 class DouyinAccountSchemaOut(ModelSchema):
     """抖音账号输出模式"""
+    id: str
     status_display: Optional[str] = None
     credential_state_display: Optional[str] = None
     owner_id: Optional[str] = None
@@ -79,6 +87,10 @@ class DouyinAccountSchemaOut(ModelSchema):
     class Config:
         model = DouyinAccount
         model_fields = "__all__"
+
+    @staticmethod
+    def resolve_id(obj):
+        return str(obj.id) if obj.id else None
 
     @staticmethod
     def resolve_status_display(obj):
@@ -154,4 +166,55 @@ class DouyinCredentialImportIn(Schema):
     nickname: Optional[str] = Field(None, description="可选，覆盖账号昵称")
     user_agent: Optional[str] = Field(
         None, description="可选，与导出 Cookie 的浏览器一致的 UA"
+    )
+
+
+class QuickCreateAccountIn(Schema):
+    """一步创建账号 + 导入凭证"""
+    bundle: Optional[str] = Field(
+        None,
+        description="浏览器扩展生成的一键导入串（DYCRED1.开头）",
+    )
+    cookie: Optional[str] = Field(
+        None,
+        description="浏览器复制的 Cookie 整行（必须含 sessionid）",
+    )
+    web_protect: Optional[str] = Field(
+        None, description="bd-ticket-guard 的 web_protect JSON（发送私信需要）"
+    )
+    keys: Optional[str] = Field(
+        None, description="含 ec_privateKey 的 keys JSON（发送私信需要）"
+    )
+    user_agent: Optional[str] = Field(
+        None, description="可选，与导出 Cookie 的浏览器一致的 UA"
+    )
+    # 可选的账号配置
+    auto_reply_enabled: bool = Field(True, description="是否启用自动回复")
+    daily_reply_quota: int = Field(200, description="每日回复上限", ge=0)
+    min_interval_seconds: int = Field(8, description="最小回复间隔（秒）", ge=1)
+    max_interval_seconds: int = Field(25, description="最大回复间隔（秒）", ge=1)
+    silent_start: str = Field('22:00:00', description="静默时段开始时间")
+    silent_end: str = Field('08:00:00', description="静默时段结束时间")
+    remark: Optional[str] = Field(None, description="备注")
+
+
+class CredentialStatusItem(Schema):
+    """单个账号的凭证状态"""
+    id: str
+    nickname: str
+    sec_uid: Optional[str] = None
+    avatar: Optional[str] = None
+    credential_state: str
+    last_login_at: Optional[str] = None
+    storage_state_exists: bool
+    has_send_credential: bool
+    status: int
+
+
+class CredentialStatusOut(Schema):
+    """凭证状态汇总"""
+    accounts: list[CredentialStatusItem]
+    duplicates: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="重复的 sec_uid -> 账号ID列表"
     )

@@ -281,56 +281,6 @@ def list_all_dept(request):
     return query_set
 
 
-@router.get("/dept/{dept_id}", response=DeptSchemaOut, summary="获取部门详情")
-def get_dept(request, dept_id: str):
-    """获取单个部门的详细信息"""
-    dept = get_object_or_404(
-        Dept.objects.select_related('parent', 'lead'),
-        id=dept_id
-    )
-    return dept
-
-
-@router.get("/dept/by/parent/{parent_id}", response=List[dict], summary="根据父部门ID获取子部门")
-def get_dept_by_parent(request, parent_id: str):
-    """
-    根据父部门ID获取直接子部门
-    
-    改进点：
-    - 支持根部门查询（parent_id="null"）
-    - 返回完整的部门信息（包含所有字段）
-    """
-    if parent_id == "null":
-        parent_id = None
-
-    query_set = Dept.objects.filter(parent_id=parent_id).select_related('lead')
-
-    result = []
-    for dept in query_set:
-        dept_dict = {
-            'id': str(dept.id),
-            'name': dept.name,
-            'code': dept.code,
-            'dept_type': dept.dept_type,
-            'dept_type_display': dept.get_dept_type_display_name(),
-            'status': dept.status,
-            'level': dept.level,
-            'path': dept.path,
-            'parent_id': str(dept.parent_id) if dept.parent_id else None,
-            'lead_id': str(dept.lead_id) if dept.lead_id else None,
-            'lead_name': dept.lead.name if dept.lead else None,
-            'phone': dept.phone,
-            'email': dept.email,
-            'description': dept.description,
-            'sort': dept.sort,
-            'child_count': dept.get_child_count(),
-            'user_count': dept.get_user_count(),
-        }
-        result.append(dept_dict)
-
-    return result
-
-
 @router.get("/dept/search", response=List[dict], summary="搜索部门")
 def search_dept(request, keyword: str):
     """
@@ -402,6 +352,36 @@ def search_dept(request, keyword: str):
     return roots
 
 
+@router.get("/dept/stats", summary="获取部门统计信息")
+def get_dept_stats(request):
+    """
+    获取部门统计信息
+    
+    改进点：
+    - 提供全局统计数据
+    """
+    from django.db import models
+
+    total_count = Dept.objects.count()
+    active_count = Dept.objects.filter(status=True).count()
+    root_count = Dept.objects.filter(parent__isnull=True).count()
+
+    # 按类型统计
+    type_stats = {}
+    for type_code, type_name in Dept.DEPT_TYPE_CHOICES:
+        count = Dept.objects.filter(dept_type=type_code).count()
+        type_stats[type_name] = count
+
+    return {
+        'total_count': total_count,
+        'active_count': active_count,
+        'inactive_count': total_count - active_count,
+        'root_count': root_count,
+        'type_stats': type_stats,
+        'max_level': Dept.objects.aggregate(max_level=models.Max('level'))['max_level'] or 0,
+    }
+
+
 @router.get("/dept/by/ids", response=List[dict], summary="根据ID列表获取部门")
 def get_depts_by_ids(request, ids: str):
     """
@@ -462,6 +442,46 @@ def get_depts_by_ids(request, ids: str):
     return roots
 
 
+@router.get("/dept/by/parent/{parent_id}", response=List[dict], summary="根据父部门ID获取子部门")
+def get_dept_by_parent(request, parent_id: str):
+    """
+    根据父部门ID获取直接子部门
+    
+    改进点：
+    - 支持根部门查询（parent_id="null"）
+    - 返回完整的部门信息（包含所有字段）
+    """
+    if parent_id == "null":
+        parent_id = None
+
+    query_set = Dept.objects.filter(parent_id=parent_id).select_related('lead')
+
+    result = []
+    for dept in query_set:
+        dept_dict = {
+            'id': str(dept.id),
+            'name': dept.name,
+            'code': dept.code,
+            'dept_type': dept.dept_type,
+            'dept_type_display': dept.get_dept_type_display_name(),
+            'status': dept.status,
+            'level': dept.level,
+            'path': dept.path,
+            'parent_id': str(dept.parent_id) if dept.parent_id else None,
+            'lead_id': str(dept.lead_id) if dept.lead_id else None,
+            'lead_name': dept.lead.name if dept.lead else None,
+            'phone': dept.phone,
+            'email': dept.email,
+            'description': dept.description,
+            'sort': dept.sort,
+            'child_count': dept.get_child_count(),
+            'user_count': dept.get_user_count(),
+        }
+        result.append(dept_dict)
+
+    return result
+
+
 @router.get("/dept/path/{dept_id}", response=DeptPathOut, summary="获取部门路径")
 def get_dept_path(request, dept_id: str):
     """
@@ -499,6 +519,17 @@ def get_dept_path(request, dept_id: str):
         dept_name=dept.name,
         path=path
     )
+
+
+# 动态路由（必须在静态路由之后定义，避免 search/stats 等被当成 dept_id）
+@router.get("/dept/{dept_id}", response=DeptSchemaOut, summary="获取部门详情")
+def get_dept(request, dept_id: str):
+    """获取单个部门的详细信息"""
+    dept = get_object_or_404(
+        Dept.objects.select_related('parent', 'lead'),
+        id=dept_id
+    )
+    return dept
 
 
 @router.post("/dept/batch/update-status", response=DeptBatchUpdateStatusOut, summary="批量更新部门状态")
@@ -615,34 +646,6 @@ def add_user_to_dept(request, dept_id: str, data: DeptUserIn):
         added_count += 1
 
     return response_success(f"成功添加 {added_count} 个用户")
-
-
-@router.get("/dept/stats", summary="获取部门统计信息")
-def get_dept_stats(request):
-    """
-    获取部门统计信息
-    
-    改进点：
-    - 提供全局统计数据
-    """
-    total_count = Dept.objects.count()
-    active_count = Dept.objects.filter(status=True).count()
-    root_count = Dept.objects.filter(parent__isnull=True).count()
-
-    # 按类型统计
-    type_stats = {}
-    for type_code, type_name in Dept.DEPT_TYPE_CHOICES:
-        count = Dept.objects.filter(dept_type=type_code).count()
-        type_stats[type_name] = count
-
-    return {
-        'total_count': total_count,
-        'active_count': active_count,
-        'inactive_count': total_count - active_count,
-        'root_count': root_count,
-        'type_stats': type_stats,
-        'max_level': Dept.objects.aggregate(max_level=models.Max('level'))['max_level'] or 0,
-    }
 
 
 @router.post("/dept/move", summary="移动部门")

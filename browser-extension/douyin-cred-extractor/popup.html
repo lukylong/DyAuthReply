@@ -8,7 +8,7 @@
 </head>
 <body>
   <header class="hd">
-    <h1>抖音登录态提取器</h1>
+    <h1>抖音登录态提取器 <span style="font-size:11px;color:#9aa0aa;font-weight:400;">v1.7.1</span></h1>
     <p class="sub">DyAuthReply · 导入登录态助手</p>
   </header>
 
@@ -76,10 +76,14 @@
   <div id="toast" class="toast" hidden></div>
 
   <footer class="ft">
-    <p>Cookie 在 <b>douyin.com 全站共享</b>，creator / www 都能抓。
-       但 <b>web_protect / keys 按站点单独存</b>，发送私信请在 <b>creator.douyin.com 私信页</b>抓。</p>
-    <p><b>切换账号后</b>：在新账号页面 <b>刷新一次</b>（F5），再点「重新抓取」，
-       核对上方<b>昵称 / 账号指纹</b>是否已变化。</p>
+    <p><b style="color: #ff6b00;">⚠️ 统一规范：只在 creator.douyin.com 抓取</b></p>
+    <p><b>推荐页面</b>：<a href="https://creator.douyin.com/creator-micro/data/following/chat" target="_blank" style="color:#2ecc71;">creator.douyin.com/creator-micro/data/following/chat</a>（私信管理）</p>
+    <p><b style="color: #ff6b00;">同机双账号：必须普通 + 无痕（或两个 Chrome 配置）</b></p>
+    <p>Chrome 同一配置下，所有<b>普通窗口</b>共享一套 douyin.com Cookie——两个普通标签页不可能同时是两个号。
+       第二个号请用<b>无痕窗口</b>，并在 chrome://extensions 勾选「在无痕模式下启用」。
+       抓取后核对下方「各窗口 sessionid」前缀必须不同。</p>
+    <p>Cookie 在 <b>douyin.com 全站共享</b>，但 <b>web_protect / keys 只在 creator 有</b>。
+       发送私信必须在 <b>creator.douyin.com</b> 抓取。</p>
     <p>插件<b>只读取、不修改</b>任何数据；keys（私钥）在浏览器里是固定的，多次抓取值不变。</p>
   </footer>
 

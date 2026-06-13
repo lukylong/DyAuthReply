@@ -55,6 +55,7 @@ from core.douyin.runtime.transport.wire import (
     encode_send_message_request,
     encode_send_message_request_from_template,
 )
+from core.douyin.runtime.transport.wire.codec import get_first_int
 
 if TYPE_CHECKING:
     from core.douyin.douyin_account_model import DouyinAccount
@@ -278,6 +279,47 @@ _BASE_CREATOR_JSON_HEADERS: dict[str, str] = {
     "referer": "https://creator.douyin.com/",
 }
 
+# bd-ticket 取/续票端点（Proxyman 实测）：GET creator.douyin.com/.../im/user_token/v2/
+# 请求需带 certificate=base64(CSR PEM) 与下方 creator 专属公共参数（device_platform=web、
+# aid=2906、app_name=aweme_creator_platform），响应返回 token / ts_sign / sdk_cert（status_code=0）。
+# 与默认 webapp/aid=6383 公共参数集不同，故单列。
+CREATOR_USER_TOKEN_URL = "https://creator.douyin.com/aweme/v1/creator/im/user_token/v2/"
+_CREATOR_MEDIA_USER_INFO_URL = (
+    "https://creator.douyin.com/web/api/media/user/info/"
+)
+_CREATOR_TOKEN_REFERER = "https://creator.douyin.com/creator-micro/data/following/chat"
+
+
+def creator_token_base_params(user_agent: str) -> str:
+    """构造 user_token/v2 的 creator 专属公共参数串（不含 msToken / a_bogus / certificate）。
+
+    严格对照 Proxyman 抓到的浏览器真实请求字段；browser_version 取 UA 去掉 "Mozilla/" 前缀。
+    """
+    from urllib.parse import quote
+
+    ua = user_agent or (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+    bver = ua.split("Mozilla/", 1)[-1]  # 抓包里 browser_name=Mozilla、browser_version=UA 去前缀
+    is_mac = "Macintosh" in ua
+    return "&".join([
+        "aid=2906",
+        "app_name=aweme_creator_platform",
+        "device_platform=web",
+        f"referer={quote(_CREATOR_TOKEN_REFERER, safe='')}",
+        f"user_agent={quote(ua, safe='')}",
+        "cookie_enabled=true",
+        "screen_width=1920",
+        "screen_height=1080",
+        "browser_language=zh-CN",
+        f"browser_platform={'MacIntel' if is_mac else 'Win32'}",
+        "browser_name=Mozilla",
+        f"browser_version={quote(bver, safe='')}",
+        "browser_online=true",
+        f"timezone_name={quote('Asia/Shanghai', safe='')}",
+    ])
+
 
 def _build_default_sign_provider():
     """
@@ -337,6 +379,16 @@ class HttpProtocolTransport(AccountTransport):
         self._sign = sign_provider or _build_default_sign_provider()
         self._max_signer_failures = int(max_signer_failures)
         self._signer_failures = 0
+        # 半开熔断窗口（monotonic 秒）：失败累计达阈值后进入降级，但只冷却 N 秒；冷却到期放
+        # 一次试探，成功即自愈复位，避免「攒够 N 次失败后永久降级、Proxyman/网络恢复也得重启」。
+        self._signer_degraded_until = 0.0
+        try:
+            from django.conf import settings as _s
+            self._signer_degrade_cooldown_s = float(
+                getattr(_s, "DOUYIN_SIGNER_DEGRADE_COOLDOWN_S", 60) or 60
+            )
+        except Exception:  # noqa: BLE001
+            self._signer_degrade_cooldown_s = 60.0
 
         # verb 级开关 —— Phase 3.2b 逐个翻 True
         # 优先级：构造参数 > Django setting > 默认 False
@@ -449,10 +501,12 @@ class HttpProtocolTransport(AccountTransport):
                 }
                 if conversation_hint:
                     impl_kwargs["conversation_hint"] = conversation_hint
-                return await self._impl_scan_inbox_via_http(
+                result = await self._impl_scan_inbox_via_http(
                     account,
                     **impl_kwargs,
                 )
+                self._on_signer_success()  # 成功即复位失败计数 / 解除降级，连接恢复自愈
+                return result
             except _NotImplementedYet:
                 pass
             except SignerUnavailable as e:
@@ -497,13 +551,15 @@ class HttpProtocolTransport(AccountTransport):
             )
         if self._http_send_reply_enabled and self._signer_healthy():
             try:
-                return await self._impl_send_reply_via_http(
+                _r = await self._impl_send_reply_via_http(
                     account,
                     conversation_id=conversation_id,
                     trigger_message_id=trigger_message_id,
                     rule=rule,
                     peer_nickname=peer_nickname,
                 )
+                self._on_signer_success()
+                return _r
             except _NotImplementedYet:
                 pass
             except SignerUnavailable as e:
@@ -542,11 +598,13 @@ class HttpProtocolTransport(AccountTransport):
             )
         if self._http_send_text_enabled and self._signer_healthy():
             try:
-                return await self._impl_send_text_via_http(
+                _r = await self._impl_send_text_via_http(
                     account,
                     conversation_id=conversation_id,
                     text=text,
                 )
+                self._on_signer_success()
+                return _r
             except _NotImplementedYet:
                 pass
             except SignerUnavailable as e:
@@ -620,6 +678,196 @@ class HttpProtocolTransport(AccountTransport):
             detail=detail,
         )
 
+    async def _fetch_self_profile_via_creator_media(
+        self,
+        account: "DouyinAccount",
+    ) -> Optional[dict]:
+        """通过 creator 创作者中心接口拉取当前登录账号资料（GET，实测比 user_detail POST 更稳）。"""
+        account_id = str(account.id)
+        ua = getattr(self._sign, "_user_agent", "") or ""
+        try:
+            resp: SignedResponse = await self._sign.signed_fetch(
+                method="GET",
+                url=_CREATOR_MEDIA_USER_INFO_URL,
+                headers=_BASE_CREATOR_JSON_HEADERS,
+                # 与 user_detail / user_token 一致：creator 域用 aid=2906，勿用 webapp/6383
+                base_params=creator_token_base_params(ua),
+                timeout_ms=10_000,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"[transport.http] media/user/info 请求失败 "
+                f"account={account_id} err={type(e).__name__}: {e}"
+            )
+            return None
+
+        if not resp.ok:
+            logger.warning(
+                f"[transport.http] media/user/info HTTP 非 2xx "
+                f"account={account_id} status={resp.status}"
+            )
+            return None
+
+        try:
+            payload = json.loads(resp.text or resp.content.decode("utf-8") or "{}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"[transport.http] media/user/info JSON 解析失败 "
+                f"account={account_id} err={type(e).__name__}: {e}"
+            )
+            return None
+
+        if payload.get("status_code", 0) != 0:
+            logger.warning(
+                f"[transport.http] media/user/info 业务错误 "
+                f"account={account_id} status_code={payload.get('status_code')} "
+                f"msg={payload.get('status_msg')!r}"
+            )
+            return None
+
+        user = payload.get("user") or {}
+        nickname = str(user.get("nickname") or "").strip()
+        if not nickname:
+            return None
+
+        avatar = ""
+        for key in ("avatar_thumb", "avatar_larger", "avatar_medium"):
+            block = user.get(key) or {}
+            urls = block.get("url_list") or []
+            if urls:
+                avatar = str(urls[0])
+                break
+
+        user_id = 0
+        try:
+            user_id = int(user.get("uid") or 0)
+        except (TypeError, ValueError):
+            user_id = 0
+
+        return {
+            "nickname": nickname,
+            "avatar": avatar,
+            "sec_uid": str(user.get("sec_uid") or "").strip(),
+            "user_id": user_id,
+        }
+
+    async def _profile_from_self_uid(
+        self,
+        account: "DouyinAccount",
+        self_uid: int,
+        *,
+        via: str,
+    ) -> Optional[dict]:
+        """用数字 user_id 调 user_detail 补全昵称/头像/sec_uid。"""
+        if self_uid <= 0:
+            return None
+        details = await self._resolve_user_details(account, [self_uid])
+        row = details.get(self_uid) if details else None
+        if not row or not str(row.get("nickname") or "").strip():
+            logger.warning(
+                f"[transport.http] fetch_self_profile user_detail 返回空 "
+                f"account={account.id} self_uid={self_uid} via={via}"
+            )
+            return None
+        row = dict(row)
+        row["user_id"] = self_uid
+        logger.info(
+            f"[transport.http] fetch_self_profile 成功(via {via}) "
+            f"account={account.id} nickname={row.get('nickname')!r} "
+            f"sec_uid={(row.get('sec_uid') or '')[:20]}..."
+        )
+        return row
+
+    async def fetch_self_profile(self, account: "DouyinAccount") -> Optional[dict]:
+        """获取当前登录账号自己的真实信息（昵称/头像/sec_uid/user_id）。
+
+        1. **www.douyin.com**（对照 DouYin_Spider demo）：query/user → user/self → profile/other
+        2. creator ``web/api/media/user/info``（创作者后台 cookie 时可用）
+        3. ``list_conversations`` envelope.f13 → ``user_detail``
+        4. cookie ``login_uid`` → ``user_detail``
+
+        Returns:
+            {"nickname": str, "avatar": str, "sec_uid": str, "user_id": int} 或 None（失败）
+        """
+        self._assert_account_bound(account, "fetch_self_profile")
+        if not self._signer_healthy():
+            logger.warning(
+                f"[transport.http] fetch_self_profile signer 未就绪 account={account.id}"
+            )
+            return None
+
+        # 优先主站链路（与 DouYin_Spider 一致；主站 cookie 在 creator 域常报「未登录」）
+        try:
+            from core.douyin.runtime.transport.douyin_web_profile import (
+                fetch_self_profile_via_douyin_web,
+            )
+
+            cookies = await self._sign.get_cookies()
+            ua = getattr(self._sign, "_user_agent", "") or ""
+            proxy = getattr(self._sign, "_proxy_url", None)
+            web_profile = await fetch_self_profile_via_douyin_web(
+                cookies,
+                ua,
+                proxy_url=proxy,
+                account_id=str(account.id),
+            )
+            if web_profile and str(web_profile.get("nickname") or "").strip():
+                logger.info(
+                    f"[transport.http] fetch_self_profile 成功(via douyin_web) "
+                    f"account={account.id} nickname={web_profile.get('nickname')!r}"
+                )
+                return web_profile
+            if web_profile:
+                uid = int(web_profile.get("user_id") or 0)
+                if uid > 0:
+                    row = await self._profile_from_self_uid(
+                        account, uid, via="douyin_web+user_detail",
+                    )
+                    if row:
+                        if web_profile.get("sec_uid") and not row.get("sec_uid"):
+                            row["sec_uid"] = web_profile["sec_uid"]
+                        return row
+                if str(web_profile.get("sec_uid") or "").strip():
+                    return web_profile
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"[transport.http] fetch_self_profile douyin_web 异常 "
+                f"account={account.id} err={type(e).__name__}: {e}"
+            )
+
+        profile = await self._fetch_self_profile_via_creator_media(account)
+        if profile:
+            logger.info(
+                f"[transport.http] fetch_self_profile 成功(via media/user/info) "
+                f"account={account.id} nickname={profile.get('nickname')!r} "
+                f"sec_uid={(profile.get('sec_uid') or '')[:20]}..."
+            )
+            return profile
+
+        # 新号/空 inbox：list_conversations 的 envelope.f13 即 self_uid，不必先扫 get_by_user
+        self_uid = await self._resolve_self_uid(account)
+        if self_uid > 0:
+            row = await self._profile_from_self_uid(
+                account, self_uid, via="list_conversations+user_detail",
+            )
+            if row:
+                return row
+
+        from core.douyin.runtime.credential import extract_self_uid_from_cookies
+
+        cookie_uid = extract_self_uid_from_cookies(await self._sign.get_cookies())
+        if cookie_uid > 0 and cookie_uid != self_uid:
+            row = await self._profile_from_self_uid(
+                account, cookie_uid, via="cookie+user_detail",
+            )
+            if row:
+                return row
+
+        logger.warning(
+            f"[transport.http] fetch_self_profile 全部路径失败 account={account.id}"
+        )
+        return None
+
     # ---------------- 内部：信号 / 健康 ----------------
     @staticmethod
     def _raise_if_login_expired(
@@ -648,9 +896,10 @@ class HttpProtocolTransport(AccountTransport):
     def _signer_healthy(self) -> bool:
         if not self._sign.is_ready:
             return False
-        if self._signer_failures >= self._max_signer_failures:
-            return False
-        return True
+        if self._signer_failures < self._max_signer_failures:
+            return True
+        # 已达阈值：半开熔断——冷却到期放行一次试探（成功则 _on_signer_success 复位自愈）。
+        return time.monotonic() >= self._signer_degraded_until
 
     def _on_signer_failure(self, reason: str) -> None:
         self._signer_failures += 1
@@ -659,9 +908,20 @@ class HttpProtocolTransport(AccountTransport):
             f"{self._max_signer_failures} reason={reason}"
         )
         if self._signer_failures >= self._max_signer_failures:
+            self._signer_degraded_until = time.monotonic() + self._signer_degrade_cooldown_s
             logger.error(
-                "[transport.http] signer 失败次数到达阈值，本 transport 进入降级模式（仅走 fallback）"
+                "[transport.http] signer 失败次数达阈值，进入降级（半开熔断）："
+                f"冷却 {self._signer_degrade_cooldown_s:.0f}s 后放一次试探，成功即自愈"
             )
+
+    def _on_signer_success(self) -> None:
+        """signer 调用成功：复位失败计数与降级窗口，连接恢复后无需重启即自愈。"""
+        if self._signer_failures:
+            logger.info(
+                f"[transport.http] signer 调用成功，复位失败计数（此前 {self._signer_failures} 次）"
+            )
+        self._signer_failures = 0
+        self._signer_degraded_until = 0.0
 
     # ---------------- 辅助：批量补 user_detail ----------------
     async def _resolve_user_details(
@@ -696,12 +956,14 @@ class HttpProtocolTransport(AccountTransport):
         endpoint = _ENDPOINTS["user_detail"]
         body_json = _json.dumps({"user_ids": valid_ids}, ensure_ascii=False)
         account_id = str(account.id)
+        ua = getattr(self._sign, "_user_agent", "") or ""
         try:
             resp: SignedResponse = await self._sign.signed_fetch(
                 method=endpoint["method"],
                 url=endpoint["url"],
                 body=body_json,
                 headers=_BASE_CREATOR_JSON_HEADERS,
+                base_params=creator_token_base_params(ua),
             )
         except SignerUnavailable as e:
             # 不算 signer 重大事件 —— 主路径的 signed_fetch 仍是真正的健康标尺
@@ -803,6 +1065,52 @@ class HttpProtocolTransport(AccountTransport):
             return False
         parts = raw.split(":")
         return len(parts) == 4 and all(part.isdigit() for part in parts)
+
+    async def _resolve_self_uid(
+        self,
+        account: "DouyinAccount",
+        *,
+        envelope: dict[int, list] | None = None,
+        messages: list[Any] | None = None,
+    ) -> int:
+        """从协议响应中解析当前登录账号的数字 user_id（self_uid）。
+
+        优先级：
+        1. envelope.f13（服务端直接返回，空收件箱也可用）
+        2. 从消息的 conversation_id 推断（0:1:self_uid:peer_uid）
+        3. list_conversations 的 envelope.f13（兜底）
+        """
+        self_uid = get_first_int(envelope or {}, 13)
+        if self_uid > 0:
+            return self_uid
+
+        self_uid = self._infer_self_uid_from_conversation_ids(messages or [])
+        if self_uid > 0:
+            return self_uid
+
+        endpoint = _ENDPOINTS["list_conversations"]
+        body, _seq_id = encode_list_conversations_request()
+        try:
+            list_resp: SignedResponse = await self._sign.signed_fetch(
+                method=endpoint["method"],
+                url=endpoint["url"],
+                body=body,
+                headers=_BASE_IM_HEADERS,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"[transport.http] _resolve_self_uid list_conversations 失败 "
+                f"account={account.id} err={type(e).__name__}: {e}"
+            )
+            return 0
+
+        if not list_resp.ok or not list_resp.content:
+            return 0
+
+        list_result = decode_list_conversations_response(list_resp.content)
+        if list_result.status_code != 0:
+            return 0
+        return list_result.self_uid
 
     @staticmethod
     def _infer_self_uid_from_conversation_ids(messages: list[Any]) -> int:

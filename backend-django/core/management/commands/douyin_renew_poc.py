@@ -10,27 +10,36 @@ cookie/私钥**刷新** ts_sign / sdk_cert / token，从而免去反复手动重
     再人工核对字段语义后，才在 health 里接入自动续期（见 plan 的 p2-renew-integrate）。
   - 若返回 401/风控/无相关字段 → PoC 不通过，保持「探活告警 + 引导重导入」保底方案。
 
+真实请求形态（Proxyman 实测，2026-06）：
+  GET creator.douyin.com/aweme/v1/creator/im/user_token/v2/
+      ?aid=2906&app_name=aweme_creator_platform&device_platform=web&...
+      &certificate=<base64(CSR PEM)>&msToken=...&a_bogus=...
+  certificate 即 keys 里的 ec_csr（base64 后提交）；响应 status_code=0 时返回
+  token / ts_sign / sdk_cert。本命令默认就用该形态（GET + creator 公共参数 + certificate）。
+
 典型用法：
-  A) 用已导入账号验证：
+  A) 用已导入账号验证（自动取该账号 storage 里的 csr）：
      python manage.py douyin_renew_poc <account_id> --raw
-  B) 用抓包 Cookie 头验证：
-     python manage.py douyin_renew_poc --cookie-header "sessionid=...; ..." --ua "Mozilla/5.0 ..." --raw
+  B) 用抓包 Cookie 头 + CSR 文件验证：
+     python manage.py douyin_renew_poc --cookie-header "sessionid=...; ..." \
+         --ua "Mozilla/5.0 ..." --csr-file csr.pem --raw
   其它：
-     --method GET                 # 默认 POST；端点真实方法不确定时可切换试探
-     --body-file payload.json     # 自定义请求体（默认空 {}）
-     --url <full_url>             # 覆盖默认端点，便于试探其它续期端点
+     --method POST                # 默认 GET（真实形态）；试探其它方法时可切换
+     --no-certificate             # 不带 certificate（对照试验：验证 certificate 是否必需）
+     --csr-file <file>            # 显式提供 CSR PEM（覆盖账号 storage 里的 csr）
+     --url <full_url>             # 覆盖默认端点
      --proxy http://127.0.0.1:9090 / --insecure   # 配合 Proxyman 抓包对照
 """
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 
 from django.core.management.base import BaseCommand, CommandError
 
 from core.douyin.douyin_account_model import DouyinAccount
 
-_DEFAULT_URL = "https://creator.douyin.com/aweme/v1/creator/im/user_token/v2"
 # 续期响应里「可能」出现的、值得关注的刷新字段（命中即视为 PoC 候选通过）
 _RENEW_KEYS = ("ts_sign", "sdk_cert", "client_cert", "token", "ticket", "user_token")
 
@@ -70,9 +79,12 @@ class Command(BaseCommand):
         parser.add_argument("--ua", default=None, help="User-Agent（建议从抓包请求头复制）")
         parser.add_argument("--proxy", default=None, help="代理地址，如 http://127.0.0.1:9090")
         parser.add_argument("--insecure", action="store_true", help="跳过 TLS 校验（配合 Proxyman MITM）")
-        parser.add_argument("--method", choices=["POST", "GET"], default="POST", help="请求方法（默认 POST）")
-        parser.add_argument("--url", default=_DEFAULT_URL, help="续期端点（默认 user_token/v2）")
-        parser.add_argument("--body-file", default=None, help="自定义请求体 JSON 文件（默认空 {}）")
+        parser.add_argument("--method", choices=["POST", "GET"], default="GET", help="请求方法（默认 GET，真实形态）")
+        parser.add_argument("--url", default=None, help="续期端点（默认 user_token/v2 真实端点）")
+        parser.add_argument("--csr-file", default=None, help="CSR PEM 文件（覆盖账号 storage 里的 csr）")
+        parser.add_argument("--no-certificate", action="store_true",
+                            help="不带 certificate 参数（对照试验）")
+        parser.add_argument("--body-file", default=None, help="自定义请求体 JSON 文件（POST 时默认空 {}）")
         parser.add_argument("--raw", action="store_true", help="打印响应前 600 字节")
 
     def handle(self, *args, **options):
@@ -82,6 +94,7 @@ class Command(BaseCommand):
             from pathlib import Path
             cookie_header = Path(options["cookie_file"]).read_text(encoding="utf-8").strip()
 
+        csr_pem = ""  # 续期请求的 certificate 来源（base64 前的 CSR PEM 文本）
         if account_id:
             account = DouyinAccount.objects.filter(id=account_id).first()
             if account is None:
@@ -90,6 +103,7 @@ class Command(BaseCommand):
                 account.user_agent = options["ua"]
             if options["proxy"]:
                 account.proxy_url = options["proxy"]
+            csr_pem = self._load_csr_from_storage(account_id)
         else:
             if not cookie_header:
                 raise CommandError("未提供 account_id 时必须传 --cookie-header / --cookie-file")
@@ -97,18 +111,36 @@ class Command(BaseCommand):
             account = SimpleNamespace(id="adhoc-renew-poc", user_agent=options["ua"] or "",
                                       proxy_url=options["proxy"] or "", sec_uid="")
 
+        if options["csr_file"]:
+            from pathlib import Path
+            csr_pem = Path(options["csr_file"]).read_text(encoding="utf-8").strip()
+
         body = b"{}"
         if options["body_file"]:
             from pathlib import Path
             body = Path(options["body_file"]).read_bytes()
 
         cookies = _parse_cookie_header(cookie_header) if cookie_header else None
-        ok = asyncio.run(self._run(account, options, cookies, body))
+        ok = asyncio.run(self._run(account, options, cookies, body, csr_pem))
         if not ok:
             raise CommandError("PoC 未确认续期可行（详见上方输出）")
 
-    async def _run(self, account, options, cookies, body: bytes) -> bool:
-        from core.douyin.runtime.transport.http_protocol import _BASE_CREATOR_JSON_HEADERS
+    @staticmethod
+    def _load_csr_from_storage(account_id: str) -> str:
+        """从账号 storage 的 _bd_ticket 读取 csr（ec_csr）；无则空串。"""
+        try:
+            from core.douyin.runtime.storage import load_storage_state
+            state = load_storage_state(account_id) or {}
+        except Exception:  # noqa: BLE001
+            return ""
+        return str(((state.get("_bd_ticket") or {}).get("csr") or "")).strip()
+
+    async def _run(self, account, options, cookies, body: bytes, csr_pem: str) -> bool:
+        from core.douyin.runtime.transport.http_protocol import (
+            CREATOR_USER_TOKEN_URL,
+            _BASE_CREATOR_JSON_HEADERS,
+            creator_token_base_params,
+        )
         from core.douyin.runtime.transport.js_sign_provider import JsSignProvider
         from core.douyin.runtime.transport.sign_types import SignerUnavailable
 
@@ -120,15 +152,33 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR("provider 未就绪或无 cookie，无法验证"))
             return False
 
-        url = options["url"]
+        url = options["url"] or CREATOR_USER_TOKEN_URL
         method = options["method"]
-        self.stdout.write(f"→ {method} {url} account={account.id} body_len={len(body)}")
+        ua = getattr(account, "user_agent", "") or ""
+
+        # creator user_token/v2 专属公共参数 + certificate（base64(CSR)）。
+        base_params = creator_token_base_params(ua)
+        extra_params: dict[str, str] = {}
+        if not options["no_certificate"]:
+            if not csr_pem:
+                self.stdout.write(self.style.WARNING(
+                    "⚠ 未取到 CSR（账号 storage 无 csr 且未给 --csr-file）：将不带 certificate 发送，"
+                    "结果可能为「用户未登录」。请重新导入含 ec_csr 的 keys，或用 --csr-file 提供。"))
+            else:
+                extra_params["certificate"] = base64.b64encode(csr_pem.encode("utf-8")).decode("ascii")
+
+        self.stdout.write(
+            f"→ {method} {url} account={account.id} "
+            f"certificate={'Y' if extra_params.get('certificate') else 'N'}"
+        )
         try:
             resp = await provider.signed_fetch(
                 method=method,
                 url=url,
                 body=None if method == "GET" else body,
                 headers=_BASE_CREATOR_JSON_HEADERS,
+                base_params=base_params,
+                extra_params=extra_params or None,
             )
         except SignerUnavailable as e:
             self.stdout.write(self.style.ERROR(f"signed_fetch 失败: {e}"))

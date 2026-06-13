@@ -194,3 +194,57 @@ export async function importDouyinCredentialApi(
     data,
   );
 }
+
+/**
+ * 一步创建账号（导入Cookie+自动获取信息）
+ */
+export interface QuickCreateAccountInput {
+  bundle?: string;
+  cookie?: string;
+  web_protect?: string;
+  keys?: string;
+  user_agent?: string;
+  auto_reply_enabled?: boolean;
+  daily_reply_quota?: number;
+  min_interval_seconds?: number;
+  max_interval_seconds?: number;
+  silent_start?: string;
+  silent_end?: string;
+  remark?: string;
+}
+
+export async function quickCreateDouyinAccountApi(
+  data: QuickCreateAccountInput,
+) {
+  return requestClient.post<DouyinAccount>(
+    '/api/core/douyin/account/quick-create',
+    data,
+  );
+}
+
+/**
+ * 获取所有账号的凭证状态
+ */
+export interface CredentialStatusItem {
+  id: string;
+  nickname: string;
+  sec_uid?: string;
+  avatar?: string;
+  credential_state: string;
+  last_login_at?: string;
+  storage_state_exists: boolean;
+  has_send_credential: boolean;
+  status: number;
+}
+
+export interface CredentialStatusResponse {
+  accounts: CredentialStatusItem[];
+  duplicates: Record<string, string[]>;
+}
+
+export async function getCredentialStatusApi() {
+  return requestClient.get<CredentialStatusResponse>(
+    '/api/core/douyin/account/credential-status',
+  );
+}
+

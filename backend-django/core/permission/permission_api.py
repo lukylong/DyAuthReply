@@ -228,62 +228,6 @@ def list_all_permission(request):
     return query_set
 
 
-@router.get("/permission/{permission_id}", response=PermissionSchemaDetail, summary="获取权限详情")
-def get_permission(request, permission_id: str):
-    """获取单个权限的详细信息"""
-    permission = get_object_or_404(
-        Permission.objects.select_related('menu'),
-        id=permission_id
-    )
-    return permission
-
-
-@router.get("/permission/by/menu/{menu_id}", response=List[PermissionSchemaOut], summary="根据菜单ID获取权限")
-def get_permissions_by_menu(request, menu_id: str):
-    """
-    根据菜单ID获取该菜单下的所有权限
-    
-    改进点：
-    - 支持菜单维度的权限查询
-    - 按排序字段排序
-    """
-    permissions = Permission.objects.filter(
-        menu_id=menu_id,
-        is_active=True
-    ).order_by('sort', 'sys_create_datetime')
-    return permissions
-
-
-@router.get("/permission/by/type/{permission_type}", response=List[PermissionSchemaOut], summary="根据类型获取权限")
-def get_permissions_by_type(request, permission_type: int):
-    """
-    根据权限类型获取权限列表
-    
-    Args:
-        permission_type: 0-按钮权限, 1-API权限, 2-数据权限, 3-其他权限
-    """
-    if permission_type not in [0, 1, 2, 3]:
-        raise HttpError(400, "权限类型必须在 0-3 之间")
-
-    permissions = Permission.objects.filter(
-        permission_type=permission_type,
-        is_active=True
-    ).select_related('menu').order_by('menu_id', 'sort')
-    return permissions
-
-
-@router.post("/permission/batch/update-status", response=PermissionBatchUpdateStatusOut, summary="批量更新权限状态")
-def batch_update_permission_status(request, data: PermissionBatchUpdateStatusIn):
-    """
-    批量启用或禁用权限
-    
-    改进点：
-    - 支持批量状态管理
-    """
-    count = Permission.objects.filter(id__in=data.ids).update(is_active=data.is_active)
-    return PermissionBatchUpdateStatusOut(count=count)
-
-
 @router.get("/permission/search", response=List[PermissionSchemaOut], summary="搜索权限")
 @paginate(MyPagination)
 def search_permission(request, keyword: str = Query(None)):
@@ -315,17 +259,6 @@ def export_permission_template(request):
     """
     # TODO: 实现导出功能
     return response_success("导出模板功能待实现")
-
-
-@router.post("/permission/import", summary="导入权限")
-def import_permission(request):
-    """
-    批量导入权限
-    
-    从Excel文件导入权限数据
-    """
-    # TODO: 实现导入功能
-    return response_success("导入功能待实现")
 
 
 @router.get("/permission/all/routes", summary="获取所有可用的 API 路由")
@@ -372,6 +305,74 @@ def debug_get_routes(request):
     debug_info['routes'] = routes[:10]  # 只返回前10个
 
     return debug_info
+
+
+@router.get("/permission/by/menu/{menu_id}", response=List[PermissionSchemaOut], summary="根据菜单ID获取权限")
+def get_permissions_by_menu(request, menu_id: str):
+    """
+    根据菜单ID获取该菜单下的所有权限
+    
+    改进点：
+    - 支持菜单维度的权限查询
+    - 按排序字段排序
+    """
+    permissions = Permission.objects.filter(
+        menu_id=menu_id,
+        is_active=True
+    ).order_by('sort', 'sys_create_datetime')
+    return permissions
+
+
+@router.get("/permission/by/type/{permission_type}", response=List[PermissionSchemaOut], summary="根据类型获取权限")
+def get_permissions_by_type(request, permission_type: int):
+    """
+    根据权限类型获取权限列表
+    
+    Args:
+        permission_type: 0-按钮权限, 1-API权限, 2-数据权限, 3-其他权限
+    """
+    if permission_type not in [0, 1, 2, 3]:
+        raise HttpError(400, "权限类型必须在 0-3 之间")
+
+    permissions = Permission.objects.filter(
+        permission_type=permission_type,
+        is_active=True
+    ).select_related('menu').order_by('menu_id', 'sort')
+    return permissions
+
+
+# 动态路由（必须在静态路由之后定义，避免 search/stats 等被当成 permission_id）
+@router.get("/permission/{permission_id}", response=PermissionSchemaDetail, summary="获取权限详情")
+def get_permission(request, permission_id: str):
+    """获取单个权限的详细信息"""
+    permission = get_object_or_404(
+        Permission.objects.select_related('menu'),
+        id=permission_id
+    )
+    return permission
+
+
+@router.post("/permission/batch/update-status", response=PermissionBatchUpdateStatusOut, summary="批量更新权限状态")
+def batch_update_permission_status(request, data: PermissionBatchUpdateStatusIn):
+    """
+    批量启用或禁用权限
+    
+    改进点：
+    - 支持批量状态管理
+    """
+    count = Permission.objects.filter(id__in=data.ids).update(is_active=data.is_active)
+    return PermissionBatchUpdateStatusOut(count=count)
+
+
+@router.post("/permission/import", summary="导入权限")
+def import_permission(request):
+    """
+    批量导入权限
+    
+    从Excel文件导入权限数据
+    """
+    # TODO: 实现导入功能
+    return response_success("导入功能待实现")
 
 
 @router.post("/permission/batch/create-from-routes", response=PermissionBatchCreateFromRoutesOut,

@@ -119,7 +119,8 @@ def _load_managed_accounts() -> list[dict]:
         })
     if n > 1:
         logger.info(f"[worker] 分片 {i}/{n} 托管 {len(rows)} 账号（跳过其它分片 {skipped} 个）")
-    return rows
+    from core.douyin.runtime.credential import dedupe_managed_accounts_by_session
+    return dedupe_managed_accounts_by_session(rows)
 
 
 @sync_to_async
@@ -405,6 +406,27 @@ def _should_enforce_daily_peer_limit() -> bool:
     线上若要恢复限制，设置 DOUYIN_ENFORCE_DAILY_PEER_REPLY_LIMIT=True。
     """
     return bool(getattr(settings, 'DOUYIN_ENFORCE_DAILY_PEER_REPLY_LIMIT', False))
+
+
+def _login_expire_confirm_times() -> int:
+    """登录失效「二次确认」阈值：连续命中失效信号多少次才真正打回账号。
+
+    >1 时可吸收瞬时抖动 / 签名态短暂失配，避免把仍能接收的好号误打回（误打回代价高：
+    用户要重新导入凭证）。默认 3。设为 1 即恢复「一次失效即打回」的旧行为。
+    """
+    return max(1, int(getattr(settings, 'DOUYIN_LOGIN_EXPIRE_CONFIRM_TIMES', 3) or 3))
+
+
+def _recv_backoff_seconds(streak: int) -> float:
+    """接收侧错误指数退避（含抖动）：连续第 N 次失败时的休眠秒数。
+
+    用于「疑似登录失效二次确认」与「风控/瞬时异常」两条路径，避免一报错就高频重试把
+    抖音风控 / 签名进程池打爆。base * 2^(streak-1) 截到 cap，再叠加 [0,base) 抖动错峰。
+    """
+    base = float(getattr(settings, 'DOUYIN_RECV_BACKOFF_BASE_S', 10) or 10)
+    cap = float(getattr(settings, 'DOUYIN_RECV_BACKOFF_CAP_S', 120) or 120)
+    raw = base * (2 ** max(0, streak - 1))
+    return min(raw, cap) + random.uniform(0, base)
 
 
 # -------------------- Worker 主类 --------------------
@@ -883,6 +905,9 @@ class DouyinWorker:
             'started_at': timezone.now(),
             'login_failures': 0,
             'login_retry_not_before': None,
+            # 接收侧加固：连续失效确认数 / 连续异常数（扫描成功即清零，见下方）
+            'login_expired_streak': 0,
+            'recv_error_streak': 0,
         }
         logger.info(
             f"[worker] ▶ 账号协程启动 account={account_id} nickname={nickname!r} "
@@ -1001,6 +1026,21 @@ class DouyinWorker:
                 self._account_metrics[account_id]['messages_today'] += len(new_msgs)
                 # 扫描成功即视为本路健康，清掉上一次的错误描述，避免面板长期残留旧错误
                 self._account_metrics[account_id]['last_error'] = None
+                # 接收侧加固：扫描成功 = 接收链路健康，撤销「疑似失效」二次确认计数与异常退避计数，
+                # 自愈。之前若进过疑似失效，发一条 info 事件让面板看到它恢复了（缓解"掉线了不知道"）。
+                _m = self._account_metrics[account_id]
+                if _m.get('login_expired_streak'):
+                    logger.info(
+                        f"[worker] 登录态自愈：扫描成功，撤销疑似失效计数 "
+                        f"account={account_id} prev_streak={_m['login_expired_streak']}"
+                    )
+                    await _log_event(
+                        account_id, 'risk_alert', 'info', '登录态自愈恢复',
+                        f"扫描成功，撤销疑似失效（此前已确认 {_m['login_expired_streak']} 次）",
+                        self.worker_id,
+                    )
+                _m['login_expired_streak'] = 0
+                _m['recv_error_streak'] = 0
                 logger.info(
                     f"[worker] #{loop_count} 扫描完成 account={account_id} "
                     f"new_msgs={len(new_msgs)} messages_today={self._account_metrics[account_id]['messages_today']}"
@@ -1082,19 +1122,44 @@ class DouyinWorker:
                 await asyncio.sleep(15)
                 return
             except LoginExpiredError as e:
-                # 明确的登录态失效信号（HTTP 401/403 或显式配置的协议失效码）：
-                # 打回账号 + 标记凭证失效 + WS 推送，引导用户重新导入登录态，停止本轮托管。
-                logger.warning(
-                    f"[worker] 账号登录态失效，打回重新导入 account={account_id} "
-                    f"http={e.http_status} proto={e.proto_status_code} err={e}"
-                )
-                self._account_metrics[account_id]['errors_today'] += 1
-                self._account_metrics[account_id]['last_error'] = (
+                # 明确的登录态失效信号（HTTP 401/403 / 显式配置的协议失效码 / "unexpected
+                # session length"）。但为避免「瞬时抖动 / 签名态短暂失配」把仍能接收的好号
+                # 误打回（误打回 = 逼用户重新导入凭证，代价高），这里做「失效前二次确认 +
+                # 指数退避」：连续确认 N 次（DOUYIN_LOGIN_EXPIRE_CONFIRM_TIMES）才真正打回；
+                # 未达阈值时只发「疑似失效」告警 + 退避重试，扫描一旦成功即自愈清零（见上）。
+                m = self._account_metrics.setdefault(account_id, {})
+                m['errors_today'] = m.get('errors_today', 0) + 1
+                m['last_error'] = (
                     f"登录失效 http={e.http_status} proto={e.proto_status_code}: {e}"
+                )
+                streak = int(m.get('login_expired_streak', 0)) + 1
+                m['login_expired_streak'] = streak
+                confirm = _login_expire_confirm_times()
+                if streak < confirm:
+                    wait = _recv_backoff_seconds(streak)
+                    logger.warning(
+                        f"[worker] 疑似登录失效（{streak}/{confirm}），二次确认中 "
+                        f"account={account_id} http={e.http_status} "
+                        f"proto={e.proto_status_code} 退避 {wait:.0f}s err={e}"
+                    )
+                    await _log_event(
+                        account_id, 'risk_alert', 'warning',
+                        f'疑似登录失效，二次确认中（{streak}/{confirm}）',
+                        f"http={e.http_status} proto={e.proto_status_code}: {e}",
+                        self.worker_id,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                # 连续确认达阈值 → 判定真失效：打回 + 标记凭证失效 + WS 推送，停止本轮托管。
+                logger.warning(
+                    f"[worker] 账号登录态失效（已连续确认 {streak} 次），打回重新导入 "
+                    f"account={account_id} http={e.http_status} "
+                    f"proto={e.proto_status_code} err={e}"
                 )
                 await mark_account_login_invalid(
                     account_id,
-                    f"请求被判定为登录失效（http={e.http_status} proto={e.proto_status_code}）：{e}",
+                    f"请求被判定为登录失效（连续 {streak} 次确认；"
+                    f"http={e.http_status} proto={e.proto_status_code}）：{e}",
                 )
                 await _mark_credential_invalid(
                     account_id,
@@ -1112,11 +1177,24 @@ class DouyinWorker:
                 logger.info(f"[worker] 账号协程被取消 {account_id}")
                 raise
             except Exception as e:  # noqa: BLE001
-                self._account_metrics[account_id]['errors_today'] += 1
-                self._account_metrics[account_id]['last_error'] = f"{type(e).__name__}: {e}"
-                await _log_event(account_id, 'unknown_error', 'error', '账号循环异常', str(e), self.worker_id)
-                logger.exception(f"[worker] account_loop error account={account_id}: {e}")
-                await asyncio.sleep(20)
+                # 风控限流(429/451) / 5xx / 协议层 inconclusive 错误等都走这里：不判失效，
+                # 但用指数退避（连续越错越慢，含抖动）避免高频重试加剧风控；扫描成功即清零。
+                m = self._account_metrics.setdefault(account_id, {})
+                m['errors_today'] = m.get('errors_today', 0) + 1
+                m['last_error'] = f"{type(e).__name__}: {e}"
+                streak = int(m.get('recv_error_streak', 0)) + 1
+                m['recv_error_streak'] = streak
+                wait = _recv_backoff_seconds(streak)
+                await _log_event(
+                    account_id, 'unknown_error', 'error', '账号循环异常',
+                    f"{type(e).__name__}: {e}（连续 {streak} 次，退避 {wait:.0f}s）",
+                    self.worker_id,
+                )
+                logger.exception(
+                    f"[worker] account_loop error account={account_id} "
+                    f"streak={streak} 退避 {wait:.0f}s: {e}"
+                )
+                await asyncio.sleep(wait)
 
     # ---------------- 单消息处理 ----------------
     async def _handle_one_message(

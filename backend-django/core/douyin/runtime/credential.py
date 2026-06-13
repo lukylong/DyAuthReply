@@ -17,8 +17,10 @@
     {
       "cookies": [{"name","value","domain":".douyin.com","path":"/"}, ...],
       "origins": [],
-      "_bd_ticket": {"private_key","ticket","ts_sign","client_cert"}   # 可选
+      "_bd_ticket": {"private_key","ticket","ts_sign","client_cert","csr"}  # 可选
     }
+
+其中 csr（来自 keys 的 ec_csr）用于 bd-ticket 自动续期端点的 certificate 参数。
 """
 from __future__ import annotations
 
@@ -93,12 +95,24 @@ def parse_web_protect(raw: str) -> dict[str, str]:
 
 
 def parse_keys(raw: str) -> dict[str, str]:
-    """解析 keys → {private_key}（即 ec_privateKey）。"""
+    """解析 keys → {private_key, csr}（ec_privateKey 必有；ec_csr 用于 bd-ticket 自动续期）。
+
+    ec_csr 是浏览器生成的证书签名请求（CSR，PEM 文本）。bd-ticket 续期端点
+    （creator.douyin.com/.../im/user_token/v2）要求把它 base64 后作为 `certificate` 参数提交，
+    服务端据此重新签发 sdk_cert / token / ts_sign。早期导入只取了 private_key，这里补上 csr，
+    使后续无需重新抓取即可自动续期；缺失时为空串（老登录态续期会因此跳过，靠告警保底）。
+    """
     if not (raw or "").strip():
         return {}
     inner = _unwrap_data_json(raw)
     priv = inner.get("ec_privateKey") or inner.get("private_key") or ""
-    return {"private_key": str(priv)} if priv else {}
+    if not priv:
+        return {}
+    out = {"private_key": str(priv)}
+    csr = inner.get("ec_csr") or inner.get("csr") or ""
+    if csr:
+        out["csr"] = str(csr)
+    return out
 
 
 # 一键导入串前缀：浏览器扩展把 cookie/web_protect/keys 打包成单行，避免逐项粘贴误操作。
@@ -208,6 +222,9 @@ def merge_storage_state(
     base = base_state or {}
     new_cookies = parse_cookie_header(cookie_str)
     if new_cookies:
+        from core.douyin.runtime.transport.douyin_web_profile import ensure_web_cookie_fields
+
+        new_cookies = ensure_web_cookie_fields(new_cookies)
         cookies = new_cookies
         cookie_list = [
             {"name": k, "value": v, "domain": domain, "path": "/"} for k, v in cookies.items()
@@ -233,6 +250,8 @@ def merge_storage_state(
     ks = parse_keys(keys)
     if ks.get("private_key"):  # 私钥只能显式提供（不在 cookie）
         bd["private_key"] = ks["private_key"]
+    if ks.get("csr"):  # CSR 供 bd-ticket 自动续期（certificate 参数），缺失则续期跳过
+        bd["csr"] = ks["csr"]
     if bd:
         state["_bd_ticket"] = bd
     return state
@@ -263,3 +282,126 @@ def has_send_credential(state: dict[str, Any]) -> bool:
     """判断该 storage_state 是否具备发送私信所需的 bd-ticket 三要素。"""
     bd = (state or {}).get("_bd_ticket") or {}
     return bool(bd.get("private_key") and bd.get("ticket") and bd.get("ts_sign"))
+
+
+def session_fingerprint_from_state(state: dict[str, Any] | None) -> tuple[str, str]:
+    """从 storage_state 提取 (sessionid, uid_tt)，用于多账号 cookie 去重。"""
+    cookies = {
+        c.get("name"): c.get("value", "")
+        for c in (state or {}).get("cookies") or []
+        if c.get("name")
+    }
+    return str(cookies.get("sessionid") or ""), str(cookies.get("uid_tt") or "")
+
+
+def extract_self_uid_from_cookies(cookies: dict[str, str]) -> int:
+    """从 Cookie 键值推断当前登录账号的数字 user_id（profile 拉取兜底）。
+
+    创作者中心登录态常见 ``login_uid``；部分导出还带 ``uid`` / ``user_uid``。
+    """
+    if not cookies:
+        return 0
+    for key in ("login_uid", "uid", "user_uid", "passport_uid"):
+        raw = str(cookies.get(key) or "").strip()
+        if raw.isdigit():
+            try:
+                return int(raw)
+            except ValueError:
+                continue
+    return 0
+
+
+def find_duplicate_session_owner(
+    *,
+    account_id: str,
+    sessionid: str,
+    uid_tt: str = "",
+) -> tuple[str, str, str] | None:
+    """若其它账号已占用相同 sessionid（或 uid_tt），返回 (other_id, other_name, reason)。
+
+    reason 为 ``sessionid`` 或 ``uid_tt``，供错误提示区分匹配依据。
+    """
+    sid = (sessionid or "").strip()
+    if not sid and not (uid_tt or "").strip():
+        return None
+    try:
+        from core.douyin.douyin_account_model import DouyinAccount
+        from core.douyin.runtime.storage import load_storage_state
+    except Exception:  # noqa: BLE001
+        return None
+
+    for acc in DouyinAccount.objects.exclude(id=account_id).filter(is_deleted=False).exclude(status=3):
+        other_st = load_storage_state(str(acc.id))
+        osid, ouid = session_fingerprint_from_state(other_st)
+        if sid and osid == sid:
+            return str(acc.id), str(acc.nickname or acc.id), "sessionid"
+        # uid_tt 作为辅助：sessionid 未命中但 uid 相同也视为同一登录态
+        if uid_tt and ouid and uid_tt == ouid:
+            return str(acc.id), str(acc.nickname or acc.id), "uid_tt"
+    return None
+
+
+def format_duplicate_session_error(
+    *,
+    other_name: str,
+    reason: str,
+    sessionid: str,
+    uid_tt: str = "",
+) -> str:
+    """构造重复登录态拦截说明，附带 sessionid 前缀便于用户自查。"""
+    sid = (sessionid or "").strip()
+    sid_hint = f"{sid[:12]}…" if len(sid) >= 12 else sid or "（空）"
+    if reason == "uid_tt":
+        uid = (uid_tt or "").strip()
+        uid_hint = f"{uid[:12]}…" if len(uid) >= 12 else uid or "（空）"
+        detail = f"uid_tt 相同（{uid_hint}）"
+    else:
+        detail = f"sessionid 相同（{sid_hint}）"
+    return (
+        f"此 Cookie 与账号「{other_name}」是同一抖音登录态（{detail}），"
+        f"不能导入到多个账号槽位。"
+        f"请在浏览器中确认右上角已登录的是目标账号后再导出；"
+        f"无痕窗口若仍导出到相同 sessionid，说明实际登录的还是「{other_name}」。"
+        f"也可先删除「{other_name}」槽位后再导入（不推荐，会丢失该槽位配置）。"
+    )
+
+
+def dedupe_managed_accounts_by_session(rows: list[dict]) -> list[dict]:
+    """同一 sessionid 只保留一个账号托管（priority 高 → sort 高 → id 小 优先）。
+
+    防止多账号槽位导入同一套 cookie 后，worker 双协程扫同一 inbox、重复自动回复。
+    """
+    import logging
+
+    from core.douyin.runtime.storage import load_storage_state
+
+    log = logging.getLogger(__name__)
+    if not rows:
+        return rows
+
+    ordered = sorted(
+        rows,
+        key=lambda x: (-int(x.get("priority") or 0), str(x.get("id") or "")),
+    )
+    kept: list[dict] = []
+    session_owner: dict[str, str] = {}  # sessionid -> kept account_id
+
+    for row in ordered:
+        st = load_storage_state(row["id"])
+        sid, _uid = session_fingerprint_from_state(st)
+        if sid:
+            owner = session_owner.get(sid)
+            if owner:
+                log.warning(
+                    f"[credential] 跳过重复 session 账号 nickname={row.get('nickname')!r} "
+                    f"id={row['id'][:8]}… 与 id={owner[:8]}… 共用 sessionid={sid[:12]}…"
+                )
+                continue
+            session_owner[sid] = row["id"]
+        kept.append(row)
+
+    if len(kept) < len(rows):
+        log.warning(
+            f"[credential] session 去重：{len(rows)} 个候选 → 托管 {len(kept)} 个"
+        )
+    return kept

@@ -41,7 +41,7 @@ class DouyinAccountLogoutApiTests(SimpleTestCase):
             douyin_account_api.trigger_logout(request, "acc-1")
 
         self.assertIn("sec_uid", captured["update_fields"])
-        self.assertEqual(account.sec_uid, "")
+        self.assertEqual(account.sec_uid, None)
         self.assertEqual(account.status, 0)
         self.assertEqual(account.storage_state_path, "")
         send_logout.assert_called_once_with("acc-1")

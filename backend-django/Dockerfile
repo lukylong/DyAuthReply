@@ -1,11 +1,10 @@
 # syntax=docker/dockerfile:1.7
 #
 # zq-platform backend-django image
-# 基础镜像选择 Playwright 官方镜像 —— 已预装 Chromium / 字体 / libnss3 等依赖，
-# 无需再手动 apt-get，后续 `core.douyin` worker 可直接跑浏览器自动化。
-# 若不需要抖音模块，可把 FROM 换成 python:3.11-slim 以获得更小体积。
+# 抖音模块已全面转为纯 HTTP 协议（JS 签名 dy_ab.js，无 Chromium/Playwright），
+# 因此基础镜像用 python:3.11-slim：体积小，仅需 Node（跑 dy_ab.js）+ 少量系统库。
 
-FROM mcr.microsoft.com/playwright/python:v1.48.0-jammy AS base
+FROM python:3.11-slim-bookworm AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -18,8 +17,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # 系统依赖（psycopg2-binary 已含 C 库，无需 libpq-dev；保留 tzdata 用于正确时区）
-# 换清华源加速 apt；tzdata 预置 debconf 完全无人值守
-RUN sed -i 's|http://archive.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g; s|http://security.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list \
+# 换清华源加速 apt（Debian bookworm，deb822 格式）；tzdata 预置 debconf 无人值守
+RUN ( sed -i 's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g; s|http://security.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true ) \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo $TZ > /etc/timezone \
     && echo "tzdata tzdata/Areas select Asia" | debconf-set-selections \
@@ -34,11 +33,6 @@ RUN sed -i 's|http://archive.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g; 
         build-essential \
         pkg-config \
         unixodbc-dev \
-        xvfb \
-        x11vnc \
-        fluxbox \
-        novnc \
-        websockify \
         fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
@@ -82,7 +76,7 @@ RUN mkdir -p /app/logs /var/lib/zq-platform/douyin
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 8000 5900 6080
+EXPOSE 8000
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["web"]

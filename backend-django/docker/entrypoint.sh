@@ -5,44 +5,6 @@ set -euo pipefail
 
 ROLE="${1:-${ROLE:-web}}"
 
-start_visual_stack() {
-    local display="${DISPLAY:-:99}"
-    local display_num="${display#:}"
-    local geometry="${DOUYIN_XVFB_GEOMETRY:-1440x900x24}"
-    local novnc_port="${DOUYIN_NOVNC_PORT:-6080}"
-    local vnc_port="${DOUYIN_VNC_PORT:-5900}"
-    local vnc_password="${DOUYIN_VNC_PASSWORD:-}"
-
-    pkill -f "Xvfb ${display}" 2>/dev/null || true
-    pkill -f "x11vnc -display ${display}" 2>/dev/null || true
-    pkill -f "websockify --web=/usr/share/novnc/ ${novnc_port}" 2>/dev/null || true
-    pkill fluxbox 2>/dev/null || true
-    rm -f "/tmp/.X${display_num}-lock" "/tmp/.X11-unix/X${display_num}"
-
-    echo "🖥️  启动虚拟桌面 DISPLAY=${display} geometry=${geometry}"
-    Xvfb "${display}" -screen 0 "${geometry}" -ac +extension RANDR >/tmp/xvfb.log 2>&1 &
-    export DISPLAY="${display}"
-    sleep 2
-    if ! pgrep -f "Xvfb ${display}" >/dev/null; then
-        echo "❌ Xvfb 启动失败"
-        cat /tmp/xvfb.log || true
-        exit 1
-    fi
-
-    fluxbox >/tmp/fluxbox.log 2>&1 &
-
-    if [[ -n "${vnc_password}" ]]; then
-        mkdir -p /tmp/x11vnc
-        x11vnc -storepasswd "${vnc_password}" /tmp/x11vnc/passwd >/tmp/x11vnc-passwd.log 2>&1
-        x11vnc -display "${display}" -rfbport "${vnc_port}" -rfbauth /tmp/x11vnc/passwd -forever -shared >/tmp/x11vnc.log 2>&1 &
-    else
-        x11vnc -display "${display}" -rfbport "${vnc_port}" -nopw -forever -shared >/tmp/x11vnc.log 2>&1 &
-    fi
-
-    websockify --web=/usr/share/novnc/ "${novnc_port}" "127.0.0.1:${vnc_port}" >/tmp/novnc.log 2>&1 &
-    echo "🌐 noVNC 已就绪: http://<host>:${novnc_port}/vnc.html"
-}
-
 # -------------------------------------------------------------
 # 等待依赖服务（PostgreSQL / Redis）
 # -------------------------------------------------------------
@@ -102,11 +64,7 @@ case "${ROLE}" in
         exec python start_scheduler.py
         ;;
     douyin-worker)
-        echo "🤖 启动抖音 worker（M2 里程碑，占位）"
-        if [[ "${DOUYIN_ENABLE_VIRTUAL_DISPLAY:-true}" == "true" ]]; then
-            start_visual_stack
-        fi
-        # TODO(M2): 换为 `exec python start_douyin_worker.py`
+        echo "🤖 启动抖音 worker（纯 HTTP 协议，无浏览器）"
         if [[ -f "start_douyin_worker.py" ]]; then
             exec python start_douyin_worker.py
         else

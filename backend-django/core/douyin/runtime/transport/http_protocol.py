@@ -39,7 +39,6 @@ from core.douyin.runtime.reply_helpers import (
 )
 from core.douyin.runtime.send_template_cache import load_cached_send_template
 from core.douyin.runtime.transport.base import AccountTransport
-from core.douyin.runtime.transport.browser import BrowserTransport
 from core.douyin.runtime.transport.wire.codec import (
     get_first_bytes,
     get_first_str,
@@ -48,9 +47,6 @@ from core.douyin.runtime.transport.wire.codec import (
 from core.douyin.runtime.transport.sign_types import (
     SignedResponse,
     SignerUnavailable,
-)
-from core.douyin.runtime.transport.sign_provider import (
-    SignProvider,
 )
 from core.douyin.runtime.transport.wire import (
     SendMessageResult,
@@ -290,49 +286,46 @@ _BASE_CREATOR_JSON_HEADERS: dict[str, str] = {
 
 def _build_default_sign_provider():
     """
-    按 DOUYIN_SIGN_BACKEND 选择签名后端（默认 browser，零回归）：
+    按 DOUYIN_SIGN_BACKEND 选择签名后端（脱浏览器，默认 js）：
 
-      - 'browser'（默认）: SignProvider —— 浏览器内 fetch，前端拦截器自动注入签名头
-      - 'local'           : LocalSignProvider —— 纯 Python 本地算 a_bogus + msToken，
-                            httpx 带 cookie/代理直发（脱浏览器，但缺 bd-ticket-guard）
-      - 'js'              : JsSignProvider —— PyExecJS 执行 vendored dy_ab.js，
-                            a_bogus + bd-ticket-guard 齐全（脱浏览器，私信可发，推荐）
+      - 'js'（默认）: JsSignProvider —— PyExecJS 执行 vendored dy_ab.js，
+                      a_bogus + bd-ticket-guard 齐全（私信可收可发，推荐）
+      - 'local'     : LocalSignProvider —— 纯 Python 算 a_bogus + msToken，
+                      但缺 bd-ticket-guard，私信发送大概率签不出
 
-    注意：local/js 是灰度路径，imapi 是否接受需用真实 cookie/抓包验证（关键闸门）。
-    未就绪/失败时 HttpProtocolTransport 仍会按现有逻辑 fallback 到 BrowserTransport。
+    历史的 'browser' 后端（浏览器内 fetch 注入签名）已随浏览器子系统一并移除。
     """
-    backend = "browser"
+    backend = "js"
     try:
         from django.conf import settings as _s
-        backend = str(getattr(_s, "DOUYIN_SIGN_BACKEND", "browser") or "browser").lower()
+        backend = str(getattr(_s, "DOUYIN_SIGN_BACKEND", "js") or "js").lower()
     except Exception:  # noqa: BLE001
-        backend = "browser"
-
-    if backend == "js":
-        from core.douyin.runtime.transport.js_sign_provider import JsSignProvider
-        logger.info(
-            "[transport.http] 签名后端 = js（JsSignProvider：dy_ab.js + bd-ticket-guard，无浏览器）"
-        )
-        return JsSignProvider()
+        backend = "js"
 
     if backend == "local":
         from core.douyin.runtime.transport.local_sign_provider import LocalSignProvider
         logger.info("[transport.http] 签名后端 = local（LocalSignProvider，无浏览器）")
         return LocalSignProvider()
 
-    logger.info("[transport.http] 签名后端 = browser（SignProvider）")
-    return SignProvider()
+    if backend not in ("js", ""):
+        logger.warning(
+            f"[transport.http] 未知/已废弃签名后端 {backend!r}（browser 已移除），回退 js"
+        )
+    from core.douyin.runtime.transport.js_sign_provider import JsSignProvider
+    logger.info(
+        "[transport.http] 签名后端 = js（JsSignProvider：dy_ab.js + bd-ticket-guard，无浏览器）"
+    )
+    return JsSignProvider()
 
 
 class HttpProtocolTransport(AccountTransport):
     """
-    Hybrid HTTP 协议 transport：浏览器只做签名 + cookie 维护，
-    业务流量走 Python httpx；不可用时自动 fallback 到 BrowserTransport。
+    纯 HTTP 协议 transport：JS 签名（dy_ab.js）+ httpx 业务流量，无浏览器。
 
     特性：
       - 完全实现 AccountTransport 契约（worker 可以无缝替换）
-      - 失败/未实现自动 fallback（灰度安全）
-      - 失败 streak > N 时主动停用本 transport，让 worker 切回 browser
+      - 所有 verb 只走 HTTP 协议路径；失败直接抛错（无 DOM/浏览器兜底）
+      - 失败 streak > N 时 signer 进入降级，verb 抛错由 worker 记错重试
     """
 
     name = "http_protocol"
@@ -340,16 +333,13 @@ class HttpProtocolTransport(AccountTransport):
     def __init__(
         self,
         *,
-        sign_provider: Optional[SignProvider] = None,
-        fallback: Optional[AccountTransport] = None,
+        sign_provider: Optional[Any] = None,
         max_signer_failures: int = 5,
         send_text_enabled: Optional[bool] = None,
         send_reply_enabled: Optional[bool] = None,
         scan_inbox_enabled: Optional[bool] = None,
     ) -> None:
         self._sign = sign_provider or _build_default_sign_provider()
-        # fallback 默认就是 BrowserTransport —— 它已经被 worker / sender 验证过
-        self._fallback: AccountTransport = fallback or BrowserTransport()
         self._max_signer_failures = int(max_signer_failures)
         self._signer_failures = 0
 
@@ -384,14 +374,6 @@ class HttpProtocolTransport(AccountTransport):
         # 注：这是进程内状态，worker 重启会丢，重启后第一轮等同于 cursor=0。
         # 真要持久化，可以接 redis 或 DouyinAccount.last_scan_cursor_us 字段。
         self._scan_cursor_us: dict[str, int] = {}
-        # fallback(BrowserTransport) 是否会在运行时被用到：
-        #   - send/scan 任一非 strict（失败需降级 DOM），或
-        #   - scan dual-run（影子对账主路径仍走 DOM）
-        # strict 全开且无 dual-run 时为 False —— 纯协议，不再持有/启动浏览器兜底。
-        self._fallback_active = (
-            self._http_scan_inbox_dual_run
-            or not (self._http_send_strict and self._http_scan_strict)
-        )
 
     @staticmethod
     def _resolve_flag(explicit: Optional[bool], setting_name: str) -> bool:
@@ -406,14 +388,6 @@ class HttpProtocolTransport(AccountTransport):
 
     # ---------------- 生命周期 ----------------
     async def start(self, account: "DouyinAccount") -> None:
-        # 纯协议(strict 全开且无 dual-run)下不启动 fallback，避免持有浏览器兜底资源。
-        if self._fallback_active:
-            try:
-                await self._fallback.start(account)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(
-                    f"[transport.http] fallback.start 异常 account={account.id} err={e}"
-                )
         try:
             await self._sign.start(account)
         except Exception as e:  # noqa: BLE001
@@ -432,17 +406,12 @@ class HttpProtocolTransport(AccountTransport):
         )
 
     async def stop(self, account: "DouyinAccount") -> None:
-        with_errs = []
-        _stop_items = [("sign", self._sign.stop(account))]
-        if self._fallback_active:
-            _stop_items.append(("fallback", self._fallback.stop(account)))
-        for label, awaitable in _stop_items:
-            try:
-                await awaitable
-            except Exception as e:  # noqa: BLE001
-                with_errs.append(f"{label}={type(e).__name__}")
-        if with_errs:
-            logger.warning(f"[transport.http] stop 部分失败 account={account.id} errs={with_errs}")
+        try:
+            await self._sign.stop(account)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"[transport.http] stop 部分失败 account={account.id} err={type(e).__name__}"
+            )
 
     # ---------------- 主 verbs ----------------
     async def scan_inbox(
@@ -493,58 +462,11 @@ class HttpProtocolTransport(AccountTransport):
                     f"account={account.id} err={type(e).__name__}: {e}"
                 )
 
-        # 模式 2：dual-run 影子（SCAN_INBOX_DUAL_RUN=true 且 主开关 false）
-        # 主路径走 fallback；HTTP 解析作为旁路 dry_run 输出对账日志，零落库副作用
-        # —— 关键：dry_run 与 fallback **并行**起跑（不再等 fallback 5-10 分钟跑完）
-        #   ① fallback browser scan：DOM + 滚动 + 多 tab，几分钟
-        #   ② HTTP dry_run scan：一次 HTTP 几秒返回
-        #   并行起跑后，每轮 scan 完成时立刻能看到对账日志
-        dry_run_task: Optional[asyncio.Task] = None
-        if self._http_scan_inbox_dual_run and self._signer_healthy():
-            try:
-                impl_kwargs = {
-                    "max_conversations": max_conversations,
-                    "include_recent_without_unread": include_recent_without_unread,
-                    "dry_run": True,
-                }
-                if conversation_hint:
-                    impl_kwargs["conversation_hint"] = conversation_hint
-                dry_run_task = asyncio.create_task(
-                    self._impl_scan_inbox_via_http(
-                        account,
-                        **impl_kwargs,
-                    ),
-                    name=f"http_scan_dry_run[{account.id}]",
-                )
-            except Exception as e:  # noqa: BLE001
-                logger.warning(
-                    f"[transport.http] scan_inbox dual_run 调度失败 "
-                    f"account={account.id} err={type(e).__name__}: {e}"
-                )
-                dry_run_task = None
-
-        fallback_result = await self._fallback.scan_inbox(
-            account,
-            max_conversations=max_conversations,
-            include_recent_without_unread=include_recent_without_unread,
-            conversation_hint=conversation_hint,
+        # 无浏览器兜底：到这里说明 scan 未启用或 signer 不可用，直接抛错让 worker 记录并重试。
+        raise RuntimeError(
+            f"HTTP scan_inbox 不可用（enabled={self._http_scan_inbox_enabled} "
+            f"signer_ready={self._sign.is_ready} failures={self._signer_failures}）"
         )
-
-        if dry_run_task is not None:
-            # 等 dry_run 完成（HTTP 比 fallback 快得多，到这里基本已 done）
-            try:
-                await dry_run_task
-            except Exception as e:  # noqa: BLE001
-                logger.warning(
-                    f"[transport.http.dual_run] HTTP dry_run task 异常 "
-                    f"account={account.id} err={type(e).__name__}: {e}"
-                )
-            else:
-                # _impl_scan_inbox_via_http(dry_run=True) 已把候选挂在 self._last_dry_run_candidates
-                # 这里同步做集合比对并打日志，不再异步派发，确保每轮 scan 完成立刻输出
-                self._do_dual_run_compare(account, fallback_result)
-
-        return fallback_result
 
     async def send_reply(
         self,
@@ -580,21 +502,13 @@ class HttpProtocolTransport(AccountTransport):
             except ValueError:
                 raise
             except Exception as e:  # noqa: BLE001
-                if self._http_send_strict:
-                    raise RuntimeError(
-                        f"HTTP send_reply 严格模式失败: {type(e).__name__}: {e}"
-                    ) from e
-                logger.warning(
-                    f"[transport.http] send_reply 协议路径异常，fallback browser "
-                    f"account={account.id} err={type(e).__name__}: {e}"
-                )
-        return await self._fallback.send_reply(
-            account,
-            page,
-            conversation_id=conversation_id,
-            trigger_message_id=trigger_message_id,
-            rule=rule,
-            peer_nickname=peer_nickname,
+                raise RuntimeError(
+                    f"HTTP send_reply 失败: {type(e).__name__}: {e}"
+                ) from e
+        # 无浏览器兜底：send_reply 未启用或 signer 不可用，直接抛错。
+        raise RuntimeError(
+            f"HTTP send_reply 不可用（enabled={self._http_send_reply_enabled} "
+            f"signer_ready={self._sign.is_ready}）"
         )
 
     async def send_text(
@@ -625,24 +539,16 @@ class HttpProtocolTransport(AccountTransport):
                         f"HTTP send_text 严格模式失败（signer 不可用）: {e}"
                     ) from e
             except ValueError:
-                # 调用方传错参数（空 text / 空 conv），透传——fallback 也救不了
+                # 调用方传错参数（空 text / 空 conv），透传
                 raise
             except Exception as e:  # noqa: BLE001
-                if self._http_send_strict:
-                    raise RuntimeError(
-                        f"HTTP send_text 严格模式失败: {type(e).__name__}: {e}"
-                    ) from e
-                # HTTP 失败 / 解码失败 / 协议状态非 0 —— 主动降级到 browser
-                # 双发风险靠 worker 的 _recent_outbound_texts 90s 去重兜住
-                logger.warning(
-                    f"[transport.http] send_text 协议路径异常，fallback browser "
-                    f"account={account.id} err={type(e).__name__}: {e}"
-                )
-        return await self._fallback.send_text(
-            account,
-            page,
-            conversation_id=conversation_id,
-            text=text,
+                raise RuntimeError(
+                    f"HTTP send_text 失败: {type(e).__name__}: {e}"
+                ) from e
+        # 无浏览器兜底：send_text 未启用或 signer 不可用，直接抛错。
+        raise RuntimeError(
+            f"HTTP send_text 不可用（enabled={self._http_send_text_enabled} "
+            f"signer_ready={self._sign.is_ready}）"
         )
 
     # ---------------- 内部：信号 / 健康 ----------------

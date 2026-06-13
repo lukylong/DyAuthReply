@@ -382,6 +382,14 @@ class HttpProtocolTransport(AccountTransport):
         # 注：这是进程内状态，worker 重启会丢，重启后第一轮等同于 cursor=0。
         # 真要持久化，可以接 redis 或 DouyinAccount.last_scan_cursor_us 字段。
         self._scan_cursor_us: dict[str, int] = {}
+        # fallback(BrowserTransport) 是否会在运行时被用到：
+        #   - send/scan 任一非 strict（失败需降级 DOM），或
+        #   - scan dual-run（影子对账主路径仍走 DOM）
+        # strict 全开且无 dual-run 时为 False —— 纯协议，不再持有/启动浏览器兜底。
+        self._fallback_active = (
+            self._http_scan_inbox_dual_run
+            or not (self._http_send_strict and self._http_scan_strict)
+        )
 
     @staticmethod
     def _resolve_flag(explicit: Optional[bool], setting_name: str) -> bool:
@@ -396,13 +404,14 @@ class HttpProtocolTransport(AccountTransport):
 
     # ---------------- 生命周期 ----------------
     async def start(self, account: "DouyinAccount") -> None:
-        # 同时启动 fallback（确保 BrowserContext 在）和 SignProvider（signer page）
-        try:
-            await self._fallback.start(account)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                f"[transport.http] fallback.start 异常 account={account.id} err={e}"
-            )
+        # 纯协议(strict 全开且无 dual-run)下不启动 fallback，避免持有浏览器兜底资源。
+        if self._fallback_active:
+            try:
+                await self._fallback.start(account)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    f"[transport.http] fallback.start 异常 account={account.id} err={e}"
+                )
         try:
             await self._sign.start(account)
         except Exception as e:  # noqa: BLE001
@@ -422,10 +431,10 @@ class HttpProtocolTransport(AccountTransport):
 
     async def stop(self, account: "DouyinAccount") -> None:
         with_errs = []
-        for label, awaitable in (
-            ("sign", self._sign.stop(account)),
-            ("fallback", self._fallback.stop(account)),
-        ):
+        _stop_items = [("sign", self._sign.stop(account))]
+        if self._fallback_active:
+            _stop_items.append(("fallback", self._fallback.stop(account)))
+        for label, awaitable in _stop_items:
             try:
                 await awaitable
             except Exception as e:  # noqa: BLE001

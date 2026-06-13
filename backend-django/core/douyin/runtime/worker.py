@@ -808,65 +808,15 @@ class DouyinWorker:
             logger.warning(f"[worker] manual_reply 忽略：账号或会话不存在 account={account_id} conv={conversation_id}")
             return
 
-        # 走 transport.send_text 抽象层；BrowserTransport 用 Playwright，
-        # 未来 HttpProtocolTransport 切走也是同一个 verb（与自动回复保持一致）。
+        # 纯协议手动回复：与自动回复同一个 send_text verb，page=None，
+        # 由 HttpProtocolTransport 用 platform_conversation_id 直发，不再开浏览器/定位 DOM。
         transport = await self._get_or_create_transport(account)
-        context = await BrowserManager.get_or_create_context(account)
-        page = await context.new_page()
         normalized_text = text.strip()
         try:
-            from core.douyin.runtime import selectors as S
-            for im_url in getattr(S, 'CREATOR_IM_CANDIDATES', [S.CREATOR_IM]):
-                await page.goto(im_url, wait_until='domcontentloaded', timeout=30000)
-                await asyncio.sleep(2)
-                if page.url.startswith(im_url) or 'following/chat' in page.url or '/im' in page.url:
-                    break
-
-            target_nick = conv.peer_nickname or ''
-            target_preview = (conv.last_message_preview or '').strip()
-            item, tab_label = await _find_conversation_item_across_tabs(
-                page,
-                target_nick=target_nick,
-                target_preview=target_preview,
-            )
-            if item is None:
-                raise RuntimeError(f"未找到手动回复目标会话：{conv.peer_nickname or conv.peer_sec_uid}")
-            logger.info(
-                f"[reply] 找到手动回复目标会话 account={account_id} "
-                f"tab={tab_label} peer={conv.peer_nickname!r}"
-            )
-            await human_click(item)
-            await asyncio.sleep(1.0)
-            before_debug = await dump_manual_reply_debug(
-                page,
-                account_id=account_id,
+            log_id = await transport.send_text(
+                account,
+                None,
                 conversation_id=conversation_id,
-                phase='before_send',
-                text=normalized_text,
-            )
-            logger.info(f"[reply] 手动回复发送前证据 account={account_id} path={before_debug}")
-            try:
-                await transport.send_text(
-                    account,
-                    page,
-                    conversation_id=conversation_id,
-                    text=normalized_text,
-                )
-            except Exception:
-                after_debug = await dump_manual_reply_debug(
-                    page,
-                    account_id=account_id,
-                    conversation_id=conversation_id,
-                    phase='after_send_missing',
-                    text=normalized_text,
-                )
-                logger.warning(f"[reply] 手动回复发送后未确认，证据 account={account_id} path={after_debug}")
-                raise
-            after_debug = await dump_manual_reply_debug(
-                page,
-                account_id=account_id,
-                conversation_id=conversation_id,
-                phase='after_send_confirmed',
                 text=normalized_text,
             )
             await push_to_user(account.owner_id, 'reply_sent', {
@@ -877,7 +827,7 @@ class DouyinWorker:
             })
             logger.info(
                 f"[reply] ✔ 手动回复成功 account={account_id} peer={conv.peer_nickname!r} "
-                f"conv={conversation_id} debug={after_debug}"
+                f"conv={conversation_id} log={log_id}"
             )
         except Exception as e:  # noqa: BLE001
             logger.exception(f"[reply] ✘ 手动回复失败 account={account_id} conv={conversation_id}: {e}")
@@ -886,9 +836,6 @@ class DouyinWorker:
                 'peer_nickname': conv.peer_nickname,
                 'error': str(e),
             })
-        finally:
-            with suppress(Exception):
-                await page.close()
 
     async def _run_manual_auto_reply_test(self, account_id: str, *, conversation_id: str, text: str) -> None:
         if not conversation_id or not text.strip():
@@ -1012,7 +959,13 @@ class DouyinWorker:
                     )
                     await asyncio.sleep(30)
                     continue
-                if loop_count == 1 or loop_count % 10 == 0:
+                # 纯协议(http_protocol)模式不再用浏览器打开创作者中心校验登录态
+                # （会拉起 Chromium，与脱浏览器目标冲突）；cookie 失效改由 scan_inbox
+                # 的 HTTP 调用失败来暴露。仅 browser 后端保留此浏览器校验。
+                _login_check_needs_browser = str(
+                    getattr(settings, 'DOUYIN_TRANSPORT_BACKEND', 'browser') or 'browser'
+                ).lower() != 'http_protocol'
+                if _login_check_needs_browser and (loop_count == 1 or loop_count % 10 == 0):
                     valid = await is_login_valid(acc_row)
                     if not valid:
                         logger.warning(
@@ -1244,107 +1197,22 @@ class DouyinWorker:
                              f"rule={rule.name}", self.worker_id)
             return
 
-        # 发送优先走 transport 直发（http_protocol 可不依赖页面会话定位）；
-        # 若直发失败，再降级到 DOM 定位会话后发送，兼容 browser 路径与兜底。
-        page = None
+        # 纯协议发送：transport 直发，不依赖页面会话定位；失败直接记错不回退 DOM。
         transport_conversation_id = (
             str((msg.raw or {}).get('conversation_id') or '').strip()
             or msg.conversation_id
         )
         try:
             transport = await self._get_or_create_transport(account)
-            http_send_reply_enabled = bool(
-                getattr(settings, "DOUYIN_HTTP_PROTOCOL_SEND_REPLY", False)
+            # 纯协议直发：失败直接抛到外层 except 记错，不再回退 DOM/Chromium
+            log_id = await transport.send_reply(
+                account,
+                None,
+                conversation_id=transport_conversation_id,
+                trigger_message_id=msg.message_id,
+                rule=rule,
+                peer_nickname=msg.peer_nickname or '',
             )
-            try:
-                if not http_send_reply_enabled:
-                    raise RuntimeError("HTTP send_reply 已关闭，直接走 DOM 会话定位发送")
-                log_id = await transport.send_reply(
-                    account,
-                    None,
-                    conversation_id=transport_conversation_id,
-                    trigger_message_id=msg.message_id,
-                    rule=rule,
-                    peer_nickname=msg.peer_nickname or '',
-                )
-            except Exception as direct_err:  # noqa: BLE001
-                if (
-                    http_send_reply_enabled
-                    and bool(getattr(settings, "DOUYIN_HTTP_PROTOCOL_SEND_STRICT", False))
-                ):
-                    # 严格模式：发送只允许 HTTP 协议路径，不允许回退 DOM 输入框。
-                    raise
-                logger.info(
-                    f"[reply] 直发未完成，回退 DOM 会话定位 account={account_id} "
-                    f"peer={peer!r} reason={type(direct_err).__name__}: {direct_err}"
-                )
-                from core.douyin.runtime import selectors as S
-
-                context = await BrowserManager.get_or_create_context(account)
-                page = await context.new_page()
-                logger.info(f"[reply] 打开 IM 页面 account={account_id}")
-                for im_url in getattr(S, 'CREATOR_IM_CANDIDATES', [S.CREATOR_IM]):
-                    await page.goto(im_url, wait_until='domcontentloaded', timeout=30000)
-                    await asyncio.sleep(2)
-                    if page.url.startswith(im_url) or 'following/chat' in page.url or '/im' in page.url:
-                        break
-
-                target_nick = msg.peer_nickname or ''
-                target_preview = (msg.text or '').strip()
-                fallback_err = None
-                for attempt in range(1, 4):
-                    item, tab_label = await _find_conversation_item_across_tabs(
-                        page,
-                        target_nick=target_nick,
-                        target_preview=target_preview,
-                    )
-                    if item is None:
-                        fallback_err = RuntimeError(f"未找到对方会话：nickname={msg.peer_nickname}")
-                        logger.info(
-                            f"[reply] DOM 回退第 {attempt}/3 次未定位会话 account={account_id} "
-                            f"peer={peer!r} nick={target_nick!r} preview={target_preview[:24]!r}"
-                        )
-                        await asyncio.sleep(1.0)
-                        continue
-
-                    logger.info(
-                        f"[reply] 点击会话成功 account={account_id} peer={peer!r} tab={tab_label} "
-                        f"attempt={attempt}/3"
-                    )
-                    await human_click(item)
-                    await asyncio.sleep(1.8)
-                    if not await _wait_im_input_ready(page, timeout_ms=5000):
-                        fallback_err = RuntimeError("会话已点击但输入框未就绪")
-                        logger.warning(
-                            f"[reply] DOM 回退第 {attempt}/3 次输入框未就绪 account={account_id} "
-                            f"peer={peer!r}"
-                        )
-                        await asyncio.sleep(1.0)
-                        continue
-                    try:
-                        log_id = await transport.send_reply(
-                            account,
-                            page,
-                            conversation_id=transport_conversation_id,
-                            trigger_message_id=msg.message_id,
-                            rule=rule,
-                            peer_nickname=msg.peer_nickname or '',
-                        )
-                        fallback_err = None
-                        break
-                    except Exception as send_err:  # noqa: BLE001
-                        fallback_err = send_err
-                        logger.warning(
-                            f"[reply] DOM 回退第 {attempt}/3 次发送失败 account={account_id} "
-                            f"peer={peer!r} err={type(send_err).__name__}: {send_err}"
-                        )
-                        if "未找到输入框" in str(send_err):
-                            # 输入框通常是页面尚未完成会话切换，短等后再重试一次定位+点击。
-                            await asyncio.sleep(1.2)
-                            continue
-                        raise
-                if fallback_err is not None:
-                    raise fallback_err from direct_err
             self._account_metrics[account_id]['replies_today'] += 1
             logger.info(
                 f"[reply] ✔ 回复成功 account={account_id} peer={peer!r} "
@@ -1370,10 +1238,6 @@ class DouyinWorker:
                 'peer_nickname': msg.peer_nickname,
                 'error': str(e),
             })
-        finally:
-            if page is not None:
-                with suppress(Exception):
-                    await page.close()
 
     # ---------------- 基础设施 ----------------
     async def _connect_redis(self) -> None:

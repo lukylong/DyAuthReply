@@ -391,11 +391,12 @@ _MSG_F_SENDER_SEC_UID = 14
 
 
 def _decode_text_from_content_json(content_json: str) -> str:
-    """从 content_json 安全提取 text 字段。失败返回空串。
+    """从 content_json 安全提取可回复文本。失败返回空串。
 
     抖音 IM 的 content 永远是 JSON 字符串，常见结构：
       {"text":"hello"} —— 普通文本
       {"text":"...", "richTextInfos":[...], "mention_users":[...], "ai_ext":"{}", ...}
+      {"emoji":...} / {"sticker":...} —— 纯表情 / 贴纸，无 text，但仍是用户入向消息
     """
     if not content_json:
         return ""
@@ -406,7 +407,18 @@ def _decode_text_from_content_json(content_json: str) -> str:
     if not isinstance(obj, dict):
         return ""
     val = obj.get("text")
-    return val if isinstance(val, str) else ""
+    if isinstance(val, str) and val.strip():
+        return val
+
+    # 纯表情/贴纸类消息通常没有 text 字段。生成稳定占位文本，让兜底规则可触发；
+    # 不对 command_type / trace / ext-only 系统消息兜底，避免把已读、链接卡片扩展等误当用户消息。
+    if any(k in obj for k in ("emoji", "sticker", "emoticon", "emoticon_id")):
+        return "[表情]"
+    if any(k in obj for k in ("image", "image_url", "picture")):
+        return "[图片]"
+    if any(k in obj for k in ("video", "video_url")):
+        return "[视频]"
+    return ""
 
 
 def _decode_client_msg_id_from_ext(ext_payloads: list[bytes]) -> str:

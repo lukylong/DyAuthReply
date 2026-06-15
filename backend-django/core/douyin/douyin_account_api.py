@@ -18,6 +18,8 @@ from common.fu_pagination import MyPagination
 from core.douyin.douyin_account_model import DouyinAccount
 from core.douyin.runtime import command_publisher
 from core.douyin.douyin_account_schema import (
+    CheckCredentialIn,
+    CheckCredentialOut,
     CredentialStatusOut,
     DouyinAccountActionOut,
     DouyinAccountBatchDeleteIn,
@@ -67,6 +69,11 @@ def _apply_fetched_profile(
                 f"该抖音号已被账号「{conflict.nickname}」占用，请勿重复导入同一登录态",
             )
         account.sec_uid = sec_uid
+
+    # 保存 unique_id（抖音号）
+    if profile.get("unique_id"):
+        account.unique_id = str(profile["unique_id"])
+
     if nickname_override and profile.get("nickname"):
         account.nickname = str(profile["nickname"])
     if profile.get("avatar"):
@@ -104,6 +111,44 @@ def _fetch_account_profile(account: DouyinAccount, *, timeout_s: float = 25):
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[account] 获取账号信息失败 account={account.id} err={e}")
         return None
+
+
+def _fetch_account_profile_with_retry(account: DouyinAccount, *, max_retries: int = 3, timeout_s: float = 20):
+    """带重试的 profile 拉取，最多尝试 max_retries 次。
+
+    Args:
+        account: 账号对象
+        max_retries: 最大重试次数（默认 3 次）
+        timeout_s: 每次尝试的超时时间（默认 20 秒）
+
+    Returns:
+        profile dict 或 None
+    """
+    import logging
+    import time
+
+    logger = logging.getLogger(__name__)
+
+    for attempt in range(max_retries):
+        profile = _fetch_account_profile(account, timeout_s=timeout_s)
+        if profile:
+            if attempt > 0:
+                logger.info(
+                    f"[account] profile 拉取成功（重试 {attempt} 次后）account={account.id}"
+                )
+            return profile
+
+        if attempt < max_retries - 1:
+            logger.warning(
+                f"[account] profile 拉取失败，将重试 account={account.id} "
+                f"attempt={attempt + 1}/{max_retries}"
+            )
+            time.sleep(2)  # 短暂延迟避免立即重试
+
+    logger.warning(
+        f"[account] profile 拉取失败（已重试 {max_retries} 次）account={account.id}"
+    )
+    return None
 
 
 @router.get("/account", response=List[DouyinAccountSchemaOut], summary="获取抖音账号列表（分页）")
@@ -235,6 +280,9 @@ def quick_create_account(request, data: QuickCreateAccountIn):
         user_agent = data.user_agent or ""
 
         # 解析 bundle（如果提供）
+        bundle_sec_uid = ""
+        bundle_nickname = ""
+        bundle_unique_id = ""
         if data.bundle and data.bundle.strip():
             try:
                 unpacked = parse_credential_bundle(data.bundle)
@@ -242,6 +290,9 @@ def quick_create_account(request, data: QuickCreateAccountIn):
                 web_protect = web_protect or unpacked["web_protect"]
                 keys = keys or unpacked["keys"]
                 user_agent = user_agent or unpacked["user_agent"]
+                bundle_sec_uid = unpacked.get("sec_uid", "")       # 新增
+                bundle_nickname = unpacked.get("nickname", "")     # 新增
+                bundle_unique_id = unpacked.get("unique_id", "")   # 新增
             except ValueError as e:
                 _delete_douyin_account_with_storage(account)
                 raise HttpError(400, f"一键导入串解析失败：{e}")
@@ -288,16 +339,55 @@ def quick_create_account(request, data: QuickCreateAccountIn):
         if user_agent:
             account.user_agent = user_agent
 
-        # 步骤 3: 获取真实账号信息（与 import_credential 一致：失败不阻断）
-        profile = _fetch_account_profile(account, timeout_s=20)
-        if profile:
-            try:
-                _apply_fetched_profile(account, profile, nickname_override=True)
-            except HttpError:
-                _delete_douyin_account_with_storage(account)
-                raise
-        elif (data.remark or "").strip():
-            account.nickname = str(data.remark).strip()[:64]
+        # 步骤 3: 优先使用 bundle 中的 sec_uid，跳过 API 拉取
+        skip_profile = False
+        if bundle_sec_uid:
+            account.sec_uid = bundle_sec_uid
+            if bundle_nickname:
+                account.nickname = bundle_nickname
+            if bundle_unique_id:
+                account.unique_id = bundle_unique_id
+            skip_profile = True
+            logger.info(
+                f"[quick_create] 使用 bundle 中的账号信息，跳过 profile 拉取 "
+                f"account={account_id} sec_uid={bundle_sec_uid[:20]} unique_id={bundle_unique_id}"
+            )
+
+        # 如果 bundle 中没有 sec_uid，才拉取 profile
+        profile = None
+        if not skip_profile:
+            profile = _fetch_account_profile_with_retry(account, max_retries=3, timeout_s=20)
+            if profile:
+                try:
+                    _apply_fetched_profile(account, profile, nickname_override=True)
+                except HttpError:
+                    _delete_douyin_account_with_storage(account)
+                    raise
+            else:
+                # profile 拉取失败，推断检测：查找相同 sessionid 的其他账号
+                from core.douyin.runtime.storage import load_storage_state
+                from core.douyin.runtime.credential import session_fingerprint_from_state
+
+                same_session_accounts = []
+                for other_acc in DouyinAccount.objects.exclude(id=account_id).filter(is_deleted=False):
+                    other_state = load_storage_state(str(other_acc.id))
+                    if other_state:
+                        other_sid, _ = session_fingerprint_from_state(other_state)
+                        if other_sid == sessionid and other_acc.sec_uid:
+                            same_session_accounts.append(other_acc)
+
+                if same_session_accounts:
+                    _delete_douyin_account_with_storage(account)
+                    raise HttpError(
+                        409,
+                        f"此 Cookie 可能与账号「{same_session_accounts[0].nickname}」重复"
+                    f"（基于 sessionid 推断，无法获取账号信息验证）。"
+                    f"请确认浏览器中登录的是目标账号后再试。"
+                )
+
+            # 没有找到重复，允许导入但使用临时昵称
+            if (data.remark or "").strip():
+                account.nickname = str(data.remark).strip()[:64]
 
         account.save()
 
@@ -402,6 +492,8 @@ def import_credential(request, account_id: str, data: DouyinCredentialImportIn):
     - web_protect / keys 选填：bd-ticket-guard 凭证，仅「发送私信」需要；
       只做消息监控可不填。本次未提供的字段会保留上次导入的旧值（增量合并）。
     """
+    import logging
+    logger = logging.getLogger(__name__)
     from django.utils import timezone
 
     from core.douyin.runtime.credential import (
@@ -420,6 +512,9 @@ def import_credential(request, account_id: str, data: DouyinCredentialImportIn):
     web_protect = data.web_protect or ""
     keys = data.keys or ""
     user_agent = data.user_agent or ""
+    bundle_sec_uid = ""
+    bundle_nickname = ""
+    bundle_unique_id = ""
     if data.bundle and data.bundle.strip():
         try:
             unpacked = parse_credential_bundle(data.bundle)
@@ -429,6 +524,9 @@ def import_credential(request, account_id: str, data: DouyinCredentialImportIn):
         web_protect = web_protect or unpacked["web_protect"]
         keys = keys or unpacked["keys"]
         user_agent = user_agent or unpacked["user_agent"]
+        bundle_sec_uid = unpacked.get("sec_uid", "")       # 新增
+        bundle_nickname = unpacked.get("nickname", "")     # 新增
+        bundle_unique_id = unpacked.get("unique_id", "")   # 新增
 
     base_state = load_storage_state(str(account_id))
     try:
@@ -474,17 +572,52 @@ def import_credential(request, account_id: str, data: DouyinCredentialImportIn):
     if user_agent:
         account.user_agent = user_agent
 
-    # 导入后拉取真实 sec_uid（及昵称），用于 inbox 身份核对；失败不阻断导入。
-    profile = _fetch_account_profile(account, timeout_s=20)
-    if profile:
-        try:
-            _apply_fetched_profile(
-                account,
-                profile,
-                nickname_override=not data.nickname,
-            )
-        except HttpError:
-            raise
+    # 优先使用 bundle 中的 sec_uid，跳过 API 拉取
+    skip_profile = False
+    if bundle_sec_uid:
+        account.sec_uid = bundle_sec_uid
+        if bundle_nickname and not data.nickname:
+            account.nickname = bundle_nickname
+        if bundle_unique_id:
+            account.unique_id = bundle_unique_id
+        skip_profile = True
+        logger.info(
+            f"[import_credential] 使用 bundle 中的账号信息，跳过 profile 拉取 "
+            f"account={account_id} sec_uid={bundle_sec_uid[:20]} unique_id={bundle_unique_id}"
+        )
+
+    # 如果 bundle 中没有 sec_uid，才拉取 profile
+    if not skip_profile:
+        profile = _fetch_account_profile_with_retry(account, max_retries=3, timeout_s=20)
+        if profile:
+            try:
+                _apply_fetched_profile(
+                    account,
+                    profile,
+                    nickname_override=not data.nickname,
+                )
+            except HttpError:
+                raise
+        else:
+            # profile 拉取失败，推断检测：查找相同 sessionid 的其他账号
+            from core.douyin.runtime.storage import load_storage_state
+            from core.douyin.runtime.credential import session_fingerprint_from_state
+
+            same_session_accounts = []
+            for other_acc in DouyinAccount.objects.exclude(id=account_id).filter(is_deleted=False):
+                other_state = load_storage_state(str(other_acc.id))
+                if other_state:
+                    other_sid, _ = session_fingerprint_from_state(other_state)
+                    if other_sid == sessionid and other_acc.sec_uid:
+                        same_session_accounts.append(other_acc)
+
+            if same_session_accounts:
+                raise HttpError(
+                    409,
+                    f"此 Cookie 可能与账号「{same_session_accounts[0].nickname}」重复"
+                    f"（基于 sessionid 推断，无法获取账号信息验证）。"
+                    f"请确认浏览器中登录的是目标账号后再试。"
+                )
 
     account.save()
 
@@ -494,6 +627,137 @@ def import_credential(request, account_id: str, data: DouyinCredentialImportIn):
         else "登录态已导入：可监控/接收；发送私信还需补 web_protect 与 keys（bd-ticket-guard）。"
     )
     return DouyinAccountActionOut(success=True, message=msg)
+
+
+@router.post(
+    "/account/check-credential",
+    response={200: "CheckCredentialOut"},
+    summary="预检凭证（不保存，用于前端提示）",
+)
+def check_credential(request, data: "CheckCredentialIn"):
+    """预检凭证是否有效、是否重复，但不实际导入。
+
+    用于前端"检查 Cookie"按钮，提前发现问题。
+    """
+    import logging
+    import uuid
+    from django.utils import timezone
+
+    from core.douyin.runtime.credential import (
+        find_duplicate_session_owner,
+        has_send_credential,
+        merge_storage_state,
+        parse_credential_bundle,
+    )
+    from core.douyin.runtime.storage import load_storage_state
+
+    logger = logging.getLogger(__name__)
+
+    # 验证至少提供了凭证
+    if not data.bundle and not data.cookie:
+        return {
+            "valid": False,
+            "reason": "invalid",
+            "conflict_account": None,
+            "sec_uid": None,
+            "nickname": None,
+            "suggestions": ["必须提供 bundle 或 cookie"]
+        }
+
+    try:
+        cookie = data.cookie or ""
+        web_protect = data.web_protect or ""
+        keys = data.keys or ""
+        bundle_sec_uid = ""
+        bundle_nickname = ""
+
+        # 解析 bundle（如果提供）
+        if data.bundle and data.bundle.strip():
+            try:
+                unpacked = parse_credential_bundle(data.bundle)
+                cookie = cookie or unpacked["cookie"]
+                web_protect = web_protect or unpacked["web_protect"]
+                keys = keys or unpacked["keys"]
+                bundle_sec_uid = unpacked.get("sec_uid", "")
+                bundle_nickname = unpacked.get("nickname", "")
+            except ValueError as e:
+                return {
+                    "valid": False,
+                    "reason": "invalid",
+                    "conflict_account": None,
+                    "sec_uid": None,
+                    "nickname": None,
+                    "suggestions": [f"一键导入串解析失败：{e}"]
+                }
+
+        # 创建临时 storage_state（不保存）
+        temp_id = str(uuid.uuid4())
+        state = merge_storage_state({}, cookie, web_protect=web_protect, keys=keys)
+
+        cookies = {c["name"]: c["value"] for c in state.get("cookies", [])}
+        if not ({"sessionid", "sessionid_ss"} & cookies.keys()):
+            return {
+                "valid": False,
+                "reason": "invalid",
+                "conflict_account": None,
+                "sec_uid": None,
+                "nickname": None,
+                "suggestions": [
+                    "Cookie 缺少 sessionid",
+                    "请确认已登录抖音后再从浏览器复制完整 Cookie"
+                ]
+            }
+
+        # 检查重复
+        sessionid = cookies.get("sessionid") or ""
+        uid_tt = cookies.get("uid_tt") or ""
+        dup = find_duplicate_session_owner(
+            account_id=temp_id,
+            sessionid=sessionid,
+            uid_tt=uid_tt,
+        )
+
+        if dup:
+            other_id, other_name, reason = dup
+            is_deleted = "deleted" in reason
+            return {
+                "valid": False,
+                "reason": "duplicate" if not is_deleted else "deleted",
+                "conflict_account": {"id": other_id, "nickname": other_name},
+                "sec_uid": bundle_sec_uid or None,
+                "nickname": bundle_nickname or None,
+                "suggestions": [
+                    f"此 Cookie 与账号「{other_name}」是同一抖音登录态",
+                    "请在浏览器中确认右上角已登录的是目标账号后再导出",
+                    "或先删除冲突的账号后再导入" if not is_deleted else "请等待 7 天后再导入"
+                ]
+            }
+
+        # 检查发送凭证
+        can_send = has_send_credential(state)
+
+        return {
+            "valid": True,
+            "reason": None,
+            "conflict_account": None,
+            "sec_uid": bundle_sec_uid or None,
+            "nickname": bundle_nickname or None,
+            "suggestions": [
+                "✓ 未检测到重复，可以安全导入",
+                f"凭证能力：{'可发送私信' if can_send else '仅接收（需补 web_protect 和 keys 才能发送）'}"
+            ]
+        }
+
+    except Exception as e:
+        logger.exception(f"[check_credential] 预检失败: {e}")
+        return {
+            "valid": False,
+            "reason": "invalid",
+            "conflict_account": None,
+            "sec_uid": None,
+            "nickname": None,
+            "suggestions": [f"预检失败：{e}"]
+        }
 
 
 @router.post(

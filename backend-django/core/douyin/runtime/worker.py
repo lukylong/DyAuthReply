@@ -102,6 +102,7 @@ def _load_managed_accounts() -> list[dict]:
             'id': str(a.id),
             'owner_id': str(a.owner_id) if a.owner_id else '',
             'nickname': a.nickname,
+            'sec_uid': a.sec_uid or '',  # 新增：用于去重
             'status': a.status,
             'work_mode': a.work_mode,
             'priority': a.priority,

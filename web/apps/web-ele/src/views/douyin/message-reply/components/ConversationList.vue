@@ -178,7 +178,7 @@ watch(
           </div>
           <div class="info-row">
             <span class="last-message">
-              {{ truncateMessage(conv.last_message_content || '暂无消息') }}
+              {{ truncateMessage(conv.last_message_preview || '暂无消息') }}
             </span>
           </div>
         </div>

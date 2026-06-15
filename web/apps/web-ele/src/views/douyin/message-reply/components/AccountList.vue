@@ -92,14 +92,19 @@ onMounted(() => {
 
         <div class="account-info">
           <div class="account-nickname">{{ account.nickname }}</div>
-          <ElTag
-            v-if="account.status === 1"
-            type="success"
-            size="small"
-            effect="plain"
-          >
-            在线
-          </ElTag>
+          <div class="account-meta">
+            <span v-if="account.unique_id" class="account-id">
+              抖音号: {{ account.unique_id }}
+            </span>
+            <ElTag
+              v-if="account.status === 1"
+              type="success"
+              size="small"
+              effect="plain"
+            >
+              在线
+            </ElTag>
+          </div>
         </div>
       </div>
     </div>
@@ -173,6 +178,20 @@ onMounted(() => {
   font-weight: 500;
   font-size: 14px;
   color: #262626;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.account-id {
+  color: #8c8c8c;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

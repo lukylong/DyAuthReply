@@ -218,3 +218,22 @@ class CredentialStatusOut(Schema):
         default_factory=dict,
         description="重复的 sec_uid -> 账号ID列表"
     )
+
+
+class CheckCredentialIn(Schema):
+    """预检凭证输入"""
+    bundle: Optional[str] = Field(None, description="一键导入串（DYCRED1.开头）")
+    cookie: Optional[str] = Field(None, description="浏览器 Cookie")
+    web_protect: Optional[str] = Field(None, description="web_protect JSON")
+    keys: Optional[str] = Field(None, description="keys JSON")
+
+
+class CheckCredentialOut(Schema):
+    """预检凭证输出"""
+    valid: bool = Field(..., description="凭证是否有效")
+    reason: Optional[str] = Field(None, description="失败原因：duplicate/invalid/expired/deleted 等")
+    conflict_account: Optional[dict] = Field(None, description="冲突的账号信息 {id, nickname}")
+    sec_uid: Optional[str] = Field(None, description="识别到的 sec_uid")
+    nickname: Optional[str] = Field(None, description="识别到的昵称")
+    suggestions: list[str] = Field(default_factory=list, description="操作建议")
+

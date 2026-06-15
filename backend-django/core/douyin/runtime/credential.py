@@ -120,13 +120,15 @@ _BUNDLE_PREFIX = "DYCRED1."
 
 
 def parse_credential_bundle(raw: str) -> dict[str, str]:
-    """解析浏览器扩展生成的「一键导入串」→ {cookie, web_protect, keys, user_agent}。
+    """解析浏览器扩展生成的「一键导入串」→ {cookie, web_protect, keys, user_agent, sec_uid, nickname, unique_id}。
 
     支持两种形态：
       1) 带前缀的 base64url：``DYCRED1.<base64url(JSON)>``（扩展默认产出，单行不易误改）；
       2) 裸 JSON：``{"cookie": "...", "web_protect": "...", "keys": "...", "ua": "..."}``。
 
     内层 JSON 字段名兼容 ``ua`` / ``user_agent``。任一缺失则对应值为空串。
+
+    v1.8.0 新增：支持 sec_uid、nickname、unique_id 字段（由插件导出）。
 
     Raises:
         ValueError: 串为空、base64/JSON 解析失败、或顶层不是对象。
@@ -164,6 +166,9 @@ def parse_credential_bundle(raw: str) -> dict[str, str]:
         "web_protect": str(payload.get("web_protect") or ""),
         "keys": str(payload.get("keys") or ""),
         "user_agent": str(payload.get("user_agent") or payload.get("ua") or ""),
+        "sec_uid": str(payload.get("sec_uid") or ""),          # 新增
+        "nickname": str(payload.get("nickname") or ""),        # 新增
+        "unique_id": str(payload.get("unique_id") or ""),      # 新增
     }
 
 
@@ -319,8 +324,14 @@ def find_duplicate_session_owner(
 ) -> tuple[str, str, str] | None:
     """若其它账号已占用相同 sessionid（或 uid_tt），返回 (other_id, other_name, reason)。
 
-    reason 为 ``sessionid`` 或 ``uid_tt``，供错误提示区分匹配依据。
+    reason 为 ``sessionid`` / ``uid_tt`` / ``sessionid_deleted`` / ``uid_tt_deleted``，
+    供错误提示区分匹配依据。
+
+    增强：同时检查活跃账号和 7 天内删除的账号。
     """
+    from datetime import timedelta
+    from django.utils import timezone
+
     sid = (sessionid or "").strip()
     if not sid and not (uid_tt or "").strip():
         return None
@@ -330,6 +341,7 @@ def find_duplicate_session_owner(
     except Exception:  # noqa: BLE001
         return None
 
+    # 1. 检查活跃账号（is_deleted=False）
     for acc in DouyinAccount.objects.exclude(id=account_id).filter(is_deleted=False).exclude(status=3):
         other_st = load_storage_state(str(acc.id))
         osid, ouid = session_fingerprint_from_state(other_st)
@@ -338,6 +350,28 @@ def find_duplicate_session_owner(
         # uid_tt 作为辅助：sessionid 未命中但 uid 相同也视为同一登录态
         if uid_tt and ouid and uid_tt == ouid:
             return str(acc.id), str(acc.nickname or acc.id), "uid_tt"
+
+    # 2. 检查 7 天内删除的账号
+    cutoff = timezone.now() - timedelta(days=7)
+    deleted_accounts = DouyinAccount.objects.exclude(id=account_id).filter(
+        is_deleted=True,
+        deleted_at__isnull=False,
+        deleted_at__gte=cutoff
+    )
+    for acc in deleted_accounts:
+        other_st = load_storage_state(str(acc.id))
+        if not other_st:
+            continue
+        osid, ouid = session_fingerprint_from_state(other_st)
+        if sid and osid == sid:
+            days_ago = (timezone.now() - acc.deleted_at).days
+            nickname_with_hint = f"{acc.nickname or acc.id}（{days_ago}天前删除）"
+            return str(acc.id), nickname_with_hint, "sessionid_deleted"
+        if uid_tt and ouid and uid_tt == ouid:
+            days_ago = (timezone.now() - acc.deleted_at).days
+            nickname_with_hint = f"{acc.nickname or acc.id}（{days_ago}天前删除）"
+            return str(acc.id), nickname_with_hint, "uid_tt_deleted"
+
     return None
 
 
@@ -351,12 +385,31 @@ def format_duplicate_session_error(
     """构造重复登录态拦截说明，附带 sessionid 前缀便于用户自查。"""
     sid = (sessionid or "").strip()
     sid_hint = f"{sid[:12]}…" if len(sid) >= 12 else sid or "（空）"
+
     if reason == "uid_tt":
         uid = (uid_tt or "").strip()
         uid_hint = f"{uid[:12]}…" if len(uid) >= 12 else uid or "（空）"
         detail = f"uid_tt 相同（{uid_hint}）"
+    elif reason == "sessionid_deleted":
+        detail = f"sessionid 相同（{sid_hint}）"
+        return (
+            f"此 Cookie 与最近删除的账号「{other_name}」是同一抖音登录态（{detail}），"
+            f"不能导入到多个账号槽位。"
+            f"请等待 7 天后再导入，或使用不同的抖音账号；"
+            f"也可通过「凭证诊断」页面强制清理历史记录。"
+        )
+    elif reason == "uid_tt_deleted":
+        uid = (uid_tt or "").strip()
+        uid_hint = f"{uid[:12]}…" if len(uid) >= 12 else uid or "（空）"
+        detail = f"uid_tt 相同（{uid_hint}）"
+        return (
+            f"此 Cookie 与最近删除的账号「{other_name}」是同一抖音登录态（{detail}），"
+            f"不能导入到多个账号槽位。"
+            f"请等待 7 天后再导入，或使用不同的抖音账号。"
+        )
     else:
         detail = f"sessionid 相同（{sid_hint}）"
+
     return (
         f"此 Cookie 与账号「{other_name}」是同一抖音登录态（{detail}），"
         f"不能导入到多个账号槽位。"
@@ -367,9 +420,11 @@ def format_duplicate_session_error(
 
 
 def dedupe_managed_accounts_by_session(rows: list[dict]) -> list[dict]:
-    """同一 sessionid 只保留一个账号托管（priority 高 → sort 高 → id 小 优先）。
+    """同一 sessionid 或 sec_uid 只保留一个账号托管（priority 高 → sort 高 → id 小 优先）。
 
     防止多账号槽位导入同一套 cookie 后，worker 双协程扫同一 inbox、重复自动回复。
+
+    增强：同时按 sec_uid 去重（如果数据库中有）。
     """
     import logging
 
@@ -379,29 +434,62 @@ def dedupe_managed_accounts_by_session(rows: list[dict]) -> list[dict]:
     if not rows:
         return rows
 
+    # 按优先级排序
     ordered = sorted(
         rows,
         key=lambda x: (-int(x.get("priority") or 0), str(x.get("id") or "")),
     )
     kept: list[dict] = []
     session_owner: dict[str, str] = {}  # sessionid -> kept account_id
+    sec_uid_owner: dict[str, str] = {}  # sec_uid -> kept account_id
 
     for row in ordered:
-        st = load_storage_state(row["id"])
+        account_id = row["id"]
+        nickname = row.get("nickname", "")
+
+        # 检查 sessionid 重复
+        st = load_storage_state(account_id)
         sid, _uid = session_fingerprint_from_state(st)
         if sid:
             owner = session_owner.get(sid)
             if owner:
                 log.warning(
-                    f"[credential] 跳过重复 session 账号 nickname={row.get('nickname')!r} "
-                    f"id={row['id'][:8]}… 与 id={owner[:8]}… 共用 sessionid={sid[:12]}…"
+                    f"[credential] 跳过重复 session 账号 nickname={nickname!r} "
+                    f"id={account_id[:8]}… 与 id={owner[:8]}… 共用 sessionid={sid[:12]}…"
                 )
                 continue
-            session_owner[sid] = row["id"]
+            session_owner[sid] = account_id
+
+        # 检查 sec_uid 重复（从数据库获取）
+        sec_uid = row.get("sec_uid")
+        if sec_uid:
+            sec_owner = sec_uid_owner.get(sec_uid)
+            if sec_owner:
+                log.warning(
+                    f"[credential] 跳过重复 sec_uid 账号 nickname={nickname!r} "
+                    f"id={account_id[:8]}… 与 id={sec_owner[:8]}… 共用 sec_uid={sec_uid[:16]}…"
+                )
+                continue
+            sec_uid_owner[sec_uid] = account_id
+
         kept.append(row)
 
     if len(kept) < len(rows):
         log.warning(
-            f"[credential] session 去重：{len(rows)} 个候选 → 托管 {len(kept)} 个"
+            f"[credential] session/sec_uid 去重：{len(rows)} 个候选 → 托管 {len(kept)} 个"
         )
+
+    # 记录最终托管的账号映射（便于调试）
+    if kept:
+        log.info(f"[credential] 启动时托管 {len(kept)} 个账号:")
+        for row in kept:
+            st = load_storage_state(row["id"])
+            sid, _ = session_fingerprint_from_state(st)
+            sec = row.get("sec_uid", "")
+            log.info(
+                f"  - {row.get('nickname')} ({row['id'][:8]}…) "
+                f"sessionid={sid[:12] if sid else '(无)'}… "
+                f"sec_uid={sec[:16] if sec else '(无)'}…"
+            )
+
     return kept

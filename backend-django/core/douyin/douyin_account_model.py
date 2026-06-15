@@ -45,6 +45,14 @@ class DouyinAccount(RootModel):
         db_index=True,
     )
 
+    unique_id = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="抖音号（unique_id，用户自定义ID）",
+    )
+
     sec_uid = models.CharField(
         max_length=128,
         null=True,
@@ -232,6 +240,13 @@ class DouyinAccount(RootModel):
         help_text="最近一次探活/请求失败原因（用于面板标红与排障）",
     )
 
+    deleted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="软删除时间戳（用于 7 天保留期重复检测）",
+    )
+
     class Meta:
         db_table = 'core_douyin_account'
         verbose_name = '抖音账号'
@@ -246,6 +261,13 @@ class DouyinAccount(RootModel):
 
     def __str__(self):
         return f"{self.nickname} [{self.get_status_display()}]"
+
+    def soft_delete(self):
+        """软删除：设置 is_deleted=True 和 deleted_at"""
+        from django.utils import timezone
+        self.is_deleted = True
+        self.deleted_at = timezone.now()
+        self.save(update_fields=['is_deleted', 'deleted_at', 'sys_update_datetime'])
 
     def save(self, *args, **kwargs):
         # sec_uid 有 unique 约束：空串 '' 在 PostgreSQL 会互相冲突，未登录/登出应存 NULL。

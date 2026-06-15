@@ -1,10 +1,13 @@
 /**
- * 抖音登录态提取器 —— popup 逻辑
+ * 抖音登录态提取器 —— popup 逻辑 v2.0.0
  *
  * 抓取三件套（与 DyAuthReply 后台「导入登录态」对话框字段一一对应）：
  *   cookie       —— 用 chrome.cookies API 读取，能拿到 document.cookie 取不到的 HttpOnly sessionid
  *   web_protect  —— 页面 localStorage['security-sdk/s_sdk_sign_data_key/web_protect']
  *   keys         —— 页面 localStorage['security-sdk/s_sdk_crypt_sdk']
+ *
+ * v2.0.0 重大修复：账号身份信息（昵称/头像/sec_uid）改为通过 creator API 获取，
+ * 不再依赖页面 DOM/JS 状态遍历（后者在私信页会抓到聊天列表用户的信息）。
  */
 
 const LS_KEYS = 'security-sdk/s_sdk_crypt_sdk';
@@ -238,19 +241,38 @@ async function collectPageInfo(tabId) {
         if (m) acc.unique_id = m[1];
       }
       if (!acc.nickname) {
-        // 抖音号通常紧跟在昵称之后；取页面里 "抖音号" 之前最近的一段非空文本作为昵称兜底
-        const h1 = document.querySelector('h1, [data-e2e="user-title"], .user-title');
-        if (h1 && h1.textContent && h1.textContent.trim()) {
-          acc.nickname = h1.textContent.trim().slice(0, 64);
+        // 优先从个人中心页面获取（creator.douyin.com 顶部导航栏）
+        const profileName = document.querySelector('.semi-navigation-header-title, .header-account-name, [class*="header"][class*="name"]');
+        if (profileName && profileName.textContent && profileName.textContent.trim()) {
+          acc.nickname = profileName.textContent.trim().slice(0, 64);
+        } else {
+          // 兜底：抖音号通常紧跟在昵称之后；取页面里 "抖音号" 之前最近的一段非空文本作为昵称
+          const h1 = document.querySelector('h1, [data-e2e="user-title"], .user-title');
+          if (h1 && h1.textContent && h1.textContent.trim()) {
+            acc.nickname = h1.textContent.trim().slice(0, 64);
+          }
         }
       }
 
-      // ④ DOM 兜底头像
+      // ④ DOM 兜底头像（优先从导航栏获取，避免抓到聊天列表中的头像）
       if (!acc.avatar) {
-        const img = document.querySelector(
-          'img[src*="aweme-avatar"], img[src*="/avatar"], img[class*="avatar" i]',
-        );
-        if (img && img.src) acc.avatar = img.src;
+        // 优先级 1: 导航栏头像（creator.douyin.com 右上角）
+        const navAvatar = document.querySelector('.semi-navigation-header-avatar img, .header-account-avatar img, [class*="header-account"] img');
+        if (navAvatar && navAvatar.src && navAvatar.src.includes('avatar')) {
+          acc.avatar = navAvatar.src;
+        } else {
+          // 优先级 2: 个人中心头像（更大更清晰）
+          const profileAvatar = document.querySelector('.account-avatar img, [class*="profile-avatar"] img, [data-e2e="user-avatar"] img');
+          if (profileAvatar && profileAvatar.src) {
+            acc.avatar = profileAvatar.src;
+          } else {
+            // 优先级 3: 任何包含 aweme-avatar 的图片（抖音专用类名）
+            const awemeAvatar = document.querySelector('img[src*="aweme-avatar"]');
+            if (awemeAvatar && awemeAvatar.src) {
+              acc.avatar = awemeAvatar.src;
+            }
+          }
+        }
       }
 
       out.account = acc;
@@ -261,9 +283,70 @@ async function collectPageInfo(tabId) {
   return result || { keys: '', web_protect: '', ua: '', account: {} };
 }
 
+/**
+ * 通过 creator API 获取当前登录账号的真实信息（最可靠方式）。
+ * 后端也用同一接口：creator.douyin.com/web/api/media/user/info/
+ * 只在 creator.douyin.com 域名下可用（同域请求，无 CORS 限制）。
+ */
+async function fetchLoggedInAccount(tabId) {
+  try {
+    const [{ result } = {}] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN', // MAIN 世界才能用页面的 cookie 发同域请求
+      func: async () => {
+        try {
+          const resp = await fetch(
+            'https://creator.douyin.com/web/api/media/user/info/',
+            { credentials: 'include' },
+          );
+          if (!resp.ok) return { error: `HTTP ${resp.status}` };
+          const data = await resp.json();
+          if (data.status_code !== 0) {
+            return {
+              error: data.status_msg || `status_code=${data.status_code}`,
+            };
+          }
+          const user = data.user || {};
+          const avatar =
+            (user.avatar_thumb &&
+              user.avatar_thumb.url_list &&
+              user.avatar_thumb.url_list[0]) ||
+            (user.avatar_larger &&
+              user.avatar_larger.url_list &&
+              user.avatar_larger.url_list[0]) ||
+            (user.avatar_medium &&
+              user.avatar_medium.url_list &&
+              user.avatar_medium.url_list[0]) ||
+            '';
+          return {
+            nickname: user.nickname || '',
+            sec_uid: user.sec_uid || '',
+            unique_id: user.unique_id || user.short_id || '',
+            uid: String(user.uid || ''),
+            avatar,
+          };
+        } catch (e) {
+          return { error: e.message };
+        }
+      },
+    });
+    return result || { error: '脚本执行失败' };
+  } catch (e) {
+    return { error: `executeScript 失败: ${e.message}` };
+  }
+}
+
 /** 把三件套打包成单行「一键导入串」：DYCRED1.<base64url(JSON)>。 */
-function buildBundle({ cookie, web_protect, keys, ua }) {
-  const json = JSON.stringify({ cookie, web_protect, keys, ua });
+function buildBundle({ cookie, web_protect, keys, ua, sec_uid, nickname, unique_id }) {
+  const json = JSON.stringify({
+    cookie,
+    web_protect,
+    keys,
+    ua,
+    sec_uid: sec_uid || '',         // 新增：用于后端跳过 profile 拉取
+    nickname: nickname || '',       // 新增：前端已识别的昵称
+    unique_id: unique_id || ''      // 新增：抖音号
+  });
   // UTF-8 安全的 base64url
   const b64 = btoa(unescape(encodeURIComponent(json)))
     .replaceAll('+', '-')
@@ -300,12 +383,13 @@ function renderAccount(account, fingerprint, uidTt, isSwitched) {
   const acc = account || {};
   const card = $('accountCard');
   const hasInfo = acc.nickname || acc.unique_id || acc.avatar;
+  const isApi = acc._source === 'api';
 
   const avatarEl = $('acctAvatar');
-  // 如果检测到账号切换，隐藏头像（可能是缓存的旧头像，不可信）
-  if (isSwitched) {
+  // 如果检测到账号切换且信息来源不是 API，隐藏头像（可能是缓存的旧头像，不可信）
+  if (isSwitched && !isApi) {
     avatarEl.hidden = true;
-    console.log('[扩展v1.3] 检测到账号切换，已隐藏头像');
+    console.log('[扩展v2.0] 检测到账号切换且无 API 验证，已隐藏头像');
   } else if (acc.avatar) {
     avatarEl.onerror = () => {
       avatarEl.hidden = true;
@@ -316,20 +400,31 @@ function renderAccount(account, fingerprint, uidTt, isSwitched) {
       : `${acc.avatar}?_t=${Date.now()}`;
     avatarEl.src = avatarUrl;
     avatarEl.hidden = false;
-    console.log('[扩展v1.3] 显示头像，isSwitched=false');
+    console.log('[扩展v2.0] 显示头像，source=' + (isApi ? 'API' : '页面推断'));
   } else {
     avatarEl.hidden = true;
   }
 
   const nameText = acc.nickname || '（未识别到昵称）';
-  // 如果是切换账号，在昵称后添加警告标记
-  $('acctName').innerHTML = isSwitched
-    ? `${esc(nameText)} <span style="color:var(--warn);font-size:16px;" title="检测到账号切换，头像已隐藏（可能被浏览器缓存）">⚠️</span>`
-    : esc(nameText);
+  // 来源标记：API ✓ 或 页面推断 ⚠
+  const sourceTag = isApi
+    ? ' <span style="color:#2ecc71;font-size:11px;font-weight:400;" title="通过 creator API 验证，信息可靠">API ✓</span>'
+    : ' <span style="color:var(--warn);font-size:11px;font-weight:400;" title="从页面推断，可能不准确（建议在 creator.douyin.com 抓取）">页面推断 ⚠</span>';
+  // 如果是切换账号（且没有 API 验证），在昵称后添加警告标记
+  if (isSwitched && !isApi) {
+    $('acctName').innerHTML = `${esc(nameText)} <span style="color:var(--warn);font-size:16px;" title="检测到账号切换，头像已隐藏（可能被浏览器缓存）">⚠️</span>${sourceTag}`;
+  } else {
+    $('acctName').innerHTML = esc(nameText) + sourceTag;
+  }
 
   const subParts = [];
-  if (acc.unique_id) subParts.push(`抖音号 ${esc(acc.unique_id)}`);
-  if (uidTt) subParts.push(`uid_tt <span class="fp">${esc(uidTt.slice(0, 12))}…</span>`);
+  // 优先显示抖音号（unique_id）
+  if (acc.unique_id) {
+    subParts.push(`<b>抖音号</b> ${esc(acc.unique_id)}`);
+  }
+  if (uidTt) {
+    subParts.push(`uid_tt <span class="fp">${esc(uidTt.slice(0, 12))}…</span>`);
+  }
   subParts.push(
     fingerprint
       ? `sessionid <span class="fp">${esc(fingerprint)}</span>`
@@ -475,6 +570,45 @@ async function grab() {
 
     const fp = accountFingerprint(cookie);
     const uidTt = extractCookieField(cookie, 'uid_tt');
+
+    // ===== v2.0.0 核心修复：通过 creator API 获取真实登录账号信息 =====
+    const isCreator = /creator\.douyin\.com/.test(tab.url);
+    let apiAccount = null;
+    if (isCreator) {
+      console.log('[扩展v2.0] 在 creator 域名，调用 API 获取账号信息...');
+      apiAccount = await fetchLoggedInAccount(tab.id);
+      if (apiAccount && !apiAccount.error) {
+        console.log('[扩展v2.0] API 返回账号信息:', {
+          nickname: apiAccount.nickname,
+          uid: apiAccount.uid,
+          sec_uid: (apiAccount.sec_uid || '').slice(0, 20) + '...',
+          unique_id: apiAccount.unique_id,
+        });
+        // API 返回的信息比页面遍历可靠，优先使用
+        ls.account = {
+          ...ls.account,           // 保留页面遍历的兜底字段
+          nickname: apiAccount.nickname || (ls.account && ls.account.nickname) || '',
+          sec_uid: apiAccount.sec_uid || (ls.account && ls.account.sec_uid) || '',
+          unique_id: apiAccount.unique_id || (ls.account && ls.account.unique_id) || '',
+          uid: apiAccount.uid || (ls.account && ls.account.uid) || '',
+          avatar: apiAccount.avatar || (ls.account && ls.account.avatar) || '',
+          _source: 'api',          // 标记来源，便于调试和 UI 显示
+        };
+      } else {
+        console.warn('[扩展v2.0] API 调用失败，回退到页面推断:', apiAccount && apiAccount.error);
+        if (ls.account) ls.account._source = 'page';
+      }
+    } else {
+      console.log('[扩展v2.0] 非 creator 域名，使用页面推断（可能不准确）');
+      if (ls.account) ls.account._source = 'page';
+    }
+
+    // uid_tt 交叉验证说明：
+    // cookie uid_tt 是一个 hex 哈希（如 4ad5265ba88f...），API uid 是数字 ID（如 80549827440），
+    // 两者格式不同但属于同一账号，不能直接对比。
+    // 真正可靠的验证已由 API 本身完成：API 用当前 cookie 请求，返回的就是 cookie 对应的账号。
+    const identityMismatch = false;
+
     const currentNickname = (ls.account && ls.account.nickname) || '';
 
     if (tab.incognito && !fp) {
@@ -500,22 +634,31 @@ async function grab() {
     // 判断是否切换了账号
     const isSwitched = lastFingerprint && fp && lastFingerprint !== fp;
 
-    console.log('[扩展v1.3] 账号切换检测:', {
+    console.log('[扩展v2.0] 账号切换检测:', {
       lastFingerprint,
       currentFingerprint: fp,
       isSwitched,
-      nickname: currentNickname
+      nickname: currentNickname,
+      source: ls.account && ls.account._source,
     });
 
-    // 检测账号切换：Cookie 指纹变了 → 提示可能需要多次刷新
-    if (isSwitched) {
-      // 指纹变了，说明账号切换了
-      // 显示提示：页面可能需要多次刷新或等待，确保数据已更新
+    // 检测账号切换：Cookie 指纹变了
+    // 如果有 API 验证，切换警告可以弱化（API 数据是可靠的）；身份不一致时强警告
+    if (identityMismatch) {
+      $('tabHint').innerHTML =
+        '<b style="color:var(--bad)">⚠️ 身份不一致：Cookie 和 API 返回的账号不同</b><br>' +
+        `API 返回 uid: <b>${esc(apiAccount.uid)}</b><br>` +
+        `Cookie uid_tt: <b>${esc(uidTt)}</b><br><br>` +
+        '这可能是浏览器缓存导致。<b>请硬刷新页面（Ctrl+Shift+R / Cmd+Shift+R）后重试</b>。';
+      $('tabHint').hidden = false;
+      showToast('⚠️ 身份不一致，请刷新页面');
+    } else if (isSwitched && (!apiAccount || apiAccount.error)) {
+      // 指纹变了且没有 API 验证——需要强警告
       $('tabHint').innerHTML =
         '<b>⚠️ 检测到账号切换</b><br>' +
-        `Cookie 指纹已变化：<span class=”fp”>${esc(lastFingerprint)}</span> → <span class=”fp”>${esc(fp)}</span><br>` +
+        `Cookie 指纹已变化：<span class="fp">${esc(lastFingerprint)}</span> → <span class="fp">${esc(fp)}</span><br>` +
         (currentNickname ? `当前识别昵称：<b>${esc(currentNickname)}</b><br>` : '') +
-        '<br><b style=”color:#ff6b00;”>注意：头像已隐藏（浏览器缓存无法清除旧头像）</b><br>' +
+        '<br><b style="color:#ff6b00;">注意：账号信息来自页面推断，可能不准确</b><br>' +
         '<br><b>请核对以下信息是否正确：</b><br>' +
         '1. 上方显示的<b>昵称</b>是否是新账号的？<br>' +
         '2. 上方显示的<b>抖音号</b>是否是新账号的？<br>' +
@@ -526,6 +669,13 @@ async function grab() {
         '<br><b style=”color:#2ecc71;”>核对无误后再复制导入串！</b>';
       $('tabHint').hidden = false;
       showToast('检测到账号切换，请核对信息');
+    } else if (isSwitched && apiAccount && !apiAccount.error) {
+      // 指纹变了但有 API 验证——弱提示
+      $('tabHint').innerHTML =
+        '<b style="color:#2ecc71;">✓ 检测到账号切换，已通过 API 验证</b><br>' +
+        `Cookie 指纹已变化：<span class="fp">${esc(lastFingerprint)}</span> → <span class="fp">${esc(fp)}</span><br>` +
+        `当前账号：<b>${esc(currentNickname)}</b>（已通过 creator API 确认）`;
+      $('tabHint').hidden = false;
     }
 
     // 记录当前指纹和昵称（持久化到 storage）
@@ -541,6 +691,9 @@ async function grab() {
       web_protect: ls.web_protect,
       keys: ls.keys,
       ua: ls.ua,
+      sec_uid: ls.account?.sec_uid || '',      // 新增
+      nickname: ls.account?.nickname || '',    // 新增
+      unique_id: ls.account?.unique_id || ''   // 新增
     });
 
     setBadge($('cookieStatus'), ...validateCookie(cookie));
@@ -563,7 +716,8 @@ async function grab() {
       diagRows: diag.rows,
     });
     const who = ls.account && ls.account.nickname ? ls.account.nickname : (fp || '');
-    flashOk(who ? `抓取成功：${who}` : '抓取成功（未读到 sessionid）');
+    const srcLabel = ls.account && ls.account._source === 'api' ? '（API 验证）' : '（页面推断）';
+    flashOk(who ? `抓取成功：${who} ${srcLabel}` : '抓取成功（未读到 sessionid）');
     showToast(who ? `已抓取：${who}` : '已抓取，但未读到 sessionid');
 
     // 发送凭证（web_protect/keys）按 origin 存于 localStorage，creator 与 www 各一份。

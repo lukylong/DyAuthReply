@@ -1738,6 +1738,13 @@ class HttpProtocolTransport(AccountTransport):
                 pending: list[tuple[Any, Any, str]] = []
                 for m in filtered:
                     if not m.is_text or not m.text or m.sender_uid <= 0:
+                        if m.server_message_id > 0:
+                            logger.debug(
+                                f"[transport.http] 跳过非文本/无发送方消息 conv={hinted_conversation_id} "
+                                f"srv_id={m.server_message_id} msg_type={m.msg_type} "
+                                f"text={m.text!r} sender_uid={m.sender_uid} "
+                                f"content_preview={(m.content_json or '')[:120]!r}"
+                            )
                         continue
                     if account_sec_uid and m.sender_sec_uid == account_sec_uid:
                         continue
@@ -1998,10 +2005,23 @@ class HttpProtocolTransport(AccountTransport):
             if not m.is_text:
                 # 系统消息（已读回执 / 输入中 / command_type≠空）跳过；正确性由
                 # IMMessage.is_text 判定（msg_type==1 + content_json["text"] 非空）
+                logger.debug(
+                    f"[transport.http] 跳过非文本消息 srv_id={m.server_message_id} "
+                    f"msg_type={m.msg_type} text={m.text!r} "
+                    f"content_preview={(m.content_json or '')[:120]!r}"
+                )
                 continue
             if not m.text:
+                logger.debug(
+                    f"[transport.http] 跳过空文本消息 srv_id={m.server_message_id} "
+                    f"content_preview={(m.content_json or '')[:120]!r}"
+                )
                 continue
             if m.sender_uid <= 0:
+                logger.debug(
+                    f"[transport.http] 跳过 sender_uid 缺失消息 srv_id={m.server_message_id} "
+                    f"text={m.text!r} content_preview={(m.content_json or '')[:120]!r}"
+                )
                 continue
             # 自己发的：sender_sec == account.sec_uid 直接跳。
             # self_uid 只有在由 account.sec_uid 明确匹配出来时才参与过滤；

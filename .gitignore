@@ -12,3 +12,8 @@ __pycache__/
 # 抖音 JS 签名引擎：dy_ab.js 提交，npm 依赖（jsrsasign 等）不提交
 /backend-django/core/douyin/runtime/transport/sign/js/node_modules/
 /.codegraph
+/.agents
+/.claude
+/.codex
+/.cursor
+/.trellis

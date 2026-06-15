@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "抖音登录态提取器 (DyAuthReply)",
-  "version": "1.7.1",
-  "description": "一键抓取抖音 Cookie / web_protect / keys，用于 DyAuthReply 后台「导入登录态」。v1.7.1: 修复 cookieStoreId 为空导致无法抓取",
+  "version": "2.0.0",
+  "description": "一键抓取抖音 Cookie / web_protect / keys，用于 DyAuthReply 后台「导入登录态」。v2.0.0: 账号身份改用 creator API 验证，解决私信页抓错用户信息的问题",
   "incognito": "split",
   "permissions": ["cookies", "scripting", "activeTab", "tabs", "storage"],
   "host_permissions": [

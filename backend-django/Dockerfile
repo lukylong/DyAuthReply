@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-#
 # zq-platform backend-django image
 # 抖音模块已全面转为纯 HTTP 协议（JS 签名 dy_ab.js，无 Chromium/Playwright），
 # 因此基础镜像用 python:3.11-slim：体积小，仅需 Node（跑 dy_ab.js）+ 少量系统库。

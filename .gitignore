@@ -17,3 +17,5 @@ __pycache__/
 /.codex
 /.cursor
 /.trellis
+/.pnpm-store
+/.pytest_cache

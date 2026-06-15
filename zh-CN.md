@@ -711,3 +711,76 @@ docker compose exec backend python manage.py migrate --noinput
 
 - `douyin-worker` 有浏览器上下文和托管状态，不适合跟普通 Web 发布完全绑定。
 - 数据库和 Douyin 持久化状态一起迁移时，短暂停机最简单、最稳。
+
+---
+
+## 16. Django 一体化托管（最简单容器部署）部署与初始化流程
+
+如果您采用我们将 Vue 前端打包同步进 `backend-django/dist`、并直接由 Django 服务端托管 SPA 路由的单域名部署方案，可以按照以下步骤在生产服务器上进行首次部署与初始化：
+
+### 16.1 本地镜像打包与推送
+1. 在本地运行前端编译并拷贝至 Django 目录的脚本：
+   ```bash
+   ./build_and_copy_frontend.sh
+   ```
+2. 构建本地后端镜像（已固化 dist 产物）：
+   ```bash
+   docker compose build backend
+   ```
+3. 登录私有镜像仓库并推送（以阿里云杭州节点为例）：
+   ```bash
+   docker login registry.cn-hangzhou.aliyuncs.com
+   docker tag zq-platform/backend:dev registry.cn-hangzhou.aliyuncs.com/<namespace>/zq-backend:latest
+   docker push registry.cn-hangzhou.aliyuncs.com/<namespace>/zq-backend:latest
+   ```
+
+### 16.2 服务器环境配置
+1. 在宿主机安装 Docker 与 Docker Compose。
+2. 建议将项目置于 `/opt/DyAuthReply`。
+3. 创建 `.env` 环境变量配置文件并修改敏感项：
+   ```dotenv
+   # 数据库及 Redis 强密码
+   POSTGRES_DB=zq_platform
+   POSTGRES_USER=zq
+   POSTGRES_PASSWORD=你的复杂强密码
+   REDIS_PASSWORD=你的复杂强密码
+
+   # Django 及 JWT 安全密钥
+   DJANGO_SECRET_KEY=你的复杂随机串
+   JWT_ACCESS_SECRET_KEY=你的复杂随机串
+   JWT_REFRESH_SECRET_KEY=你的复杂随机串
+
+   # 首次启动自动初始化开关
+   AUTO_LOADDATA=true
+   ```
+4. 确认生产环境的 `docker-compose.yml` 中删除了 `build:` 编译节点，并将 `image` 指向您刚刚推送的私有镜像仓库。由于采用 Django 一体化托管，您可以**直接从 compose 配置文件中删除 web (Nginx) 服务节点**，只保留 `postgres`, `redis`, `backend`, `scheduler` 以及 `douyin-worker`。
+
+### 16.3 首次一键初始化与服务启动
+1. 启动基础服务与后端：
+   ```bash
+   docker compose up -d postgres redis backend scheduler
+   ```
+   *说明：镜像内置的 entrypoint 启动脚本会自动阻塞等待 PostgreSQL 和 Redis 启动，然后自动运行 `python manage.py migrate --noinput`，并由于设置了 `AUTO_LOADDATA=true`，会自动加载默认数据卷 `db_init.json`（菜单、角色与初始化权限）。*
+
+2. 观察日志确认初始化完毕：
+   ```bash
+   docker compose logs -f backend
+   ```
+
+3. 在服务器上立即为自己创建一个超级管理员账号：
+   ```bash
+   docker compose exec backend python manage.py createsuperuser
+   ```
+   按照交互提示输入用户名、密码及邮箱即可。
+
+4. 启动完成后，为了安全以及防止容器重启覆盖数据，建议立即将 `.env` 中的初始化开关关闭：
+   ```dotenv
+   AUTO_LOADDATA=false
+   ```
+
+5. 启动抖音消息扫描及自动回复 Worker 节点：
+   ```bash
+   docker compose --profile douyin up -d douyin-worker
+   ```
+
+此时，即可通过 `https://您的域名/manage/` 直接进行安全的超级管理员后台访问，无需部署独立的前端服务器！

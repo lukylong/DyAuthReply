@@ -1900,9 +1900,12 @@ class HttpProtocolTransport(AccountTransport):
                         if await _is_echo(m.sender_sec_uid, m.conversation_id, m.text):
                             continue
 
+                    # 时间戳合理性检查：create_time_us 必须 > 2020-01-01（避免抖音返回的异常小值）
+                    # 2020-01-01 00:00:00 UTC = 1577836800000000 微秒
+                    MIN_VALID_TIMESTAMP_US = 1577836800000000
                     received_at = (
                         datetime.fromtimestamp(m.create_time_us / 1_000_000, tz=timezone.utc)
-                        if m.create_time_us > 0
+                        if m.create_time_us > MIN_VALID_TIMESTAMP_US
                         else datetime.now(tz=timezone.utc)
                     )
                     external_msg_id = f"srv_{m.server_message_id}"
@@ -2202,9 +2205,12 @@ class HttpProtocolTransport(AccountTransport):
                 if await _is_echo(m.sender_sec_uid, m.conversation_id, m.text):
                     continue
 
+            # 时间戳合理性检查：create_time_us 必须 > 2020-01-01（避免抖音返回的异常小值）
+            # 2020-01-01 00:00:00 UTC = 1577836800000000 微秒
+            MIN_VALID_TIMESTAMP_US = 1577836800000000
             received_at = (
                 datetime.fromtimestamp(m.create_time_us / 1_000_000, tz=timezone.utc)
-                if m.create_time_us > 0
+                if m.create_time_us > MIN_VALID_TIMESTAMP_US
                 else datetime.now(tz=timezone.utc)
             )
             external_msg_id = f"srv_{m.server_message_id}"

@@ -193,6 +193,7 @@ services:
       - zq-net
 
   web:
+    profiles: ["unused"]
     build:
       context: ./web
       dockerfile: ./scripts/deploy/Dockerfile

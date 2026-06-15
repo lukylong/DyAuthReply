@@ -855,11 +855,14 @@ def list_account_messages(request, account_id: str, conversation_id: str):
         account_id=account.id
     )
 
+    # 获取最新的100条消息，然后按时间升序排列（从早到晚）
     messages = list(
         DouyinMessage.objects
         .filter(conversation_id=conv.id)
-        .order_by('received_at', 'sys_create_datetime')[:100]
+        .order_by('-received_at', '-sys_create_datetime')[:100]
     )
+    # 反转列表，让前端从早到晚显示
+    messages.reverse()
 
     # 增强消息数据：添加发送者信息
     result = []

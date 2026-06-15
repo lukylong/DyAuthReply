@@ -9,7 +9,6 @@ import { computed, nextTick, ref, watch } from 'vue';
 import {
   ElAvatar,
   ElButton,
-  ElCard,
   ElEmpty,
   ElInput,
   ElMessage,
@@ -52,7 +51,7 @@ function getAvatarColor(uid: string): string {
     '#13c2c2', '#eb2f96', '#fa8c16', '#2f54eb', '#a0d911',
   ];
   const hash = uid.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-  return colors[hash % colors.length];
+  return colors[hash % colors.length] || '#1890ff';
 }
 
 // 生成消息发送者的显示信息
@@ -97,10 +96,11 @@ async function onSendMessage() {
   }
 }
 
-function handleKeydown(event: KeyboardEvent) {
+function handleKeydown(event: Event | KeyboardEvent) {
   // Enter 发送，Shift+Enter 换行
-  if (event.key === 'Enter' && !event.shiftKey) {
-    event.preventDefault();
+  const keyboardEvent = event as KeyboardEvent;
+  if (keyboardEvent.key === 'Enter' && !keyboardEvent.shiftKey) {
+    keyboardEvent.preventDefault();
     onSendMessage();
   }
 }
@@ -118,7 +118,11 @@ function formatTime(dateStr?: null | string): string {
   if (minutes < 60) return `${minutes}分钟前`;
   if (hours < 24) return `${hours}小时前`;
 
+  // 修复：跨年消息显示年份
+  const isSameYear = date.getFullYear() === now.getFullYear();
+
   return date.toLocaleString('zh-CN', {
+    year: isSameYear ? undefined : 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',

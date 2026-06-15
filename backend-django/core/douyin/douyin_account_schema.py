@@ -121,6 +121,8 @@ class DouyinAccountSimpleOut(Schema):
     nickname: str
     status: int
     status_display: str
+    avatar: Optional[str] = None
+    unique_id: Optional[str] = None
 
     @staticmethod
     def resolve_status_display(obj):

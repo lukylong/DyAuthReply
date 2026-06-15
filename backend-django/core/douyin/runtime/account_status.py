@@ -30,7 +30,8 @@ def _mark_login_failed(
     if acc is None:
         return None
     acc.status = 2
-    update_fields = ['status', 'sys_update_datetime']
+    acc.credential_state = 'invalid'
+    update_fields = ['status', 'credential_state', 'sys_update_datetime']
     if not keep_pending_verification:
         acc.pending_verification_type = None
         acc.pending_verification_at = None
@@ -41,6 +42,47 @@ def _mark_login_failed(
             'pending_verification_until',
         ])
     acc.save(update_fields=update_fields)
+
+    # 派发掉线告警站内信给管理员和所有者
+    recipients = set()
+    if acc.owner:
+        recipients.add(acc.owner)
+    try:
+        from core.user.user_model import User
+        superusers = User.objects.filter(is_superuser=True)
+        for u in superusers:
+            recipients.add(u)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"[account_status] 查找超级管理员失败: {e}")
+
+    if recipients:
+        try:
+            title = f"抖音账号【{acc.nickname}】监测到掉线，请及时排查"
+            from django.utils.timezone import is_aware
+            now_dt = timezone.now()
+            if is_aware(now_dt):
+                now_dt = timezone.localtime(now_dt)
+            local_time_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+            content = (
+                f"系统于 {local_time_str} 监测到托管抖音账号【{acc.nickname}】(ID: {acc.id}) 登录状态已失效。\n"
+                f"失效原因：{reason}\n"
+                f"目前系统已自动更新该账号状态为「登录失效」、凭证状态为「已失效」。"
+                f"请尽快前往管理后台更新或重新导入凭证（Cookie/keys），避免自动回复业务中断。"
+            )
+            from core.message.message_service import NotifyService
+            recipient_ids = [str(r.id) for r in recipients]
+            NotifyService.send(
+                recipient_ids=recipient_ids,
+                title=title,
+                content=content,
+                channels=['site'],
+                msg_type='system',
+            )
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"[account_status] 发送掉线站内信失败: {e}")
+
     DouyinEvent.objects.create(
         account=acc,
         event_type='login_expired',

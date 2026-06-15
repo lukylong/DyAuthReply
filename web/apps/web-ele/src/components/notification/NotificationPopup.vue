@@ -13,6 +13,8 @@ import { ElBadge } from 'element-plus';
 
 import NotificationDrawer from './NotificationDrawer.vue';
 
+import { useNotification } from '#/composables/useNotification';
+
 interface Props {
   // 是否显示红点
   dot?: boolean;
@@ -76,7 +78,18 @@ const drawerListeners = {
     emit('update:activeTab', tab),
 };
 
+const {
+  loadMessages,
+  loadUnreadCount,
+  loadAnnouncements,
+  loadAnnouncementUnreadCount,
+} = useNotification();
+
 function openDrawer() {
+  loadMessages();
+  loadUnreadCount();
+  loadAnnouncements();
+  loadAnnouncementUnreadCount();
   drawerApi.open();
 }
 </script>

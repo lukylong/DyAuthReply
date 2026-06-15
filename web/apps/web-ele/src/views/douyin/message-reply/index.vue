@@ -14,6 +14,7 @@ import {
   getAccountConversations,
   getAccountMessages,
   sendAccountManualReply,
+  refreshConversationUserApi,
 } from '#/api/core/douyin/message-reply';
 
 import AccountList from './components/AccountList.vue';
@@ -73,6 +74,39 @@ async function loadConversations() {
 }
 
 /**
+ * 刷新/补齐指定会话的对方昵称头像
+ */
+async function refreshUser(force = false) {
+  if (!activeAccountId.value || !activeConversationId.value) return;
+  try {
+    const res = await refreshConversationUserApi(
+      activeAccountId.value,
+      activeConversationId.value,
+    );
+    if (res.success) {
+      // 成功更新了用户资料，重新加载会话列表以更新左栏昵称和头像
+      await loadConversations();
+    } else if (force) {
+      ElMessage.warning(res.message || '刷新用户资料失败');
+    }
+  } catch (error: any) {
+    if (force) {
+      ElMessage.error(error.message || '刷新用户资料失败');
+    }
+  }
+}
+
+/**
+ * 手动点击刷新按钮触发的事件（同时刷新最新消息与最新用户资料）
+ */
+async function onRefresh() {
+  await Promise.all([
+    loadMessages(),
+    refreshUser(true),
+  ]);
+}
+
+/**
  * 选择会话
  */
 async function onConversationSelect(conversationId: string) {
@@ -82,6 +116,17 @@ async function onConversationSelect(conversationId: string) {
 
   // 加载该会话的消息列表
   await loadMessages();
+
+  // 如果没有对方昵称，或者昵称包含 "用户_" 这种 fallback (说明需要补齐资料)，在后台静默刷新
+  const conv = activeConversation.value;
+  if (
+    conv &&
+    (!conv.peer_nickname ||
+      conv.peer_nickname.startsWith('用户_') ||
+      conv.peer_sec_uid.startsWith('fallback_'))
+  ) {
+    refreshUser(false);
+  }
 }
 
 /**
@@ -122,9 +167,12 @@ async function onSendMessage(text: string) {
 
     if (res.success) {
       ElMessage.success(res.message || '发送成功');
-      // 延迟刷新消息列表，等待 worker 处理
-      setTimeout(() => {
-        loadMessages();
+      // 延迟刷新消息列表和会话列表，等待 worker 处理
+      setTimeout(async () => {
+        await Promise.all([
+          loadMessages(),
+          loadConversations(),
+        ]);
       }, 1000);
     } else {
       ElMessage.error(res.message || '发送失败');
@@ -136,10 +184,7 @@ async function onSendMessage(text: string) {
 </script>
 
 <template>
-  <Page
-    title="消息回复"
-    description="选择账号和会话，与用户进行实时消息互动"
-  >
+  <Page>
     <div class="message-reply-layout">
       <AccountList
         :active-account-id="activeAccountId"
@@ -160,7 +205,7 @@ async function onSendMessage(text: string) {
         :conversation="activeConversation"
         :messages="messages"
         :loading="messagesLoading"
-        @refresh="loadMessages"
+        @refresh="onRefresh"
         @send-message="onSendMessage"
       />
     </div>

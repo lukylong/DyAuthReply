@@ -37,7 +37,10 @@ export interface DouyinMessageItem {
   content: string;
   received_at?: null | string;
   processed: boolean;
+  sender_name?: null | string;
+  sender_avatar?: null | string;
 }
+
 
 export interface PaginatedResponse<T> {
   total: number;

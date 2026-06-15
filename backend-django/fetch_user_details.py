@@ -11,10 +11,8 @@ from core.douyin.douyin_conversation_model import DouyinConversation
 
 
 async def main():
-    account_id = 'd2e80ae6-5be7-4d38-9854-81380b712973'
-
     account = await asyncio.to_thread(
-        lambda: DouyinAccount.objects.filter(id=account_id).first()
+        lambda: DouyinAccount.objects.first()
     )
     if not account:
         print("账号不存在")
@@ -23,7 +21,7 @@ async def main():
     print(f"账号: {account.nickname}, self sec_uid: {account.sec_uid}")
 
     convs = await asyncio.to_thread(
-        lambda: list(DouyinConversation.objects.filter(account_id=account_id))
+        lambda: list(DouyinConversation.objects.filter(account_id=account.id))
     )
 
     # 收集 peer_uid（从 platform_conversation_id 解析）
@@ -55,26 +53,21 @@ async def main():
     transport = HttpProtocolTransport()
     await transport.start(account)
 
-    print(f"\n调用 user_detail...")
-    details = await transport._resolve_user_details(account, user_ids)
-    print(f"获取到 {len(details)} 个用户详情:")
-
-    for uid, info in details.items():
-        nick = info.get('nickname', '')
-        sec = info.get('sec_uid', '')
-        print(f"  uid={uid}: nickname={nick!r}, sec_uid={sec[:20]}...")
-
-        conv = uid_to_conv.get(uid)
-        # 用 sec_uid 匹配确认是对方而非自己
-        if conv and nick and sec == conv.peer_sec_uid:
-            conv.peer_nickname = nick
-            if info.get('avatar'):
-                conv.peer_avatar = info['avatar']
-            await asyncio.to_thread(conv.save)
-            print(f"    ✓ 已更新会话（sec_uid 匹配）")
-        elif conv and nick:
-            # sec_uid 不匹配，可能是 self，跳过
-            print(f"    - sec_uid 不匹配会话的 peer，跳过（可能是 self）")
+    print("\n测试 fetch_self_profile...")
+    print("\n测试 _resolve_user_details_by_sec_uids...")
+    sec_uids = [
+        'MS4wLjABAAAA5K_cxi4sxveAPjgv39yoemYj7c83E8ObMD7A-BCbv9E',
+        'MS4wLjABAAAA5BGFXmgsSzRclbTggRnJbsrFEW8JXoFLvY3hfNLTF6U',
+        'MS4wLjABAAAAxcNt16wSrYOj_HrHFUP78RGZKlFeBDt02--ZwiIo-7QtYhxwWKnjD-IfhvDLvP3Q',
+        'MS4wLjABAAAA1C91B1sscrrM-wNdf9h_MjcyIgYnrh2GMN7ukRvgkl0nPNUtXuJhy7a-IK6Js3yp'
+    ]
+    try:
+        details = await transport._resolve_user_details_by_sec_uids(account, sec_uids)
+        print(f"批量获取结果:")
+        for sec, info in details.items():
+            print(f"  sec={sec[:20]}...: nickname={info.get('nickname')!r}")
+    except Exception as e:
+        print(f"Error: {e}")
 
     await transport.stop(account)
     print("\n完成")

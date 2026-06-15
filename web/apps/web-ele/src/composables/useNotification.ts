@@ -19,6 +19,8 @@ import {
   markAllAsReadApi,
   markAsReadApi,
 } from '#/api/core/message';
+import { ElNotification } from 'element-plus';
+
 import { createNotificationWebSocket } from '#/api/core/websocket';
 
 // 通知项类型
@@ -285,25 +287,51 @@ export function useNotification() {
     if (data.type === 'notification') {
       // 收到新通知
       const msgData = data.data;
-      const newNotification: NotificationItem = {
-        id: msgData.id,
-        avatar: typeAvatarMap[msgData.msg_type] ?? typeAvatarMap.system!,
+
+      // 判断是否为公告类型
+      if (msgData.msg_type === 'announcement') {
+        // 如果是公告，刷新公告列表和未读数
+        loadAnnouncements();
+        loadAnnouncementUnreadCount();
+      } else {
+        // 如果是普通消息，放入消息列表并增加未读计数
+        const newNotification: NotificationItem = {
+          id: msgData.id,
+          avatar: typeAvatarMap[msgData.msg_type] ?? typeAvatarMap.system!,
+          title: msgData.title,
+          message: msgData.content,
+          date: '刚刚',
+          isRead: false,
+          linkType: msgData.link_type,
+          linkId: msgData.link_id,
+        };
+
+        // 添加到列表头部
+        notifications.value.unshift(newNotification);
+        // 只保留最近10条
+        if (notifications.value.length > 10) {
+          notifications.value.pop();
+        }
+        // 更新未读数量
+        messageUnreadCount.value += 1;
+      }
+
+      // 无论是公告还是消息，都触发 UI Toast 提示
+      let notificationType: 'error' | 'info' | 'success' | 'warning' = 'info';
+      const titleLower = (msgData.title || '').toLowerCase();
+      if (
+        titleLower.includes('掉线') ||
+        titleLower.includes('失效') ||
+        titleLower.includes('失败')
+      ) {
+        notificationType = 'warning';
+      }
+
+      ElNotification({
         title: msgData.title,
         message: msgData.content,
-        date: '刚刚',
-        isRead: false,
-        linkType: msgData.link_type,
-        linkId: msgData.link_id,
-      };
-
-      // 添加到列表头部
-      notifications.value.unshift(newNotification);
-      // 只保留最近10条
-      if (notifications.value.length > 10) {
-        notifications.value.pop();
-      }
-      // 更新未读数量
-      messageUnreadCount.value += 1;
+        type: notificationType,
+      });
     }
   }
 

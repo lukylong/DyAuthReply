@@ -148,10 +148,15 @@ def _upsert_conversation_and_message(
     external_msg_id: Optional[str] = None,
     peer_avatar: Optional[str] = None,
     platform_conversation_id: Optional[str] = None,
+    direction: str = 'in',
 ) -> Optional[tuple]:
     """
     upsert DouyinConversation + DouyinMessage。
     返回 (conversation_id, message_id) 表示新增了一条入向消息；返回 None 表示重复跳过。
+
+    修复说明：使用原子更新避免历史消息覆盖最新时间。
+    - 新建会话：直接设置 last_message_at
+    - 已存在会话：仅当 received_at >= last_message_at 时才更新时间字段
     """
     from core.douyin.douyin_account_model import DouyinAccount
     from core.douyin.douyin_conversation_model import DouyinConversation
@@ -161,6 +166,21 @@ def _upsert_conversation_and_message(
     if account is None:
         return None
 
+    resolved_peer_sec_uid = (peer_sec_uid or "").strip()
+    account_sec = (account.sec_uid or "").strip()
+    platform_conv_id = (platform_conversation_id or "").strip()
+
+    # 校验 peer_sec_uid，防止将自己当成 peer
+    if account_sec and resolved_peer_sec_uid == account_sec:
+        if platform_conv_id:
+            existing_conv = DouyinConversation.objects.filter(
+                account=account,
+                platform_conversation_id=platform_conv_id
+            ).first()
+            if existing_conv:
+                resolved_peer_sec_uid = existing_conv.peer_sec_uid
+
+    # 步骤1: get_or_create 会话（新建时设置所有字段）
     defaults = {
         'last_message_at': received_at,
         'last_message_preview': (text or '')[:200],
@@ -171,26 +191,49 @@ def _upsert_conversation_and_message(
     avatar = (peer_avatar or '').strip()
     if avatar:
         defaults['peer_avatar'] = avatar
-    platform_conv_id = (platform_conversation_id or '').strip()
     if platform_conv_id:
         defaults['platform_conversation_id'] = platform_conv_id
 
-    conv, _ = DouyinConversation.objects.update_or_create(
+    conv, created = DouyinConversation.objects.get_or_create(
         account=account,
-        peer_sec_uid=peer_sec_uid,
+        peer_sec_uid=resolved_peer_sec_uid,
         defaults=defaults,
     )
 
+    # 步骤2: 如果会话已存在，使用原子更新（防止旧消息覆盖新时间）
+    if not created:
+        # 更新用户资料字段（无条件更新）
+        update_fields = {}
+        if nick:
+            update_fields['peer_nickname'] = nick
+        if avatar:
+            update_fields['peer_avatar'] = avatar
+        if platform_conv_id:
+            update_fields['platform_conversation_id'] = platform_conv_id
+
+        if update_fields:
+            DouyinConversation.objects.filter(id=conv.id).update(**update_fields)
+
+        # 原子更新时间字段：仅当新消息时间 >= 现有时间时才更新
+        DouyinConversation.objects.filter(
+            id=conv.id,
+            last_message_at__lte=received_at,
+        ).update(
+            last_message_at=received_at,
+            last_message_preview=(text or '')[:200],
+        )
+
+    # 步骤3: 创建消息记录
     ext_id = (
         external_msg_id
         if external_msg_id
         else _hash_msg_id(peer_sec_uid, received_at.isoformat(), text)
     )
-    msg, created = DouyinMessage.objects.get_or_create(
+    msg, msg_created = DouyinMessage.objects.get_or_create(
         conversation=conv,
         external_msg_id=ext_id,
         defaults={
-            'direction': 'in',
+            'direction': direction,
             'content_type': 'text',
             'content': text or '',
             'raw_payload': raw,
@@ -198,4 +241,9 @@ def _upsert_conversation_and_message(
             'processed': False,
         },
     )
-    return (str(conv.id), str(msg.id)) if created else None
+    # 自愈：如果 direction 存储错误则更新
+    if not msg_created and msg.direction != direction:
+        msg.direction = direction
+        msg.save(update_fields=['direction'])
+
+    return (str(conv.id), str(msg.id)) if msg_created or (not msg_created and msg.direction != direction) else None

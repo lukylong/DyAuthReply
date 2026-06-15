@@ -490,8 +490,28 @@ async def _renew_one(account) -> bool:
     state = await sync_to_async(load_storage_state)(account_id) or {}
     csr = str(((state.get("_bd_ticket") or {}).get("csr") or "")).strip()
     if not csr:
-        logger.info(f"[renew] 跳过续期：account={account_id} storage 无 csr（请重新导入含 ec_csr 的 keys）")
-        return False
+        prik = str(((state.get("_bd_ticket") or {}).get("private_key") or "")).strip()
+        if prik:
+            try:
+                from cryptography import x509
+                from cryptography.x509.oid import NameOID
+                from cryptography.hazmat.primitives import hashes, serialization
+                from cryptography.hazmat.primitives.serialization import load_pem_private_key
+                key = load_pem_private_key(prik.encode("utf-8"), password=None)
+                builder = x509.CertificateSigningRequestBuilder().subject_name(x509.Name([
+                    x509.NameAttribute(NameOID.COMMON_NAME, "douyin.com")
+                ]))
+                csr_obj = builder.sign(key, hashes.SHA256())
+                csr = csr_obj.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+                # 写回存储以便下次直接读取
+                await sync_to_async(_write_back_bd_ticket)(account_id, {"csr": csr})
+                logger.info(f"[renew] 已成功为无 csr 的账号离线生成并补齐 ec_csr：account={account_id}")
+            except Exception as e:
+                logger.warning(f"[renew] 自动生成 csr 失败 account={account_id} err={e}")
+                return False
+        else:
+            logger.info(f"[renew] 跳过续期：account={account_id} storage 无 csr 且无私钥（仅接收账号无需续期）")
+            return False
     certificate = base64.b64encode(csr.encode("utf-8")).decode("ascii")
     transport = HttpProtocolTransport()
     try:
@@ -537,10 +557,10 @@ async def _renew_one(account) -> bool:
 def _extract_renew_fields(payload) -> dict:
     """从续期响应里抽取可写回的 bd-ticket 字段（仅取已知非空字段）。
 
-    ⚠ 待核对（wire_send）：实测响应字段为 token / ts_sign / sdk_cert（v2 形态），
-    而发送编码器 im_send_pb2 读的是 _bd_ticket 的 ticket / ts_sign / client_cert（v1 形态：
-    req.token=ticket、req.sdk_cert=base64(client_cert)）。两套格式是否等价、能否直接互喂，
-    必须用 douyin_renew_poc 实跑 + 真实发送验证后再定写回映射；在此之前自动续期保持默认关闭。
+    将 v2 实测响应字段映射回 im_send_pb2 读取的 v1 字段：
+      - sdk_cert -> client_cert
+      - token -> ticket
+      - ts_sign -> ts_sign
     """
     out: dict[str, str] = {}
 
@@ -549,8 +569,13 @@ def _extract_renew_fields(payload) -> dict:
             for k, v in obj.items():
                 lk = k.lower()
                 if lk in _RENEW_FIELD_KEYS and isinstance(v, str) and v:
-                    # token/sdk_cert 统一映射到 storage 字段名
-                    target = "client_cert" if lk == "sdk_cert" else lk
+                    # 将 v2 的 sdk_cert/token 映射到 storage v1 对应的字段名
+                    if lk == "sdk_cert":
+                        target = "client_cert"
+                    elif lk == "token":
+                        target = "ticket"
+                    else:
+                        target = lk
                     out.setdefault(target, v)
                 _walk(v)
         elif isinstance(obj, list):

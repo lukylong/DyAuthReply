@@ -283,6 +283,7 @@ def quick_create_account(request, data: QuickCreateAccountIn):
         bundle_sec_uid = ""
         bundle_nickname = ""
         bundle_unique_id = ""
+        bundle_avatar = ""
         if data.bundle and data.bundle.strip():
             try:
                 unpacked = parse_credential_bundle(data.bundle)
@@ -293,6 +294,7 @@ def quick_create_account(request, data: QuickCreateAccountIn):
                 bundle_sec_uid = unpacked.get("sec_uid", "")       # 新增
                 bundle_nickname = unpacked.get("nickname", "")     # 新增
                 bundle_unique_id = unpacked.get("unique_id", "")   # 新增
+                bundle_avatar = unpacked.get("avatar", "")         # 新增
             except ValueError as e:
                 _delete_douyin_account_with_storage(account)
                 raise HttpError(400, f"一键导入串解析失败：{e}")
@@ -339,48 +341,46 @@ def quick_create_account(request, data: QuickCreateAccountIn):
         if user_agent:
             account.user_agent = user_agent
 
-        # 步骤 3: 优先使用 bundle 中的 sec_uid，跳过 API 拉取
-        skip_profile = False
+        # 步骤 3: 使用 bundle 中的基础信息，但仍尝试拉取 profile 获取头像
         if bundle_sec_uid:
             account.sec_uid = bundle_sec_uid
             if bundle_nickname:
                 account.nickname = bundle_nickname
             if bundle_unique_id:
                 account.unique_id = bundle_unique_id
-            skip_profile = True
+            if bundle_avatar:
+                account.avatar = bundle_avatar
             logger.info(
-                f"[quick_create] 使用 bundle 中的账号信息，跳过 profile 拉取 "
+                f"[quick_create] 使用 bundle 中的账号信息 "
                 f"account={account_id} sec_uid={bundle_sec_uid[:20]} unique_id={bundle_unique_id}"
             )
 
-        # 如果 bundle 中没有 sec_uid，才拉取 profile
-        profile = None
-        if not skip_profile:
-            profile = _fetch_account_profile_with_retry(account, max_retries=3, timeout_s=20)
-            if profile:
-                try:
-                    _apply_fetched_profile(account, profile, nickname_override=True)
-                except HttpError:
-                    _delete_douyin_account_with_storage(account)
-                    raise
-            else:
-                # profile 拉取失败，推断检测：查找相同 sessionid 的其他账号
-                from core.douyin.runtime.storage import load_storage_state
-                from core.douyin.runtime.credential import session_fingerprint_from_state
+        # 尝试拉取 profile 获取头像（bundle 中没有 avatar）
+        profile = _fetch_account_profile_with_retry(account, max_retries=3, timeout_s=20)
+        if profile:
+            try:
+                _apply_fetched_profile(account, profile, nickname_override=not bundle_nickname and not data.remark)
+            except HttpError:
+                _delete_douyin_account_with_storage(account)
+                raise
+        else:
+            # profile 拉取失败，推断检测：查找相同 sessionid 的其他账号
+            from core.douyin.runtime.storage import load_storage_state
+            from core.douyin.runtime.credential import session_fingerprint_from_state
 
-                same_session_accounts = []
-                for other_acc in DouyinAccount.objects.exclude(id=account_id).filter(is_deleted=False):
-                    other_state = load_storage_state(str(other_acc.id))
-                    if other_state:
-                        other_sid, _ = session_fingerprint_from_state(other_state)
-                        if other_sid == sessionid and other_acc.sec_uid:
-                            same_session_accounts.append(other_acc)
+            same_session_accounts = []
+            for other_acc in DouyinAccount.objects.exclude(id=account_id).filter(is_deleted=False):
+                other_state = load_storage_state(str(other_acc.id))
+                if other_state:
+                    other_sid, _ = session_fingerprint_from_state(other_state)
+                    if other_sid == sessionid and other_acc.sec_uid:
+                        same_session_accounts.append(other_acc)
 
-                if same_session_accounts:
-                    _delete_douyin_account_with_storage(account)
-                    raise HttpError(
-                        409,
-                        f"此 Cookie 可能与账号「{same_session_accounts[0].nickname}」重复"
+            if same_session_accounts:
+                _delete_douyin_account_with_storage(account)
+                raise HttpError(
+                    409,
+                    f"此 Cookie 可能与账号「{same_session_accounts[0].nickname}」重复"
                     f"（基于 sessionid 推断，无法获取账号信息验证）。"
                     f"请确认浏览器中登录的是目标账号后再试。"
                 )
@@ -515,6 +515,7 @@ def import_credential(request, account_id: str, data: DouyinCredentialImportIn):
     bundle_sec_uid = ""
     bundle_nickname = ""
     bundle_unique_id = ""
+    bundle_avatar = ""
     if data.bundle and data.bundle.strip():
         try:
             unpacked = parse_credential_bundle(data.bundle)
@@ -527,6 +528,7 @@ def import_credential(request, account_id: str, data: DouyinCredentialImportIn):
         bundle_sec_uid = unpacked.get("sec_uid", "")       # 新增
         bundle_nickname = unpacked.get("nickname", "")     # 新增
         bundle_unique_id = unpacked.get("unique_id", "")   # 新增
+        bundle_avatar = unpacked.get("avatar", "")         # 新增
 
     base_state = load_storage_state(str(account_id))
     try:
@@ -572,22 +574,22 @@ def import_credential(request, account_id: str, data: DouyinCredentialImportIn):
     if user_agent:
         account.user_agent = user_agent
 
-    # 优先使用 bundle 中的 sec_uid，跳过 API 拉取
-    skip_profile = False
+    # 使用 bundle 中的基础信息（sec_uid、nickname、unique_id、avatar）
     if bundle_sec_uid:
         account.sec_uid = bundle_sec_uid
         if bundle_nickname and not data.nickname:
             account.nickname = bundle_nickname
         if bundle_unique_id:
             account.unique_id = bundle_unique_id
-        skip_profile = True
+        if bundle_avatar:
+            account.avatar = bundle_avatar
         logger.info(
-            f"[import_credential] 使用 bundle 中的账号信息，跳过 profile 拉取 "
+            f"[import_credential] 使用 bundle 中的账号信息 "
             f"account={account_id} sec_uid={bundle_sec_uid[:20]} unique_id={bundle_unique_id}"
         )
 
-    # 如果 bundle 中没有 sec_uid，才拉取 profile
-    if not skip_profile:
+    # 尝试拉取 profile 获取头像（bundle 中没有 avatar，需要通过 API 获取）
+    if True:  # 始终尝试获取完整资料（包括头像）
         profile = _fetch_account_profile_with_retry(account, max_retries=3, timeout_s=20)
         if profile:
             try:
@@ -916,3 +918,113 @@ def send_account_manual_reply(request, account_id: str, data: DouyinManualReplyI
         )
 
     return DouyinSessionControlOut(success=True, message="手动回复指令已下发")
+
+
+@router.post(
+    "/account/{account_id}/conversation/{conversation_id}/refresh-user",
+    response=DouyinSessionControlOut,
+    summary="刷新会话对方的用户资料（头像/昵称）",
+)
+def refresh_account_conversation_user(request, account_id: str, conversation_id: str):
+    """
+    手动拉取并更新指定会话的对方真实昵称和头像
+    """
+    from core.douyin.douyin_conversation_model import DouyinConversation
+    from core.douyin.runtime.transport.http_protocol import HttpProtocolTransport
+    import asyncio
+    from asgiref.sync import async_to_sync
+    import json
+    from urllib.parse import quote
+
+    account = get_object_or_404(DouyinAccount, id=account_id)
+    conv = get_object_or_404(
+        DouyinConversation,
+        id=conversation_id,
+        account_id=account.id
+    )
+
+    # 如果 peer_sec_uid 为空，或者以 fallback_ 开头，可能不是合法的 sec_uid
+    # 在此情况下我们可以看看有没有最近的 inbound message
+    sec_uid = conv.peer_sec_uid
+    if not sec_uid or sec_uid.startswith('fallback_'):
+        from core.douyin.douyin_message_model import DouyinMessage
+        first_msg = DouyinMessage.objects.filter(conversation_id=conv.id, direction='in').first()
+        if first_msg and first_msg.raw_payload:
+            try:
+                payload = json.loads(first_msg.raw_payload) if isinstance(first_msg.raw_payload, str) else first_msg.raw_payload
+                # Check for sender_sec_uid or user_sec_uid
+                sender_sec_uid = payload.get('sender_sec_uid') or payload.get('sec_uid')
+                if sender_sec_uid and not sender_sec_uid.startswith('fallback_'):
+                    sec_uid = sender_sec_uid
+            except Exception:
+                pass
+
+    if not sec_uid or sec_uid.startswith('fallback_'):
+        return DouyinSessionControlOut(success=False, message="未找到可解析的对方用户 sec_uid，无法刷新资料")
+
+    # 调用 HttpProtocolTransport 拉取用户资料
+    async def _resolve():
+        transport = HttpProtocolTransport()
+        await transport.start(account)
+        try:
+            url = "https://www.douyin.com/aweme/v1/web/user/profile/other/"
+            extra_params = {
+                "source": "channel_pc_web",
+                "sec_user_id": sec_uid,
+                "personal_center_strategy": "1",
+                "update_version_code": "170400",
+            }
+            headers = {
+                "accept": "application/json, text/plain, */*",
+                "referer": f"https://www.douyin.com/user/{quote(sec_uid, safe='')}",
+            }
+            resp = await transport._sign.signed_fetch(
+                method="GET",
+                url=url,
+                headers=headers,
+                extra_params=extra_params,
+                timeout_ms=10_000,
+            )
+            if not resp.ok:
+                return None
+            payload = json.loads(resp.text or resp.content.decode("utf-8") or "{}")
+            if payload.get("status_code", 0) != 0:
+                return None
+            return payload.get("user") or {}
+        finally:
+            await transport.stop(account)
+
+    try:
+        user_info = async_to_sync(_resolve)()
+    except Exception as e:
+        return DouyinSessionControlOut(success=False, message=f"拉取用户资料异常: {str(e)}")
+
+    if not user_info:
+        return DouyinSessionControlOut(success=False, message="接口未返回该用户的最新资料或拉取失败")
+
+    nick = user_info.get('nickname')
+    if nick:
+        conv.peer_nickname = str(nick).strip()
+        avatar = ""
+        for key in ("avatar_thumb", "avatar_larger", "avatar_medium"):
+            block = user_info.get(key) or {}
+            urls = block.get("url_list") or []
+            if urls:
+                avatar = str(urls[0])
+                break
+        if avatar:
+            conv.peer_avatar = avatar
+        # 如果原本的 peer_sec_uid 是 fallback 的，在这里更新成真实的
+        if conv.peer_sec_uid != sec_uid or conv.peer_sec_uid.startswith('fallback_'):
+            conv.peer_sec_uid = sec_uid
+        # 修复：仅保存需要更新的字段，避免覆盖 last_message_at
+        conv.save(update_fields=[
+            'peer_nickname',
+            'peer_avatar',
+            'peer_sec_uid',
+            'sys_update_datetime',
+        ])
+        return DouyinSessionControlOut(success=True, message="用户资料已成功更新")
+    else:
+        return DouyinSessionControlOut(success=False, message="已拉取资料，但未获取到对方的有效昵称")
+

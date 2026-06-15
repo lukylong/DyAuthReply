@@ -169,6 +169,7 @@ def parse_credential_bundle(raw: str) -> dict[str, str]:
         "sec_uid": str(payload.get("sec_uid") or ""),          # 新增
         "nickname": str(payload.get("nickname") or ""),        # 新增
         "unique_id": str(payload.get("unique_id") or ""),      # 新增
+        "avatar": str(payload.get("avatar") or ""),            # 新增
     }
 
 

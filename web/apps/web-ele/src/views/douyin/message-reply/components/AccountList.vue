@@ -1,5 +1,4 @@
 <script lang="ts" setup>
-import type { DouyinAccount } from '#/api/core/douyin';
 
 import { computed, onMounted, ref } from 'vue';
 
@@ -9,7 +8,16 @@ import { getSimpleDouyinAccountListApi } from '#/api/core/douyin/account';
 
 defineOptions({ name: 'AccountList' });
 
-const props = defineProps<{
+interface SimpleAccount {
+  id: string;
+  nickname: string;
+  status: number;
+  status_display: string;
+  avatar?: null | string;
+  unique_id?: null | string;
+}
+
+defineProps<{
   activeAccountId?: string;
 }>();
 
@@ -17,7 +25,7 @@ const emit = defineEmits<{
   selectAccount: [accountId: string];
 }>();
 
-const accounts = ref<DouyinAccount[]>([]);
+const accounts = ref<SimpleAccount[]>([]);
 const loading = ref(false);
 
 const activeAccounts = computed(() =>
@@ -33,7 +41,7 @@ async function loadAccounts() {
   }
 }
 
-function onSelectAccount(account: DouyinAccount) {
+function onSelectAccount(account: SimpleAccount) {
   emit('selectAccount', account.id);
 }
 
@@ -44,7 +52,7 @@ function getAvatarColor(nickname: string): string {
     '#13c2c2', '#eb2f96', '#fa8c16', '#2f54eb', '#a0d911',
   ];
   const hash = nickname.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-  return colors[hash % colors.length];
+  return colors[hash % colors.length] || '#1890ff';
 }
 
 onMounted(() => {

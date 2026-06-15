@@ -1058,6 +1058,81 @@ class HttpProtocolTransport(AccountTransport):
             out.append(v)
         return out
 
+    async def _resolve_user_details_by_sec_uids(
+        self,
+        account: "DouyinAccount",
+        sec_uids: list[str],
+    ) -> dict[str, dict[str, str]]:
+        """
+        批量/并发调 `profile/other` 获取用户昵称与头像。
+        返回 {sec_uid: {"nickname": nick, "avatar": avatar}}
+        """
+        import asyncio
+        import json as _json
+        import random
+        from urllib.parse import quote
+
+        valid_sec_uids = sorted({s for s in sec_uids if s and not s.startswith("fallback_")})
+        if not valid_sec_uids:
+            return {}
+
+        account_id = str(account.id)
+        result = {}
+
+        async def _fetch_one(sec_uid: str):
+            url = "https://www.douyin.com/aweme/v1/web/user/profile/other/"
+            extra_params = {
+                "source": "channel_pc_web",
+                "sec_user_id": sec_uid,
+                "personal_center_strategy": "1",
+                "update_version_code": "170400",
+            }
+            headers = {
+                "accept": "application/json, text/plain, */*",
+                "referer": f"https://www.douyin.com/user/{quote(sec_uid, safe='')}",
+            }
+            try:
+                resp = await self._sign.signed_fetch(
+                    method="GET",
+                    url=url,
+                    headers=headers,
+                    extra_params=extra_params,
+                    timeout_ms=10_000,
+                )
+                if resp.ok:
+                    payload = _json.loads(resp.text or resp.content.decode("utf-8") or "{}")
+                    if payload.get("status_code", 0) == 0:
+                        user = payload.get("user") or {}
+                        nickname = str(user.get("nickname") or "").strip()
+                        if nickname:
+                            avatar = ""
+                            for key in ("avatar_thumb", "avatar_larger", "avatar_medium"):
+                                block = user.get(key) or {}
+                                urls = block.get("url_list") or []
+                                if urls:
+                                    avatar = str(urls[0])
+                                    break
+                            return sec_uid, {"nickname": nickname, "avatar": avatar}
+            except Exception as e:
+                logger.warning(f"[transport.http] _resolve_user_details_by_sec_uids 异常 sec_uid={sec_uid} err={e}")
+            return sec_uid, None
+
+        # 控制并发，最多 5 个并发，避免频控
+        sem = asyncio.Semaphore(5)
+        async def _sem_fetch(sec_uid: str):
+            async with sem:
+                await asyncio.sleep(random.random() * 0.4 + 0.1)
+                return await _fetch_one(sec_uid)
+
+        tasks = [_sem_fetch(s) for s in valid_sec_uids]
+        res_list = await asyncio.gather(*tasks)
+        for sec_uid, info in res_list:
+            if info:
+                result[sec_uid] = info
+
+        return result
+
+
     @staticmethod
     def _looks_like_platform_conversation_id(token: Optional[str]) -> bool:
         raw = str(token or "").strip()
@@ -1066,6 +1141,15 @@ class HttpProtocolTransport(AccountTransport):
         parts = raw.split(":")
         return len(parts) == 4 and all(part.isdigit() for part in parts)
 
+    @sync_to_async
+    def _get_all_conv_platform_ids(self, account_id: str) -> list[str]:
+        from core.douyin.douyin_conversation_model import DouyinConversation
+        return list(
+            DouyinConversation.objects.filter(account_id=account_id)
+            .exclude(platform_conversation_id="")
+            .values_list("platform_conversation_id", flat=True)
+        )
+
     async def _resolve_self_uid(
         self,
         account: "DouyinAccount",
@@ -1073,7 +1157,7 @@ class HttpProtocolTransport(AccountTransport):
         envelope: dict[int, list] | None = None,
         messages: list[Any] | None = None,
     ) -> int:
-        """从协议响应中解析当前登录账号的数字 user_id（self_uid）。
+        """从协议响应中解析当前登录账号 of 数字 user_id（self_uid）。
 
         优先级：
         1. envelope.f13（服务端直接返回，空收件箱也可用）
@@ -1084,7 +1168,21 @@ class HttpProtocolTransport(AccountTransport):
         if self_uid > 0:
             return self_uid
 
-        self_uid = self._infer_self_uid_from_conversation_ids(messages or [])
+        conv_ids = []
+        peer_uids = set()
+        account_sec_uid = (account.sec_uid or "").strip()
+        for m in (messages or []):
+            cid = str(getattr(m, "conversation_id", "") or "").strip()
+            if cid:
+                conv_ids.append(cid)
+            sender_uid = getattr(m, "sender_uid", 0) or 0
+            sender_sec = str(getattr(m, "sender_sec_uid", "") or "").strip()
+            if sender_uid > 0 and sender_sec and account_sec_uid and sender_sec != account_sec_uid:
+                peer_uids.add(sender_uid)
+
+        db_conv_ids = await self._get_all_conv_platform_ids(str(account.id))
+        conv_ids.extend(db_conv_ids)
+        self_uid = self._infer_self_uid_from_conversation_ids(conv_ids, peer_uids=peer_uids)
         if self_uid > 0:
             return self_uid
 
@@ -1113,29 +1211,50 @@ class HttpProtocolTransport(AccountTransport):
         return list_result.self_uid
 
     @staticmethod
-    def _infer_self_uid_from_conversation_ids(messages: list[Any]) -> int:
-        """Best-effort fallback for diagnostics only.
+    def _infer_self_uid_from_conversation_ids(
+        conv_ids: list[str],
+        peer_uids: set[int] | None = None,
+    ) -> int:
+        """从会话 ID 列表中推断自己账号的数字 user_id (self_uid)。
 
-        get_by_user / get_by_conversation do not expose a stable participant
-        list, and observed conversation IDs are not reliable enough to decide
-        which side is the managed account. Use this value for logging, not for
-        dropping messages.
+        每个会话 ID 的格式为 0:1:uid1:uid2，其中一个是自己，另一个是对方。
+        自己必然出现在所有会话中，因此出现频次最高。
+        对于频次并列的场景（如仅有单一会话），通过 peer_uids (已知对方UID) 进行排除。
         """
+        if not conv_ids:
+            return 0
         counts: dict[int, int] = {}
-        for m in messages:
-            conv_id = str(getattr(m, "conversation_id", "") or "").strip()
-            parts = conv_id.split(":")
+        for conv_id in conv_ids:
+            parts = str(conv_id).split(":")
             if len(parts) != 4:
                 continue
             try:
-                candidate = int(parts[2])
+                u1 = int(parts[2])
+                u2 = int(parts[3])
             except Exception:
                 continue
-            if candidate > 0:
-                counts[candidate] = counts.get(candidate, 0) + 1
+            if u1 > 0:
+                counts[u1] = counts.get(u1, 0) + 1
+            if u2 > 0:
+                counts[u2] = counts.get(u2, 0) + 1
         if not counts:
             return 0
-        return sorted(counts.items(), key=lambda item: (-item[1], -item[0]))[0][0]
+
+        # 找出最大频率
+        max_freq = max(counts.values())
+        candidates = [uid for uid, freq in counts.items() if freq == max_freq]
+
+        # 排除法
+        if len(candidates) > 1 and peer_uids:
+            filtered = [c for c in candidates if c not in peer_uids]
+            if len(filtered) == 1:
+                return filtered[0]
+            elif len(filtered) > 1:
+                candidates = filtered
+
+        # 兜底排序：最大频次，其次数字最大
+        sorted_candidates = sorted(counts.items(), key=lambda item: (-item[1], -item[0]))
+        return sorted_candidates[0][0]
 
     @sync_to_async
     def _resolve_scan_conversation_id(
@@ -1711,8 +1830,23 @@ class HttpProtocolTransport(AccountTransport):
                             self_uid_from_account_sec = True
                             break
                 if self_uid_inferred <= 0:
+                    conv_ids = []
+                    peer_uids = set()
+                    if hinted_conversation_id:
+                        conv_ids.append(hinted_conversation_id)
+                    for m in filtered or result.messages:
+                        cid = str(getattr(m, "conversation_id", "") or "").strip()
+                        if cid:
+                            conv_ids.append(cid)
+                        sender_uid = getattr(m, "sender_uid", 0) or 0
+                        sender_sec = str(getattr(m, "sender_sec_uid", "") or "").strip()
+                        if sender_uid > 0 and sender_sec and account_sec_uid and sender_sec != account_sec_uid:
+                            peer_uids.add(sender_uid)
+
+                    db_conv_ids = await self._get_all_conv_platform_ids(str(account.id))
+                    conv_ids.extend(db_conv_ids)
                     self_uid_inferred = self._infer_self_uid_from_conversation_ids(
-                        filtered or result.messages
+                        conv_ids, peer_uids=peer_uids
                     )
 
                 new_messages: list["ScannedMessage"] = []
@@ -1735,7 +1869,7 @@ class HttpProtocolTransport(AccountTransport):
                         echo_cache_log[cache_key] = set(outs)
                     return norm in echo_cache_log[cache_key]
 
-                pending: list[tuple[Any, Any, str]] = []
+                pending: list[tuple[Any, Any, str, str]] = []
                 for m in filtered:
                     if not m.is_text or not m.text or m.sender_uid <= 0:
                         if m.server_message_id > 0:
@@ -1746,22 +1880,25 @@ class HttpProtocolTransport(AccountTransport):
                                 f"content_preview={(m.content_json or '')[:120]!r}"
                             )
                         continue
-                    if account_sec_uid and m.sender_sec_uid == account_sec_uid:
-                        continue
-                    if (
-                        self_uid_from_account_sec
-                        and self_uid_inferred > 0
-                        and m.sender_uid == self_uid_inferred
-                    ):
-                        continue
+                    # 不再直接跳过自己发送的消息，以便在下方将其方向标识为 out 并保存。
                     if not m.sender_sec_uid:
                         logger.debug(
                             f"[transport.http] 跳过 sender_sec 缺失 conv={hinted_conversation_id} "
                             f"srv_id={m.server_message_id}"
                         )
                         continue
-                    if await _is_echo(m.sender_sec_uid, m.conversation_id, m.text):
-                        continue
+
+                    # 判定消息方向：若发送方UID为自发，或是 sec_uid 匹配
+                    direction = 'in'
+                    if self_uid_inferred > 0 and m.sender_uid == self_uid_inferred:
+                        direction = 'out'
+                    elif account_sec_uid and m.sender_sec_uid == account_sec_uid:
+                        direction = 'out'
+
+                    # 仅对我方发送的消息进行回声过滤
+                    if direction == 'out':
+                        if await _is_echo(m.sender_sec_uid, m.conversation_id, m.text):
+                            continue
 
                     received_at = (
                         datetime.fromtimestamp(m.create_time_us / 1_000_000, tz=timezone.utc)
@@ -1781,16 +1918,16 @@ class HttpProtocolTransport(AccountTransport):
                             "conversation_id": m.conversation_id,
                         })
                         continue
-                    pending.append((m, received_at, external_msg_id))
+                    pending.append((m, received_at, external_msg_id, direction))
 
-                user_details: dict[int, dict[str, str]] = {}
+                user_details: dict[str, dict[str, str]] = {}
                 if pending:
-                    sender_uids = sorted({m.sender_uid for m, _, _ in pending})
-                    user_details = await self._resolve_user_details(account, sender_uids)
+                    sender_sec_uids = sorted({m.sender_sec_uid for m, _, _, _ in pending if m.sender_sec_uid})
+                    user_details = await self._resolve_user_details_by_sec_uids(account, sender_sec_uids)
 
                 touched_conv_ids: set[str] = set()
-                for m, received_at, external_msg_id in pending:
-                    info = user_details.get(m.sender_uid, {})
+                for m, received_at, external_msg_id, direction in pending:
+                    info = user_details.get(m.sender_sec_uid, {}) if m.sender_sec_uid else {}
                     nickname = info.get("nickname") or None
                     avatar = info.get("avatar") or None
 
@@ -1813,6 +1950,7 @@ class HttpProtocolTransport(AccountTransport):
                             },
                             external_msg_id=external_msg_id,
                             platform_conversation_id=m.conversation_id,
+                            direction=direction,
                         )
                     except Exception as e:  # noqa: BLE001
                         logger.warning(
@@ -1826,21 +1964,24 @@ class HttpProtocolTransport(AccountTransport):
 
                     db_conv_id, db_msg_id = upsert
                     touched_conv_ids.add(db_conv_id)
-                    new_messages.append(
-                        ScannedMessage(
-                            message_id=db_msg_id,
-                            conversation_id=db_conv_id,
-                            peer_sec_uid=m.sender_sec_uid,
-                            peer_nickname=nickname,
-                            text=m.text,
-                            received_at=received_at.isoformat(),
-                            raw={
-                                "source": "http_protocol",
-                                "server_message_id": m.server_message_id,
-                                "conversation_id": m.conversation_id,
-                            },
+
+                    # 关键：只有入向消息才返回给 worker，以触发自动回复，出向消息只落库不回复
+                    if direction == 'in':
+                        new_messages.append(
+                            ScannedMessage(
+                                message_id=db_msg_id,
+                                conversation_id=db_conv_id,
+                                peer_sec_uid=m.sender_sec_uid,
+                                peer_nickname=nickname,
+                                text=m.text,
+                                received_at=received_at.isoformat(),
+                                raw={
+                                    "source": "http_protocol",
+                                    "server_message_id": m.server_message_id,
+                                    "conversation_id": m.conversation_id,
+                                },
+                            )
                         )
-                    )
 
                 for conv_id in touched_conv_ids:
                     try:
@@ -1958,7 +2099,22 @@ class HttpProtocolTransport(AccountTransport):
                     self_uid_from_account_sec = True
                     break
         if self_uid_inferred <= 0:
-            self_uid_inferred = self._infer_self_uid_from_conversation_ids(result.messages)
+            conv_ids = []
+            peer_uids = set()
+            for m in result.messages:
+                cid = str(getattr(m, "conversation_id", "") or "").strip()
+                if cid:
+                    conv_ids.append(cid)
+                sender_uid = getattr(m, "sender_uid", 0) or 0
+                sender_sec = str(getattr(m, "sender_sec_uid", "") or "").strip()
+                if sender_uid > 0 and sender_sec and account_sec_uid and sender_sec != account_sec_uid:
+                    peer_uids.add(sender_uid)
+
+            db_conv_ids = await self._get_all_conv_platform_ids(str(account.id))
+            conv_ids.extend(db_conv_ids)
+            self_uid_inferred = self._infer_self_uid_from_conversation_ids(
+                conv_ids, peer_uids=peer_uids
+            )
         if account_sec_uid:
             if (
                 self_uid_inferred == 0
@@ -2026,14 +2182,7 @@ class HttpProtocolTransport(AccountTransport):
             # 自己发的：sender_sec == account.sec_uid 直接跳。
             # self_uid 只有在由 account.sec_uid 明确匹配出来时才参与过滤；
             # 单靠 conversation_id 推断容易把对方 UID 当成自己，导致入向消息被吞。
-            if account_sec_uid and m.sender_sec_uid == account_sec_uid:
-                continue
-            if (
-                self_uid_from_account_sec
-                and self_uid_inferred > 0
-                and m.sender_uid == self_uid_inferred
-            ):
-                continue
+            # 不再直接跳过自己发送的消息，以便在下方将其方向标识为 out 并保存。
             if not m.sender_sec_uid:
                 # 没 sender_sec_uid 就没法做 echo / 落库，跳过
                 logger.debug(
@@ -2041,8 +2190,17 @@ class HttpProtocolTransport(AccountTransport):
                 )
                 continue
 
-            if await _is_echo(m.sender_sec_uid, m.conversation_id, m.text):
-                continue
+            # 判定消息方向：若发送方UID为自发，或是 sec_uid 匹配
+            direction = 'in'
+            if self_uid_inferred > 0 and m.sender_uid == self_uid_inferred:
+                direction = 'out'
+            elif account_sec_uid and m.sender_sec_uid == account_sec_uid:
+                direction = 'out'
+
+            # 仅对我方发送的消息进行回声过滤
+            if direction == 'out':
+                if await _is_echo(m.sender_sec_uid, m.conversation_id, m.text):
+                    continue
 
             received_at = (
                 datetime.fromtimestamp(m.create_time_us / 1_000_000, tz=timezone.utc)
@@ -2062,24 +2220,25 @@ class HttpProtocolTransport(AccountTransport):
                     "text": m.text,
                     "server_message_id": m.server_message_id,
                     "received_at": received_at.isoformat(),
+                    "direction": direction,
                 })
                 continue
 
-            pending.append((m, received_at, external_msg_id))
+            pending.append((m, received_at, external_msg_id, direction))
 
         # ---------------- 第二遍：批量补昵称 + 落库 + 静默 mark_read ----------------
         # 仅在主路径（非 dry_run / 非 baseline）调 user_detail；
         # baseline / dry_run 不落库自然也不需要昵称
         user_details: dict[int, dict[str, str]] = {}
         if pending:
-            sender_uids = sorted({m.sender_uid for m, _, _ in pending})
+            sender_uids = sorted({m.sender_uid for m, _, _, _ in pending})
             user_details = await self._resolve_user_details(account, sender_uids)
 
         # touched_conv_ids 收集本轮 upsert 成功的 conversation_id
         # 用一次性 silent mark_read 把它们的 unread 清零，避免对同一 conv 重复 update
         touched_conv_ids: set[str] = set()
 
-        for m, received_at, external_msg_id in pending:
+        for m, received_at, external_msg_id, direction in pending:
             info = user_details.get(m.sender_uid, {})
             nickname = info.get("nickname") or None
             avatar = info.get("avatar") or None
@@ -2103,6 +2262,7 @@ class HttpProtocolTransport(AccountTransport):
                     },
                     external_msg_id=external_msg_id,
                     platform_conversation_id=m.conversation_id,
+                    direction=direction,
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning(
@@ -2116,20 +2276,23 @@ class HttpProtocolTransport(AccountTransport):
 
             db_conv_id, db_msg_id = upsert
             touched_conv_ids.add(db_conv_id)
-            new_messages.append(
-                ScannedMessage(
-                    message_id=db_msg_id,
-                    conversation_id=db_conv_id,
-                    peer_sec_uid=m.sender_sec_uid,
-                    peer_nickname=nickname,
-                    text=m.text,
-                    received_at=received_at.isoformat(),
-                    raw={
-                        "source": "http_protocol",
-                        "server_message_id": m.server_message_id,
-                    },
+
+            # 关键：只有入向消息才返回给 worker，以触发自动回复，出向消息只落库不回复
+            if direction == 'in':
+                new_messages.append(
+                    ScannedMessage(
+                        message_id=db_msg_id,
+                        conversation_id=db_conv_id,
+                        peer_sec_uid=m.sender_sec_uid,
+                        peer_nickname=nickname,
+                        text=m.text,
+                        received_at=received_at.isoformat(),
+                        raw={
+                            "source": "http_protocol",
+                            "server_message_id": m.server_message_id,
+                        },
+                    )
                 )
-            )
 
         # ---------------- silent mark_read：DB 内清 unread ----------------
         # 关键：协议路径已经把入向消息成功落库 + 准备分发，前端 unread 应当立刻清零；

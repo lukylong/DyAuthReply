@@ -8,6 +8,7 @@ export interface DouyinAccount {
   nickname: string;
   sec_uid?: null | string;
   avatar?: null | string;
+  unique_id?: null | string;
   status: number;
   auto_reply_enabled: boolean;
   status_display?: string;
@@ -93,6 +94,8 @@ export async function getSimpleDouyinAccountListApi() {
       nickname: string;
       status: number;
       status_display: string;
+      avatar?: null | string;
+      unique_id?: null | string;
     }[]
   >('/api/core/douyin/account/all');
 }

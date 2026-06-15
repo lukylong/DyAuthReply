@@ -36,3 +36,16 @@ export async function sendAccountManualReply(
     { conversation_id: conversationId, text },
   );
 }
+
+/**
+ * 刷新会话对方的用户资料（头像/昵称）
+ */
+export async function refreshConversationUserApi(
+  accountId: string,
+  conversationId: string,
+) {
+  return requestClient.post<{ message: string; success: boolean }>(
+    `/api/core/douyin/account/${accountId}/conversation/${conversationId}/refresh-user`,
+  );
+}
+

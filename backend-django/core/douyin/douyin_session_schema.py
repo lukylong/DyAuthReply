@@ -81,6 +81,16 @@ class DouyinConversationItemOut(Schema):
     last_message_preview: Optional[str] = None
     unread_count: int = 0
 
+    @staticmethod
+    def resolve_last_message_at(obj):
+        dt = obj.last_message_at if hasattr(obj, 'last_message_at') else obj.get('last_message_at')
+        if not dt:
+            return None
+        from zoneinfo import ZoneInfo
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+        return dt
+
 
 class DouyinMessageItemOut(Schema):
     id: str
@@ -92,6 +102,17 @@ class DouyinMessageItemOut(Schema):
     # 发送者信息（用于消息回复界面显示）
     sender_name: Optional[str] = None
     sender_avatar: Optional[str] = None
+
+    @staticmethod
+    def resolve_received_at(obj):
+        dt = obj.received_at if hasattr(obj, 'received_at') else obj.get('received_at')
+        if not dt:
+            return None
+        from zoneinfo import ZoneInfo
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+        return dt
+
 
 
 class DouyinManualReplyIn(Schema):

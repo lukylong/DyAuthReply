@@ -190,8 +190,22 @@ class JsSignProvider:
         if extra_params:
             extra = "&".join(f"{k}={quote(str(v), safe='')}" for k, v in extra_params.items())
             params_with_token = f"{params_with_token}&{extra}"
+        body_str = ""
+        if isinstance(body, str):
+            body_str = body
+        elif isinstance(body, bytes):
+            try:
+                body_str = body.decode("utf-8")
+            except Exception:
+                pass
+        elif isinstance(body, (bytearray, memoryview)):
+            try:
+                body_str = bytes(body).decode("utf-8")
+            except Exception:
+                pass
+
         try:
-            a_bogus = await sync_to_async(js_signer.get_ab)(params_with_token, "")
+            a_bogus = await sync_to_async(js_signer.get_ab)(params_with_token, body_str)
         except js_signer.JsSignerUnavailable as e:
             raise SignerUnavailable(f"JS a_bogus 失败: {e}") from e
         final_url = f"{url}?{params_with_token}&a_bogus={a_bogus}"

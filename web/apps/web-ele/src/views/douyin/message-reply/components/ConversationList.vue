@@ -53,7 +53,7 @@ function getAvatarColor(uid: string): string {
     '#13c2c2', '#eb2f96', '#fa8c16', '#2f54eb', '#a0d911',
   ];
   const hash = uid.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-  return colors[hash % colors.length];
+  return colors[hash % colors.length] || '#1890ff';
 }
 
 function onSelectConversation(conv: DouyinConversationItem) {
@@ -76,7 +76,14 @@ function formatTime(dateStr?: null | string): string {
   if (days === 1) return '昨天';
   if (days < 7) return `${days}天前`;
 
-  return `${date.getMonth() + 1}/${date.getDate()}`;
+  // 修复：跨年消息显示年份
+  const isSameYear = date.getFullYear() === now.getFullYear();
+
+  if (isSameYear) {
+    return `${date.getMonth() + 1}/${date.getDate()}`;
+  } else {
+    return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`;
+  }
 }
 
 // 截断消息预览

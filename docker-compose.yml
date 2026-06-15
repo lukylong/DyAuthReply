@@ -191,6 +191,26 @@ services:
         condition: service_healthy
     networks:
       - zq-net
+
+  web:
+    build:
+      context: ./web
+      dockerfile: ./scripts/deploy/Dockerfile
+    image: zq-platform/web:dev
+    container_name: zq-web
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-80}:80"
+      - "${WEB_SSL_PORT:-443}:443"
+    volumes:
+      # 如需挂载 SSL 证书，请取消注释并将证书文件放在宿主机的 ./nginx/ssl 下
+      # - ./nginx/ssl:/etc/nginx/ssl:ro
+      - backend-logs:/var/log/nginx
+    depends_on:
+      backend:
+        condition: service_started
+    networks:
+      - zq-net
 # -----------------------------------------------------------------------------
 # 命名卷：PostgreSQL / Redis 数据、后端日志、抖音 storage_state、前端 node_modules
 # -----------------------------------------------------------------------------

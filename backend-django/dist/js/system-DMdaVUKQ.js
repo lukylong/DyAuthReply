@@ -1,0 +1,1 @@
+const t="System Management",e="System Tool",s={selectPost:"Select Post",selectDept:"Select Department",allDept:"All Departments"},l={title:t,tool:e,user:s};export{l as default,t as title,e as tool,s as user};

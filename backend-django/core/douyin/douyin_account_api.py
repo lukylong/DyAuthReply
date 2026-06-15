@@ -846,6 +846,7 @@ def list_account_messages(request, account_id: str, conversation_id: str):
     """
     from core.douyin.douyin_conversation_model import DouyinConversation
     from core.douyin.douyin_message_model import DouyinMessage
+    from core.douyin.douyin_session_schema import DouyinMessageItemOut
 
     account = get_object_or_404(DouyinAccount, id=account_id)
     conv = get_object_or_404(
@@ -863,26 +864,28 @@ def list_account_messages(request, account_id: str, conversation_id: str):
     # 增强消息数据：添加发送者信息
     result = []
     for msg in messages:
-        msg_dict = {
-            'id': str(msg.id),
-            'direction': msg.direction,
-            'content_type': msg.content_type,
-            'content': msg.content,
-            'received_at': msg.received_at,
-            'processed': msg.processed,
-        }
-
         # 根据消息方向填充发送者信息
         if msg.direction == 'in':
             # 对方发来的消息
-            msg_dict['sender_name'] = conv.peer_nickname or conv.peer_sec_uid
-            msg_dict['sender_avatar'] = conv.peer_avatar
+            sender_name = conv.peer_nickname or conv.peer_sec_uid
+            sender_avatar = conv.peer_avatar
         else:
             # 我方发出的消息
-            msg_dict['sender_name'] = account.nickname
-            msg_dict['sender_avatar'] = account.avatar
+            sender_name = account.nickname
+            sender_avatar = account.avatar
 
-        result.append(msg_dict)
+        # 创建 Schema 实例（不是 dict）
+        item = DouyinMessageItemOut(
+            id=str(msg.id),
+            direction=msg.direction,
+            content_type=msg.content_type,
+            content=msg.content,
+            received_at=msg.received_at,
+            processed=msg.processed,
+            sender_name=sender_name,
+            sender_avatar=sender_avatar,
+        )
+        result.append(item)
 
     return result
 

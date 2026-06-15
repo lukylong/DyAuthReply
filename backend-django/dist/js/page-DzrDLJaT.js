@@ -1,0 +1,1 @@
+const o={login:"登錄",register:"註冊",codeLogin:"驗證碼登錄",qrcodeLogin:"二維碼登錄",forgetPassword:"忘記密碼"},t={title:"概覽",analytics:"分析頁",workspace:"工作臺"},a={auth:o,dashboard:t};export{o as auth,t as dashboard,a as default};

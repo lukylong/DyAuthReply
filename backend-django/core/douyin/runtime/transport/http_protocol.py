@@ -1114,6 +1114,13 @@ class HttpProtocolTransport(AccountTransport):
 
     @staticmethod
     def _infer_self_uid_from_conversation_ids(messages: list[Any]) -> int:
+        """Best-effort fallback for diagnostics only.
+
+        get_by_user / get_by_conversation do not expose a stable participant
+        list, and observed conversation IDs are not reliable enough to decide
+        which side is the managed account. Use this value for logging, not for
+        dropping messages.
+        """
         counts: dict[int, int] = {}
         for m in messages:
             conv_id = str(getattr(m, "conversation_id", "") or "").strip()
@@ -1696,10 +1703,12 @@ class HttpProtocolTransport(AccountTransport):
 
                 account_sec_uid = (account.sec_uid or "").strip()
                 self_uid_inferred = 0
+                self_uid_from_account_sec = False
                 if account_sec_uid:
                     for m in filtered or result.messages:
                         if m.sender_sec_uid == account_sec_uid:
                             self_uid_inferred = m.sender_uid
+                            self_uid_from_account_sec = True
                             break
                 if self_uid_inferred <= 0:
                     self_uid_inferred = self._infer_self_uid_from_conversation_ids(
@@ -1732,7 +1741,11 @@ class HttpProtocolTransport(AccountTransport):
                         continue
                     if account_sec_uid and m.sender_sec_uid == account_sec_uid:
                         continue
-                    if self_uid_inferred > 0 and m.sender_uid == self_uid_inferred:
+                    if (
+                        self_uid_from_account_sec
+                        and self_uid_inferred > 0
+                        and m.sender_uid == self_uid_inferred
+                    ):
                         continue
                     if not m.sender_sec_uid:
                         logger.debug(
@@ -1930,10 +1943,12 @@ class HttpProtocolTransport(AccountTransport):
         #     不抛 AccountIdentityMismatch；硬 mismatch 仍交给 worker 启动期 sec_uid 比对
         account_sec_uid = (account.sec_uid or "").strip()
         self_uid_inferred = 0
+        self_uid_from_account_sec = False
         if account_sec_uid:
             for m in result.messages:
                 if m.sender_sec_uid == account_sec_uid:
                     self_uid_inferred = m.sender_uid
+                    self_uid_from_account_sec = True
                     break
         if self_uid_inferred <= 0:
             self_uid_inferred = self._infer_self_uid_from_conversation_ids(result.messages)
@@ -1988,12 +2003,14 @@ class HttpProtocolTransport(AccountTransport):
                 continue
             if m.sender_uid <= 0:
                 continue
-            # 自己发的：sender_sec == account.sec_uid 直接跳；
-            # 没有 account_sec_uid 的 fallback 用 self_uid_inferred 比对
+            # 自己发的：sender_sec == account.sec_uid 直接跳。
+            # self_uid 只有在由 account.sec_uid 明确匹配出来时才参与过滤；
+            # 单靠 conversation_id 推断容易把对方 UID 当成自己，导致入向消息被吞。
             if account_sec_uid and m.sender_sec_uid == account_sec_uid:
                 continue
             if (
-                self_uid_inferred > 0
+                self_uid_from_account_sec
+                and self_uid_inferred > 0
                 and m.sender_uid == self_uid_inferred
             ):
                 continue
@@ -2015,8 +2032,8 @@ class HttpProtocolTransport(AccountTransport):
             external_msg_id = f"srv_{m.server_message_id}"
 
             if dry_run or is_baseline:
-                # dry_run（dual_run 影子模式） + baseline（首轮 cursor=0）都只攒
-                # 候选清单，**不入库、不返回**。区别仅在于日志 tag 不同。
+                # dry_run（dual-run 影子模式）和 baseline（首轮 cursor=0）都只攒
+                # 候选清单，**不入库、不返回**。baseline 只推进 cursor，避免历史消息触发回复。
                 if len(dry_run_candidates) >= max(max_conversations or 0, 50):
                     continue
                 dry_run_candidates.append({

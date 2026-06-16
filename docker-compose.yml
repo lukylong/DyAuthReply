@@ -103,7 +103,7 @@ services:
   # 基础设施
   # ---------------------------------------------------------------------------
   postgres:
-    image: postgres:16-alpine
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
     container_name: zq-postgres
     restart: unless-stopped
     environment:
@@ -125,7 +125,7 @@ services:
       - zq-net
 
   redis:
-    image: redis:7-alpine
+    image: ${REDIS_IMAGE:-redis:7-alpine}
     container_name: zq-redis
     restart: unless-stopped
     command: >

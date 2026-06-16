@@ -51,6 +51,56 @@ sudo usermod -aG docker $USER
 docker compose version
 ```
 
+### 2.1 Docker 镜像加速（国内服务器必做）
+
+`docker compose up` 会拉取 `postgres`、`redis` 等镜像，默认来自 **docker.io**，国内常超时。任选一种方式：
+
+**方式 A（推荐）：配置 Docker 守护进程加速**
+
+```bash
+# 阿里云用户：控制台 → 容器镜像服务 → 镜像加速器，复制你的专属地址
+sudo mkdir -p /etc/docker
+sudo tee /etc/docker/daemon.json <<'EOF'
+{
+  "registry-mirrors": [
+    "https://你的阿里云加速器地址.mirror.aliyuncs.com"
+  ]
+}
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+```
+
+没有阿里云时，可临时用公共加速（稳定性因地区而异，以实测为准）：
+
+```json
+{
+  "registry-mirrors": [
+    "https://docker.1ms.run",
+    "https://docker.m.daocloud.io"
+  ]
+}
+```
+
+**方式 B：在 `.env` 里指定镜像地址（不改 daemon）**
+
+```dotenv
+POSTGRES_IMAGE=docker.m.daocloud.io/library/postgres:16-alpine
+REDIS_IMAGE=docker.m.daocloud.io/library/redis:7-alpine
+```
+
+本地 `docker compose build` 时，基础镜像 `python:3.11-slim` 同样走 docker.io，**方式 A 一并解决**。
+
+**方式 C：CI 构建的业务镜像（阿里云 ACR 等）**
+
+先登录再拉取：
+
+```bash
+docker login registry.cn-hangzhou.aliyuncs.com -u <用户名>
+export DEPLOY_BACKEND_IMAGE=registry.cn-hangzhou.aliyuncs.com/命名空间/zq-backend:标签
+docker pull "${DEPLOY_BACKEND_IMAGE}"
+```
+
 建议目录：
 
 ```bash

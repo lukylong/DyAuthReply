@@ -34,6 +34,30 @@ if [[ -n "${REDIS_HOST:-}" ]]; then
 fi
 
 # -------------------------------------------------------------
+# 抖音 JS 签名依赖（jsrsasign）
+# compose 开发态 bind mount ./backend-django:/app 会盖住镜像内 node_modules，
+# 宿主机若无 npm install，worker 扫描收件箱会报 Cannot find module 'jsrsasign'。
+# -------------------------------------------------------------
+ensure_douyin_sign_deps() {
+    local sign_js_dir="/app/core/douyin/runtime/transport/sign/js"
+    if [[ ! -f "${sign_js_dir}/package.json" ]]; then
+        return 0
+    fi
+    if [[ -d "${sign_js_dir}/node_modules/jsrsasign" ]]; then
+        return 0
+    fi
+    echo "📦 安装抖音 JS 签名依赖 jsrsasign ..."
+    (
+        cd "${sign_js_dir}"
+        if [[ -f package-lock.json ]]; then
+            npm ci --no-audit --no-fund --registry=https://registry.npmmirror.com
+        else
+            npm install --no-audit --no-fund --registry=https://registry.npmmirror.com
+        fi
+    )
+}
+
+# -------------------------------------------------------------
 # 首次启动自动跑 migrate（只 web 角色执行，避免多进程并发抢锁）
 # -------------------------------------------------------------
 if [[ "${ROLE}" == "web" && "${AUTO_MIGRATE:-true}" == "true" ]]; then
@@ -53,6 +77,7 @@ fi
 # -------------------------------------------------------------
 case "${ROLE}" in
     web)
+        ensure_douyin_sign_deps
         echo "🚀 启动 Django Web (uvicorn/ASGI) on :8000"
         exec python -m uvicorn application.asgi:application \
             --host 0.0.0.0 --port 8000 \
@@ -64,6 +89,7 @@ case "${ROLE}" in
         exec python start_scheduler.py
         ;;
     douyin-worker)
+        ensure_douyin_sign_deps
         echo "🤖 启动抖音 worker（纯 HTTP 协议，无浏览器）"
         if [[ -f "start_douyin_worker.py" ]]; then
             exec python start_douyin_worker.py

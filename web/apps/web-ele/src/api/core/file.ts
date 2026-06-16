@@ -1,4 +1,5 @@
 import { useAccessStore } from '@vben/stores';
+import { useAppConfig } from '@vben/hooks';
 
 /**
  * -*- coding: utf-8 -*-
@@ -51,8 +52,8 @@ export namespace SystemFileManagerApi {
   }
 
   export interface MoveParams {
-    source_ids: string[];
-    target_parent_id: string;
+    ids: string[];
+    target_folder_id?: string | null;
   }
 
   export interface RenameParams {
@@ -68,6 +69,27 @@ export namespace SystemFileManagerApi {
     parent_id?: string;
     path?: string;
   }
+}
+
+/** 与 requestClient 一致的 API 前缀（支持 /basic-api/ 或完整域名） */
+function getApiUrlPrefix(): string {
+  const { apiURL } = useAppConfig(import.meta.env, import.meta.env.PROD);
+  return apiURL.endsWith('/') ? apiURL.slice(0, -1) : apiURL;
+}
+
+/** 是否为可直接访问的绝对 HTTP(S) 地址 */
+function isAbsoluteHttpUrl(url?: string | null): url is string {
+  return !!url && /^https?:\/\//i.test(url);
+}
+
+/**
+ * 解析文件访问地址：云存储直链用 url；本地/相对路径走 stream API
+ */
+function resolveFileAccessUrl(fileId: string, url?: string | null): string {
+  if (isAbsoluteHttpUrl(url)) {
+    return url;
+  }
+  return getFileStreamUrl(fileId);
 }
 
 /**
@@ -174,7 +196,7 @@ async function batchDelete(data: SystemFileManagerApi.BatchDeleteParams) {
  * @param path 文件路径
  */
 function getDownloadUrl(path: string): string {
-  return `/basic-api/api/core/file_manager/file/download?path=${encodeURIComponent(path)}`;
+  return `${getApiUrlPrefix()}/api/core/file_manager/file/download?path=${encodeURIComponent(path)}`;
 }
 
 /**
@@ -182,7 +204,7 @@ function getDownloadUrl(path: string): string {
  */
 async function getStorageConfig() {
   return requestClient.get<SystemFileManagerApi.StorageConfig>(
-    '/api/core/file_manager/storage_config',
+    '/api/core/file_manager/storage/config',
   );
 }
 
@@ -191,7 +213,7 @@ async function getStorageConfig() {
  * @param data 存储配置数据
  */
 async function updateStorageConfig(data: SystemFileManagerApi.StorageConfig) {
-  return requestClient.put('/api/core/file_manager/storage_config', data);
+  return requestClient.put('/api/core/file_manager/storage/config', data);
 }
 
 /**
@@ -223,10 +245,9 @@ async function getBatchFileUrls(fileIds: string[]) {
  * @param fileId 文件ID
  */
 function getFileStreamUrl(fileId: string): string {
-  // 获取访问令牌
   const accessStore = useAccessStore();
   const token = accessStore.accessToken;
-  return `/basic-api/api/core/file_manager/stream/${fileId}?token=${token}`;
+  return `${getApiUrlPrefix()}/api/core/file_manager/stream/${fileId}?token=${token}`;
 }
 
 /**
@@ -236,7 +257,7 @@ function getFileStreamUrl(fileId: string): string {
  */
 function getFileProxyUrl(fileId: string, download = false): string {
   const params = download ? '?download=true' : '';
-  return `/api/core/file_manager/proxy/${fileId}${params}`;
+  return `${getApiUrlPrefix()}/api/core/file_manager/proxy/${fileId}${params}`;
 }
 
 /**
@@ -308,6 +329,7 @@ export {
   getStorageConfig,
   moveItems,
   renameItem,
+  resolveFileAccessUrl,
   updateStorageConfig,
   uploadFile,
 };

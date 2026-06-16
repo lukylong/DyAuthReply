@@ -65,6 +65,8 @@ x-backend-env: &backend-env
   DOUYIN_WORKER_LEASE_ENABLED: "${DOUYIN_WORKER_LEASE_ENABLED:-true}"
   DOUYIN_WORKER_LEASE_TTL: "${DOUYIN_WORKER_LEASE_TTL:-45}"
   DOUYIN_SESSION_STALE_SECONDS: "${DOUYIN_SESSION_STALE_SECONDS:-120}"
+  # 文件存储：Docker 部署默认本地磁盘（未部署 MinIO 时勿用 minio）
+  FILE_STORAGE_TYPE: ${FILE_STORAGE_TYPE:-local}
 
 # 抖音 worker 公共环境（3 分片 + Redis 租约，防止多实例重复托管同一账号）
 x-douyin-worker-env: &douyin-worker-env
@@ -255,6 +257,7 @@ volumes:
   postgres-data:
   redis-data:
   backend-logs:
+  backend-media:
   douyin-data:
   web-node-modules:
   web-apps-node-modules:

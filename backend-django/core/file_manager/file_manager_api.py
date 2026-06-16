@@ -357,7 +357,7 @@ def get_file_url(request, file_id: UUID):
         from django.conf import settings
         # 构建本地文件的访问URL
         base_url = getattr(settings, 'BASE_URL', 'http://localhost:8000')
-        file_url = f"{base_url}/api/system/file_manager/download?path={file_obj.storage_path}"
+        file_url = f"{base_url}/api/core/file_manager/file/download?path={file_obj.storage_path}"
         return response_success(data={'url': file_url})
 
     # 其他情况返回存储路径
@@ -392,7 +392,7 @@ def get_batch_file_urls(request, ids: str = Query(...)):
         elif file_obj.storage_type == 'local':
             from django.conf import settings
             base_url = getattr(settings, 'BASE_URL', 'http://localhost:8000')
-            file_url = f"{base_url}/api/system/file_manager/download?path={file_obj.storage_path}"
+            file_url = f"{base_url}/api/core/file_manager/file/download?path={file_obj.storage_path}"
             result[str(file_obj.id)] = file_url
         else:
             result[str(file_obj.id)] = file_obj.storage_path

@@ -685,7 +685,7 @@ onMounted(loadData);
             </div>
           </ElFormItem>
           <ElFormItem label="静默时段">
-            <div class="flex items-center gap-2">
+            <div class="time-range">
               <ElTimePicker
                 v-model="form.silent_start"
                 value-format="HH:mm:ss"
@@ -800,7 +800,7 @@ onMounted(loadData);
               </div>
             </ElFormItem>
             <ElFormItem label="静默时段">
-              <div class="flex items-center gap-2">
+              <div class="time-range">
                 <ElTimePicker
                   v-model="importSettings.silent_start"
                   value-format="HH:mm:ss"
@@ -853,5 +853,17 @@ onMounted(loadData);
 }
 :deep(.dy-row-invalid:hover > td) {
   background-color: var(--el-color-danger-light-8) !important;
+}
+
+/* ElTimePicker 在 flex 容器内默认 width:100%，第二个会撑满整行 */
+.time-range {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.time-range :deep(.el-date-editor) {
+  width: 120px;
+  flex-shrink: 0;
 }
 </style>

@@ -357,8 +357,8 @@ X_FRAME_OPTIONS = 'DENY'
 # ********************* 文件存储配置 ******************* #
 # ================================================= #
 
-# 文件存储类型: local, oss, minio, azure
-FILE_STORAGE_TYPE = 'minio'
+# 文件存储类型: local, oss, minio, azure（生产 Docker 默认 local）
+FILE_STORAGE_TYPE = os.environ.get('FILE_STORAGE_TYPE', 'local')
 
 # 本地存储配置
 FILE_STORAGE_LOCAL_PATH = os.path.join(BASE_DIR, 'media', 'file_manager')

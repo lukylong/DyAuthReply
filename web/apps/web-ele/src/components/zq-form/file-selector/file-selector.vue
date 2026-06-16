@@ -39,7 +39,7 @@ import {
   ElTooltip,
 } from 'element-plus';
 
-import { getFileStreamUrl, uploadFile } from '#/api/core/file';
+import { getFileStreamUrl, resolveFileAccessUrl, uploadFile } from '#/api/core/file';
 
 defineOptions({
   name: 'FileSelector',
@@ -315,7 +315,7 @@ const uploadSingleFile = async (file: File) => {
 
       item.id = String(response.id);
       item.path = response.path || '';
-      item.url = response.url;
+      item.url = resolveFileAccessUrl(String(response.id), response.url);
       item.file_ext = response.file_ext;
       item.progress = 100;
       item.uploading = false;
@@ -378,7 +378,7 @@ const handleRetryUpload = async (file: UploadingFile) => {
     if (response) {
       item.id = String(response.id);
       item.path = response.path || '';
-      item.url = response.url;
+      item.url = resolveFileAccessUrl(String(response.id), response.url);
       item.file_ext = response.file_ext;
       item.progress = 100;
       item.uploading = false;
@@ -563,9 +563,12 @@ const getFileIconComponent = (
 const getFileThumbnail = (
   file: FileSelectorFile & { previewUrl?: string },
 ): string | undefined => {
-  if (file.mime_type?.startsWith('image/')) {
-    // 优先使用本地预览URL（上传时生成的），其次使用服务器URL
-    return file.previewUrl || file.url || getFileStreamUrl(file.id);
+  const ext = file.file_ext?.toLowerCase().replace('.', '') || '';
+  const isImage =
+    file.mime_type?.startsWith('image/') ||
+    ['bmp', 'gif', 'jpeg', 'jpg', 'png', 'svg', 'webp'].includes(ext);
+  if (isImage) {
+    return file.previewUrl || resolveFileAccessUrl(file.id, file.url);
   }
   return undefined;
 };

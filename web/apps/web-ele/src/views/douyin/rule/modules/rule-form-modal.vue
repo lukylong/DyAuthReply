@@ -366,6 +366,11 @@ defineExpose({ open });
   gap: 8px;
 }
 
+.time-range :deep(.el-date-editor) {
+  width: 120px;
+  flex-shrink: 0;
+}
+
 .form-help {
   margin-top: 4px;
   font-size: 12px;

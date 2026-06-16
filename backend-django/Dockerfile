@@ -66,13 +66,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY . /app
 
 # ---- 抖音 JS 签名引擎依赖 ----
-# dy_ab.js 需要 jsrsasign；node_modules 不入仓（.gitignore）。
-# 注：开发态 compose 用 ./backend-django:/app bind mount，运行时会用宿主机已装的
-# node_modules（jsrsasign 纯 JS、跨平台通用）；此步主要为固化部署（无 bind mount）兜底。
+# dy_ab.js 需要 jsrsasign；node_modules 不入仓。bind mount 场景由 entrypoint 兜底安装。
 RUN cd /app/core/douyin/runtime/transport/sign/js \
-    && (npm install jsrsasign@^11.1.0 --no-audit --no-fund \
-        --registry=https://registry.npmmirror.com \
-    || echo "[warn] 镜像内 jsrsasign 安装失败；开发态 bind mount 会用宿主机 node_modules，可忽略")
+    && npm ci --no-audit --no-fund --registry=https://registry.npmmirror.com
 
 # 预创建运行期目录
 RUN mkdir -p /app/logs /var/lib/zq-platform/douyin

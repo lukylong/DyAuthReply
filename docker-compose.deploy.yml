@@ -15,6 +15,7 @@ services:
     volumes:
       - backend-logs:/app/logs
       - douyin-data:/var/lib/zq-platform/douyin
+      - backend-media:/app/media/file_manager
     environment:
       UVICORN_RELOAD: ""
 
@@ -28,15 +29,18 @@ services:
     volumes:
       - backend-logs:/app/logs
       - douyin-data:/var/lib/zq-platform/douyin
+      - backend-media:/app/media/file_manager
 
   douyin-worker-1:
     image: ${DEPLOY_BACKEND_IMAGE}
     volumes:
       - backend-logs:/app/logs
       - douyin-data:/var/lib/zq-platform/douyin
+      - backend-media:/app/media/file_manager
 
   douyin-worker-2:
     image: ${DEPLOY_BACKEND_IMAGE}
     volumes:
       - backend-logs:/app/logs
       - douyin-data:/var/lib/zq-platform/douyin
+      - backend-media:/app/media/file_manager

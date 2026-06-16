@@ -103,7 +103,7 @@ class LocalStorageBackend(StorageBackend):
         return os.path.exists(full_path)
 
     def get_url(self, file_path: str) -> str:
-        return f"/api/system/file_manager/download/{file_path}"
+        return f"/api/core/file_manager/file/download?path={file_path}"
 
     def get_size(self, file_path: str) -> int:
         full_path = os.path.join(self.base_path, file_path)

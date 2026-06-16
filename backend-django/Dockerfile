@@ -8,9 +8,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=300 \
+    PIP_RETRIES=10 \
     DEBIAN_FRONTEND=noninteractive \
     TZ=Asia/Shanghai \
     LANG=C.UTF-8
+
+# 服务器本地 docker build 时若某镜像站慢，可 --build-arg 覆盖，例如清华源：
+#   --build-arg PIP_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+#   --build-arg PIP_TRUSTED_HOST=mirrors.tuna.tsinghua.edu.cn
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
 
 WORKDIR /app
 
@@ -47,13 +55,12 @@ RUN ARCH=$(dpkg --print-architecture) \
     && rm /tmp/node.tar.xz \
     && node --version && npm --version
 
-# ---- Python 依赖（利用 buildx 缓存） ----
+# ---- Python 依赖（全程国内 PyPI 镜像；不升级 pip，避免访问 files.pythonhosted.org） ----
 COPY requirements.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -U "pip<25" "setuptools<81" "packaging>=24.1" wheel \
-    && \
-    pip install -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple -r requirements.txt \
-    || pip install -r requirements.txt
+    printf '[global]\nindex-url = %s\ntrusted-host = %s\ntimeout = 300\nretries = 10\n' \
+      "${PIP_INDEX_URL}" "${PIP_TRUSTED_HOST}" > /etc/pip.conf \
+    && pip install -r requirements.txt
 
 # ---- 项目源码 ----
 COPY . /app

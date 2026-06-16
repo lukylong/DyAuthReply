@@ -190,13 +190,29 @@ Nginx   →  http://127.0.0.1:8000/api/core/douyin/worker-monitor/overview
 
 ## 6. 首次部署步骤
 
-### 6.1 构建镜像（可选：推送到私有仓库）
+### 6.1 构建镜像
+
+**推荐：不要在生产服务器上构建**，由 Gitee Go 构建并推送到镜像仓库，服务器只 `docker pull`（见第 15 节）。
+
+若必须在服务器本地构建（网络慢时务必走国内 PyPI 镜像）：
 
 ```bash
 ./build_and_copy_frontend.sh
+
+# 默认已配置阿里云 PyPI 镜像；仍超时可换清华源
+export PIP_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+export PIP_TRUSTED_HOST=mirrors.tuna.tsinghua.edu.cn
+
 docker compose build backend
-# docker tag / push ...
+# 或单独构建：
+# docker build \
+#   --build-arg PIP_INDEX_URL="${PIP_INDEX_URL}" \
+#   --build-arg PIP_TRUSTED_HOST="${PIP_TRUSTED_HOST}" \
+#   -t zq-platform/backend:dev backend-django
 ```
+
+> **常见报错**：`files.pythonhosted.org Read timed out` / `No matching distribution found for django-ninja`
+> 说明 pip 仍在访问国外源。请 `git pull` 拉取最新代码后重试；旧版 Dockerfile 会在升级 pip 时走官方源导致超时。
 
 ### 6.2 启动基础服务
 

@@ -153,6 +153,9 @@ services:
     build:
       context: ./backend-django
       dockerfile: Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-mirrors.aliyun.com}
     image: zq-platform/backend:dev
     container_name: zq-backend
     restart: unless-stopped

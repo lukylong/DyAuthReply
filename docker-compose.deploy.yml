@@ -1,0 +1,42 @@
+# =============================================================================
+# 生产/CI 部署覆盖配置（与 docker-compose.yml 叠加使用）
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.deploy.yml
+#   DEPLOY_BACKEND_IMAGE=ghcr.io/owner/repo/backend:tag docker compose up -d
+#
+# 作用：
+#   - 使用 CI 构建并推送的镜像，不在服务器上 bind mount 源码
+#   - backend / scheduler / douyin-worker 共用同一镜像标签
+# =============================================================================
+
+services:
+  backend:
+    image: ${DEPLOY_BACKEND_IMAGE:?请设置 DEPLOY_BACKEND_IMAGE}
+    volumes:
+      - backend-logs:/app/logs
+      - douyin-data:/var/lib/zq-platform/douyin
+    environment:
+      UVICORN_RELOAD: ""
+
+  scheduler:
+    image: ${DEPLOY_BACKEND_IMAGE}
+    volumes:
+      - backend-logs:/app/logs
+
+  douyin-worker-0:
+    image: ${DEPLOY_BACKEND_IMAGE}
+    volumes:
+      - backend-logs:/app/logs
+      - douyin-data:/var/lib/zq-platform/douyin
+
+  douyin-worker-1:
+    image: ${DEPLOY_BACKEND_IMAGE}
+    volumes:
+      - backend-logs:/app/logs
+      - douyin-data:/var/lib/zq-platform/douyin
+
+  douyin-worker-2:
+    image: ${DEPLOY_BACKEND_IMAGE}
+    volumes:
+      - backend-logs:/app/logs
+      - douyin-data:/var/lib/zq-platform/douyin

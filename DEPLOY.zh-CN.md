@@ -56,8 +56,8 @@ docker compose version
 ```bash
 sudo mkdir -p /opt && sudo chown -R $USER:$USER /opt
 cd /opt
-git clone <your-repo-url> DyAuthReply
-cd DyAuthReply
+git clone https://gitee.com/lianshenglong/dy-auth-reply.git dy-auth-reply
+cd dy-auth-reply
 ```
 
 ---
@@ -471,6 +471,11 @@ docker compose --profile douyin up -d --remove-orphans \
 | `docker-compose.yml` | 服务定义（含 3 Worker + healthcheck） |
 | `.env.example` | 环境变量模板 |
 | `build_and_copy_frontend.sh` | 前端构建并复制到 `backend-django/dist` |
+| `scripts/deploy/ci-build-frontend.sh` | CI / 本地共用的前端构建脚本 |
+| `scripts/deploy/remote-deploy.sh` | 服务器上拉镜像并滚动更新 |
+| `docker-compose.deploy.yml` | 生产部署 compose 覆盖（使用远程镜像） |
+| `.workflow/MasterPipeline.yml` | Gitee Go 自动部署流水线 |
+| `.github/workflows/deploy.yml` | GitHub Actions（可选） |
 | `backend-django/core/douyin/douyin_worker_monitor_*.py` | Worker 监控采集与 API |
 | `web/apps/web-ele/src/views/douyin/worker-monitor/` | Worker 监控前端页 |
 | `zh-CN.md` | 含数据迁移、回滚等补充说明 |
@@ -489,3 +494,128 @@ docker compose --profile douyin up -d --remove-orphans \
 docker compose --profile douyin ps
 # 浏览器：抖音托管 → Worker 进程监控
 ```
+
+---
+
+## 15. Gitee Go 自动发布（推荐）
+
+仓库地址：**https://gitee.com/lianshenglong/dy-auth-reply**
+
+推送 `master` / `main` 时自动完成：**构建前端 → 构建 Docker 镜像 → 推送镜像仓库 → SSH 部署到服务器**。
+
+服务器**不需要** Node.js；构建在 Gitee Go 云端执行。
+
+### 15.1 工作流做了什么
+
+```text
+git push gitee master
+  → Gitee Go Runner：pnpm build 前端
+  → docker build backend-django（含 dist）
+  → push 到阿里云 ACR / 其它镜像仓库
+  → SSH 到生产服务器
+       → git pull
+       → docker compose pull/up
+       → migrate + 重启 3×worker
+```
+
+相关文件：
+
+| 文件 | 作用 |
+|------|------|
+| `.workflow/MasterPipeline.yml` | Gitee Go 流水线定义 |
+| `scripts/deploy/ci-build-and-push-image.sh` | 构建前端 + 推送镜像 |
+| `scripts/deploy/remote-deploy.sh` | 服务器滚动部署 |
+| `docker-compose.deploy.yml` | 使用远程镜像，无源码 bind mount |
+| `.github/workflows/deploy.yml` | （可选）GitHub 镜像仓库时使用 |
+
+### 15.2 一次性准备（服务器）
+
+```bash
+# 1. 克隆 Gitee 仓库（仅首次）
+sudo mkdir -p /opt && sudo chown -R $USER:$USER /opt
+cd /opt
+git clone https://gitee.com/lianshenglong/dy-auth-reply.git dy-auth-reply
+cd dy-auth-reply
+
+# 2. 配置生产 .env（仅首次，勿提交 Git）
+cp .env.example .env && vim .env
+
+# 3. 首次手动初始化（仅首次）
+docker compose up -d postgres redis
+docker compose up -d backend scheduler
+docker compose exec backend python manage.py migrate --noinput
+docker compose exec backend python manage.py createsuperuser
+docker compose --profile douyin up -d --remove-orphans \
+  douyin-worker-0 douyin-worker-1 douyin-worker-2
+```
+
+服务器需已安装：**Docker、Docker Compose、Git**，并配置 **Nginx + HTTPS**。
+
+### 15.3 开通 Gitee Go 并配置流水线
+
+1. 打开 https://gitee.com/lianshenglong/dy-auth-reply → **Gitee Go** → 开通服务  
+2. 推送代码后，仓库会出现 `.workflow/MasterPipeline.yml`  
+3. 在 Gitee Go 控制台创建流水线并关联该 YAML  
+
+#### 流水线变量（Gitee Go → 流水线 → 变量）
+
+| 变量名 | 示例 | 说明 |
+|--------|------|------|
+| `DOCKER_REGISTRY` | `registry.cn-hangzhou.aliyuncs.com` | 镜像仓库地址 |
+| `DOCKER_REPOSITORY` | `lianshenglong/zq-backend` | 命名空间/镜像名 |
+| `DOCKER_USERNAME` | 阿里云账号 | 拉取/推送镜像 |
+| `DOCKER_PASSWORD` | *** | 镜像仓库密码 |
+| `DEPLOY_HOST_GROUP_ID` | `prod-servers` | 主机组 ID（见下） |
+| `VITE_GLOB_API_URL` | `/basic-api/` | 前端打包 API 地址 |
+| `DEPLOY_PATH` | `/opt/dy-auth-reply` | 服务器项目路径 |
+
+#### 配置生产服务器主机组
+
+1. Gitee Go → **主机组** → 新建（如 `prod-servers`）  
+2. 添加你的生产服务器 IP  
+3. **SSH 凭据由你在 Gitee 控制台自行填写**（用户名、私钥或密码）  
+4. 将主机组 ID 写入变量 `DEPLOY_HOST_GROUP_ID`  
+
+#### 镜像仓库（推荐阿里云 ACR）
+
+```bash
+# 示例：登录并手动验证（本地）
+docker login registry.cn-hangzhou.aliyuncs.com
+docker tag zq-platform/backend:dev registry.cn-hangzhou.aliyuncs.com/lianshenglong/zq-backend:test
+docker push registry.cn-hangzhou.aliyuncs.com/lianshenglong/zq-backend:test
+```
+
+### 15.4 触发方式
+
+| 方式 | 说明 |
+|------|------|
+| 自动 | `git push origin master` 到 Gitee |
+| 手动 | Gitee Go → 流水线 → 运行 |
+
+### 15.5 服务器手动部署（与 CI 相同）
+
+```bash
+cd /opt/dy-auth-reply
+export DEPLOY_BACKEND_IMAGE=registry.cn-hangzhou.aliyuncs.com/lianshenglong/zq-backend:<commit-sha>
+export DOCKER_REGISTRY=registry.cn-hangzhou.aliyuncs.com
+export DOCKER_USERNAME=<你的用户名>
+export DOCKER_PASSWORD=<你的密码>
+bash scripts/deploy/remote-deploy.sh
+```
+
+### 15.6 常见问题
+
+**Q：Gitee Go 构建机没有 docker 命令**  
+在流水线第一步使用 `shell@agent` + `hostGroupID: gitee-go`（云端构建机需已装 Docker）；或改用自己注册的带 Docker 的主机组执行 `ci-build-and-push-image.sh`。
+
+**Q：服务器 git pull 要密码**  
+在服务器配置 SSH 拉取：`git remote set-url origin git@gitee.com:lianshenglong/dy-auth-reply.git`，并将部署公钥加到 Gitee 仓库部署公钥。
+
+**Q：只想更新后端，不动 worker**  
+流水线变量设 `DEPLOY_WORKERS=false`。
+
+---
+
+## 16. GitHub Actions 自动发布（可选）
+
+若代码同步到 GitHub，可使用 `.github/workflows/deploy.yml`（推送 GHCR + SSH）。配置方式与 Gitee 类似，Secrets 填 `DEPLOY_HOST`、`DEPLOY_USER`、`DEPLOY_SSH_KEY` 等，详见 workflow 文件注释。

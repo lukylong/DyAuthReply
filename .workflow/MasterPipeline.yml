@@ -1,0 +1,72 @@
+# =============================================================================
+# Gitee Go 主干自动部署流水线
+# 仓库：https://gitee.com/lianshenglong/dy-auth-reply
+#
+# 开通 Gitee Go 后，在「流水线」中启用本配置。
+# 需在 Gitee Go「主机组」中添加生产服务器，并将 hostGroupID 填入下方。
+#
+# 流水线变量（在 Gitee 控制台配置，勿写入仓库）：
+#   DOCKER_REGISTRY        镜像仓库，如 registry.cn-hangzhou.aliyuncs.com
+#   DOCKER_REPOSITORY      命名空间/镜像名，如 lianshenglong/zq-backend
+#   DOCKER_USERNAME        镜像仓库用户名
+#   DOCKER_PASSWORD        镜像仓库密码
+#   VITE_GLOB_API_URL      前端 API 地址，默认 /basic-api/
+#   DEPLOY_PATH            服务器项目路径，默认 /opt/dy-auth-reply
+# =============================================================================
+
+version: '1.0'
+name: dy-auth-reply-master-deploy
+displayName: DyAuthReply 生产自动部署
+
+triggers:
+  push:
+    branches:
+      precise:
+        - master
+        - main
+
+variables:
+  VITE_GLOB_API_URL: '/basic-api/'
+  DEPLOY_PATH: '/opt/dy-auth-reply'
+  RUN_MIGRATE: 'true'
+  DEPLOY_WORKERS: 'true'
+
+stages:
+  - stage: build_and_push
+    displayName: 构建并推送镜像
+    strategy: fast
+    trigger: auto
+    steps:
+      - step: shell@agent
+        name: build_push_image
+        displayName: 前端构建 + Docker 推送
+        hostGroupID: gitee-go
+        script: |
+          set -euo pipefail
+          export VITE_GLOB_API_URL="${VITE_GLOB_API_URL:-/basic-api/}"
+          export IMAGE_TAG="${GITEE_COMMIT}"
+          bash scripts/deploy/ci-build-and-push-image.sh
+
+  - stage: deploy
+    displayName: 部署到生产服务器
+    strategy: fast
+    trigger: auto
+    steps:
+      - step: deploy@host
+        name: deploy_production
+        displayName: SSH 滚动部署
+        # 在 Gitee Go → 主机组 创建后，将 ID 填到流水线变量 DEPLOY_HOST_GROUP_ID
+        hostGroupID: ${DEPLOY_HOST_GROUP_ID}
+        script: |
+          set -euo pipefail
+          export DEPLOY_PATH="${DEPLOY_PATH:-/opt/dy-auth-reply}"
+          export DEPLOY_BACKEND_IMAGE="${DOCKER_REGISTRY}/${DOCKER_REPOSITORY}:${GITEE_COMMIT}"
+          export RUN_MIGRATE="${RUN_MIGRATE:-true}"
+          export DEPLOY_WORKERS="${DEPLOY_WORKERS:-true}"
+          export DOCKER_REGISTRY="${DOCKER_REGISTRY}"
+          export DOCKER_USERNAME="${DOCKER_USERNAME}"
+          export DOCKER_PASSWORD="${DOCKER_PASSWORD}"
+          cd "${DEPLOY_PATH}"
+          git remote set-url origin https://gitee.com/lianshenglong/dy-auth-reply.git || true
+          git fetch origin && git reset --hard "origin/${GITEE_BRANCH}"
+          bash scripts/deploy/remote-deploy.sh

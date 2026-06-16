@@ -37,6 +37,7 @@ from core.douyin.douyin_rule_api import router as douyin_rule_router
 from core.douyin.douyin_session_api import router as douyin_session_router
 from core.douyin.douyin_stat_api import router as douyin_stat_router
 from core.douyin.douyin_template_api import router as douyin_template_router
+from core.douyin.douyin_worker_monitor_api import router as douyin_worker_monitor_router
 from core.social.template_api import router as social_template_router
 from core.social.quick_reply_api import router as social_quick_reply_router
 from core.social.rule_api import router as social_rule_router
@@ -83,6 +84,7 @@ core_router.add_router("/douyin", douyin_quick_reply_router, tags=["Core-Douyin-
 core_router.add_router("/douyin", douyin_event_router, tags=["Core-Douyin-Event"])
 core_router.add_router("/douyin", douyin_stat_router, tags=["Core-Douyin-Stat"])
 core_router.add_router("/douyin", douyin_reply_log_router, tags=["Core-Douyin-ReplyLog"])
+core_router.add_router("/douyin", douyin_worker_monitor_router, tags=["Core-Douyin-WorkerMonitor"])
 
 # 跨平台共用层（抖音/快手共享：模板、快捷回复、规则、黑名单）
 core_router.add_router("/social", social_template_router, tags=["Core-Social-Template"])

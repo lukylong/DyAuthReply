@@ -60,6 +60,43 @@ x-backend-env: &backend-env
   DOUYIN_HTTP_PROTOCOL_SCAN_INBOX_DUAL_RUN: ${DOUYIN_HTTP_PROTOCOL_SCAN_INBOX_DUAL_RUN:-false}
   # Phase 3 dual-run：影子编码 + 真路径真发；零真发风险，配合 sniffer 做协议对账
   DOUYIN_TRANSPORT_DUAL_RUN: ${DOUYIN_TRANSPORT_DUAL_RUN:-false}
+  # Worker 分片/租约（backend 监控 API 与 worker 保持一致）
+  DOUYIN_WORKER_SHARD_COUNT: "${DOUYIN_WORKER_SHARD_COUNT:-3}"
+  DOUYIN_WORKER_LEASE_ENABLED: "${DOUYIN_WORKER_LEASE_ENABLED:-true}"
+  DOUYIN_WORKER_LEASE_TTL: "${DOUYIN_WORKER_LEASE_TTL:-45}"
+  DOUYIN_SESSION_STALE_SECONDS: "${DOUYIN_SESSION_STALE_SECONDS:-120}"
+
+# 抖音 worker 公共环境（3 分片 + Redis 租约，防止多实例重复托管同一账号）
+x-douyin-worker-env: &douyin-worker-env
+  <<: *backend-env
+  ROLE: douyin-worker
+  AUTO_MIGRATE: "false"
+  DOUYIN_WORKER_SHARD_COUNT: "${DOUYIN_WORKER_SHARD_COUNT:-3}"
+  DOUYIN_WORKER_LEASE_ENABLED: "${DOUYIN_WORKER_LEASE_ENABLED:-true}"
+  DOUYIN_WORKER_LEASE_TTL: "${DOUYIN_WORKER_LEASE_TTL:-45}"
+
+x-douyin-worker: &douyin-worker
+  image: zq-platform/backend:dev
+  restart: unless-stopped
+  profiles: ["douyin"]
+  command: ["douyin-worker"]
+  healthcheck:
+    test: ["CMD-SHELL", "pgrep -f start_douyin_worker.py >/dev/null || exit 1"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 90s
+  volumes:
+    - ./backend-django:/app
+    - backend-logs:/app/logs
+    - douyin-data:/var/lib/zq-platform/douyin
+  depends_on:
+    backend:
+      condition: service_started
+    redis:
+      condition: service_healthy
+  networks:
+    - zq-net
 
 services:
   # ---------------------------------------------------------------------------
@@ -163,34 +200,30 @@ services:
     networks:
       - zq-net
 
-  # 抖音 worker：默认单实例托管全部账号（SHARD_COUNT=1）。
-  # 横向扩展（200+ 账号）：见 DEPLOY.zh-CN.md「多 worker 分片」——为每个分片复制一份
-  # 该服务并设置不同的 DOUYIN_WORKER_SHARD_INDEX，同时开启 DOUYIN_WORKER_LEASE_ENABLED。
-  # 不再固定 container_name，便于 docker compose 多实例命名与扩展。
-  douyin-worker:
-    image: zq-platform/backend:dev
-    restart: unless-stopped
-    profiles: ["douyin"]
+  # 抖音 worker ×3：md5(account_id) % SHARD_COUNT 静态分片 + Redis 租约（SET NX + TTL）
+  # 启动（建议带 --remove-orphans 清理旧版单 worker 容器，避免重复托管）：
+  #   docker compose --profile douyin up -d --remove-orphans \
+  #     douyin-worker-0 douyin-worker-1 douyin-worker-2
+  douyin-worker-0:
+    <<: *douyin-worker
+    container_name: zq-douyin-worker-0
     environment:
-      <<: *backend-env
-      ROLE: douyin-worker
-      AUTO_MIGRATE: "false"
-      # 分片/租约（默认单实例：COUNT=1 托管全部，租约关闭）。多实例部署时覆盖这些值。
-      DOUYIN_WORKER_SHARD_COUNT: "${DOUYIN_WORKER_SHARD_COUNT:-1}"
-      DOUYIN_WORKER_SHARD_INDEX: "${DOUYIN_WORKER_SHARD_INDEX:-0}"
-      DOUYIN_WORKER_LEASE_ENABLED: "${DOUYIN_WORKER_LEASE_ENABLED:-false}"
-    command: ["douyin-worker"]
-    volumes:
-      - ./backend-django:/app
-      - backend-logs:/app/logs
-      - douyin-data:/var/lib/zq-platform/douyin
-    depends_on:
-      backend:
-        condition: service_started
-      redis:
-        condition: service_healthy
-    networks:
-      - zq-net
+      <<: *douyin-worker-env
+      DOUYIN_WORKER_SHARD_INDEX: "0"
+
+  douyin-worker-1:
+    <<: *douyin-worker
+    container_name: zq-douyin-worker-1
+    environment:
+      <<: *douyin-worker-env
+      DOUYIN_WORKER_SHARD_INDEX: "1"
+
+  douyin-worker-2:
+    <<: *douyin-worker
+    container_name: zq-douyin-worker-2
+    environment:
+      <<: *douyin-worker-env
+      DOUYIN_WORKER_SHARD_INDEX: "2"
 
   web:
     profiles: ["unused"]

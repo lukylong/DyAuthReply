@@ -8,3 +8,4 @@ export * from './rule';
 export * from './session';
 export * from './stat';
 export * from './template';
+export * from './worker-monitor';

@@ -248,7 +248,14 @@ def merge_storage_state(
 
     # bd-ticket：旧值为基底 → cookie 自动解析覆盖 → 显式 web_protect/keys 覆盖
     bd: dict[str, str] = dict(base.get("_bd_ticket") or {})
-    bd.update(parse_bd_ticket_from_cookie(cookies))
+    old_ts_sign = bd.get("ts_sign")
+    new_bd = parse_bd_ticket_from_cookie(cookies)
+    bd.update(new_bd)
+    
+    import time
+    if new_bd.get("ts_sign") and new_bd.get("ts_sign") != old_ts_sign:
+        bd["create_time"] = str(int(time.time()))
+
     wp = parse_web_protect(web_protect)
     for key in ("ticket", "ts_sign", "client_cert", "create_time"):  # 显式 web_protect 覆盖自动值
         if wp.get(key):

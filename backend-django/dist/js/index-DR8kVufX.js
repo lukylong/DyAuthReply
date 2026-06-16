@@ -1,0 +1,1 @@
+import{u as o,c as s}from"./bootstrap-DdzLovh2.js";import{i as a,g as c,u as i}from"../jse/index-index-DLGOw9nB.js";const t={prefix:Math.floor(Math.random()*1e4),current:0},u=Symbol("elIdInjection"),d=()=>c()?a(u,t):t,p=n=>{const e=d(),r=o();return s(()=>i(n)||`${r.value}-id-${e.prefix}-${e.current++}`)};export{d as a,p as u};

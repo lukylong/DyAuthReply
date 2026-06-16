@@ -410,13 +410,19 @@ def _decode_text_from_content_json(content_json: str) -> str:
     if isinstance(val, str) and val.strip():
         return val
 
+    # 优先检测表情描述名称，如 "display_name": "[赞][赞][赞]" 或 "display_name": "早上好"
+    disp_name = obj.get("display_name")
+    if isinstance(disp_name, str) and disp_name.strip():
+        return disp_name
+
     # 纯表情/贴纸类消息通常没有 text 字段。生成稳定占位文本，让兜底规则可触发；
-    # 不对 command_type / trace / ext-only 系统消息兜底，避免把已读、链接卡片扩展等误当用户消息。
-    if any(k in obj for k in ("emoji", "sticker", "emoticon", "emoticon_id")):
+    # 模糊匹配键名以检测媒体类型，防止由于 Douyin 键名变化（如 emoji_type, sticker_type）漏掉包
+    keys = [k.lower() for k in obj.keys()]
+    if any("emoji" in k or "sticker" in k or "emoticon" in k for k in keys):
         return "[表情]"
-    if any(k in obj for k in ("image", "image_url", "picture")):
+    if any("image" in k or "picture" in k for k in keys):
         return "[图片]"
-    if any(k in obj for k in ("video", "video_url")):
+    if any("video" in k for k in keys):
         return "[视频]"
     return ""
 
@@ -464,6 +470,23 @@ def decode_im_message(buf: bytes) -> Optional[IMMessage]:
 
     text = _decode_text_from_content_json(content_json)
     ext_list = fields.get(_MSG_F_EXT_KV) or []
+    
+    # Try to extract true server creation time from ext_kv
+    for raw in ext_list:
+        if isinstance(raw, (bytes, bytearray)) and raw:
+            kv = {}
+            try:
+                for fnum, _wt, val in iter_fields(raw):
+                    kv.setdefault(fnum, []).append(val)
+            except Exception:
+                continue
+            key = get_first_str(kv, 1)
+            if key == "s:server_message_create_time":
+                val_str = get_first_str(kv, 2)
+                if val_str and val_str.isdigit():
+                    create_us = int(val_str) * 1000
+                    break
+
     client_msg_id = _decode_client_msg_id_from_ext(
         [v for v in ext_list if isinstance(v, (bytes, bytearray))]
     )

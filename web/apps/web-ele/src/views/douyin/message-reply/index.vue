@@ -4,7 +4,7 @@ import type {
   DouyinMessageItem,
 } from '#/api/core/douyin';
 
-import { computed, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 
 import { Page } from '@vben/common-ui';
 
@@ -181,6 +181,40 @@ async function onSendMessage(text: string) {
     ElMessage.error(error.message || '发送失败');
   }
 }
+
+let replyTimer: null | ReturnType<typeof setInterval> = null;
+
+async function pollReplyData() {
+  if (!activeAccountId.value) return;
+  try {
+    conversations.value = await getAccountConversations(activeAccountId.value);
+    if (activeConversationId.value) {
+      messages.value = await getAccountMessages(
+        activeAccountId.value,
+        activeConversationId.value,
+      );
+    }
+  } catch (error) {
+    console.error('静默刷新会话或消息失败:', error);
+  }
+}
+
+watch(activeAccountId, (newId) => {
+  if (replyTimer) {
+    clearInterval(replyTimer);
+    replyTimer = null;
+  }
+  if (newId) {
+    replyTimer = setInterval(pollReplyData, 3000);
+  }
+});
+
+onUnmounted(() => {
+  if (replyTimer) {
+    clearInterval(replyTimer);
+    replyTimer = null;
+  }
+});
 </script>
 
 <template>

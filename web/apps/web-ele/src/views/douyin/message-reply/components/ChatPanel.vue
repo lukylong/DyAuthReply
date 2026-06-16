@@ -130,6 +130,8 @@ function formatTime(dateStr?: null | string): string {
   });
 }
 
+
+
 watch(
   () => props.messages.length,
   () => {

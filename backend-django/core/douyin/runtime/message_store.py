@@ -241,6 +241,7 @@ def _upsert_conversation_and_message(
             'processed': False,
         },
     )
+
     # 自愈：如果 direction 存储错误则更新
     if not msg_created and msg.direction != direction:
         msg.direction = direction

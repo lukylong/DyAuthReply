@@ -2,18 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 @File: transport/frontier_ws.py
-@Desc: FrontierWsDecorator —— 主动连 frontier-im WebSocket 的实时入站信号（无浏览器）
-
-    **主动**连 wss://frontier-im.douyin.com/ws/v2（纯 cookie，无浏览器）。
-
-借鉴 DouYin_Spider/dy_apis/douyin_recv_msg.py 的鉴权（只需 cookie）：
-    device_id = 用 cookie + a_bogus 调 query/user 拿
-    access_key = md5(fpId + appKey + device_id + 盐)
-    WS url = wss://.../ws/v2?aid&device_platform&fpid&device_id&token=cookie[sessionid]&access_key
-
-策略：WS 帧只作"有新消息"信号，正文落库仍走 inner.scan_inbox（已用 JS 签名 + HTTP
-验证过 status_code=0），避免 protobuf 解错入错库。
+@Desc: FrontierWsDecorator —— 主动连 frontier-im WebSocket 的实时收信与落库通道（无浏览器）
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -24,13 +15,15 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, Any, List, Optional
 from urllib.parse import urlencode
 
+from asgiref.sync import sync_to_async
+
 from core.douyin.runtime.transport.base import AccountTransport, InboundEvent
-from core.douyin.runtime.transport.frontier import decode_frontier_frame
+from core.douyin.runtime.transport.frontier_ws_decoder import decode_frontier_ws_messages, encode_ws_ack
+from core.douyin.runtime.message_store import ScannedMessage
 
 if TYPE_CHECKING:
     from core.douyin.douyin_account_model import DouyinAccount
     from core.douyin.douyin_rule_model import DouyinRule
-    from core.douyin.runtime.message_store import ScannedMessage
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +35,7 @@ _WS_BASE = "wss://frontier-im.douyin.com/ws/v2"
 
 _DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    "(KHTML, Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
 
@@ -57,7 +50,7 @@ def _cookie_header(cookies: dict[str, str]) -> str:
 
 
 class FrontierImWsClient:
-    """主动连 frontier-im WS 的异步客户端；收到入向帧调 on_inbound(hint)。"""
+    """主动连 frontier-im WS 的异步客户端；收到消息反序列化为 IMMessage 并通过 on_inbound(msg) 派发。"""
 
     def __init__(
         self,
@@ -75,6 +68,7 @@ class FrontierImWsClient:
         self._proxy = proxy
         self._stopped = False
         self._connected = False
+        self._ws = None
 
     @property
     def connected(self) -> bool:
@@ -146,8 +140,6 @@ class FrontierImWsClient:
                 logger.info(
                     f"[frontier.ws] 连接 frontier-im account={self._account_id} device_id={device_id}"
                 )
-                # subprotocol 必须用 subprotocols 参数声明（不能塞 header，否则 websockets 校验失败）；
-                # 版本兼容：>=13 用 additional_headers，旧版用 extra_headers
                 _subprotocols = ["binary", "base64", "pbbp2"]
                 try:
                     conn = websockets.connect(
@@ -162,6 +154,7 @@ class FrontierImWsClient:
                         max_size=None, ping_interval=20, ping_timeout=20,
                     )
                 async with conn as ws:
+                    self._ws = ws
                     self._connected = True
                     backoff = 2.0
                     logger.info(f"[frontier.ws] 已连接 account={self._account_id}")
@@ -178,6 +171,7 @@ class FrontierImWsClient:
                 )
             finally:
                 self._connected = False
+                self._ws = None
             if self._stopped:
                 break
             await asyncio.sleep(backoff)
@@ -190,21 +184,45 @@ class FrontierImWsClient:
                 message = message.encode("latin1")
         if not isinstance(message, (bytes, bytearray, memoryview)):
             return
-        hint = decode_frontier_frame(bytes(message), url=_WS_BASE)
-        if hint is None or hint.direction == "outbound":
+
+        logger.info(f"[frontier.ws] 收到原始二进制帧 account={self._account_id} len={len(message)}")
+
+        # 深度解包二进制帧
+        msgs, log_id, ack_ext = decode_frontier_ws_messages(bytes(message))
+        logger.info(
+            f"[frontier.ws] 解包结果 account={self._account_id}: "
+            f"msgs_len={len(msgs)} log_id={log_id} ack_ext={ack_ext!r}"
+        )
+
+        # 若需要且支持 ACK，进行 ACK 帧回传
+        if log_id and ack_ext:
+            asyncio.create_task(self._send_ack(log_id, ack_ext))
+
+        # 派发解出的每一条 IM 消息
+        if msgs:
+            for m in msgs:
+                with suppress(Exception):
+                    self._on_inbound(m)
+
+    async def _send_ack(self, log_id: int, ack_ext: str) -> None:
+        if self._ws is None or not self._connected:
             return
-        with suppress(Exception):
-            self._on_inbound(hint)
+        try:
+            ack_bytes = encode_ws_ack(log_id, ack_ext)
+            if ack_bytes:
+                await self._ws.send(ack_bytes)
+                logger.debug(f"[frontier.ws] 成功回发确认帧 log_id={log_id}")
+        except Exception as e:
+            logger.warning(f"[frontier.ws] 发送确认帧失败 log_id={log_id}: {e}")
 
     async def stop(self) -> None:
         self._stopped = True
 
 
 class FrontierWsDecorator(AccountTransport):
-    """把 inner（HttpProtocolTransport）装饰成"frontier-im WS 实时唤醒 + inner 落库"。
+    """把 inner（HttpProtocolTransport）装饰成 "完全走 WebSocket 直接消息解析并实时落库"。
 
-    与 WsInboundDecorator 同契约（name="ws_inbound"，worker 已支持），但 WS 来源是
-    主动连接的 frontier-im，不依赖浏览器。
+    与 WsInboundDecorator 同契约（name="ws_inbound"，worker 已支持）。
     """
 
     name = "ws_inbound"
@@ -213,14 +231,15 @@ class FrontierWsDecorator(AccountTransport):
         self._inner = inner
         self._signal: asyncio.Event = asyncio.Event()
         self._queue: "asyncio.Queue[InboundEvent]" = asyncio.Queue(maxsize=64)
+        self._scanned_messages_queue: "asyncio.Queue[ScannedMessage]" = asyncio.Queue(maxsize=64)
         self._account_id: Optional[str] = None
+        self._account_sec_uid: Optional[str] = None
         self._client: Optional[FrontierImWsClient] = None
         self._task: Optional[asyncio.Task] = None
-        self._last_signal_ts: float = 0.0
-        self._signal_min_gap_sec: float = 0.5
 
     async def start(self, account: "DouyinAccount") -> None:
         self._account_id = str(account.id)
+        self._account_sec_uid = str(account.sec_uid or "").strip()
         try:
             await self._inner.start(account)
         except Exception as e:  # noqa: BLE001
@@ -261,16 +280,28 @@ class FrontierWsDecorator(AccountTransport):
             await self._inner.stop(account)
         logger.info(f"[frontier.ws] 停止实时监控 account={self._account_id}")
 
-    # ---------------- 主 verbs（委派 inner） ----------------
+    # ---------------- 主 verbs ----------------
     async def scan_inbox(
         self, account: "DouyinAccount", *, max_conversations: int = 15,
         include_recent_without_unread: bool = False, conversation_hint: str | None = None,
     ) -> List["ScannedMessage"]:
-        return await self._inner.scan_inbox(
-            account, max_conversations=max_conversations,
-            include_recent_without_unread=include_recent_without_unread,
-            conversation_hint=conversation_hint,
-        )
+        if include_recent_without_unread:
+            # 首轮历史补扫（Baseline），走 HTTP 路径
+            logger.info(f"[frontier.ws] 执行首次历史补扫（Baseline）account={self._account_id}")
+            return await self._inner.scan_inbox(
+                account, max_conversations=max_conversations,
+                include_recent_without_unread=include_recent_without_unread,
+                conversation_hint=conversation_hint,
+            )
+
+        # 增量阶段：完全消费 WebSocket 线程解析存入的增量 ScannedMessage 队列
+        msgs = []
+        while not self._scanned_messages_queue.empty():
+            msgs.append(self._scanned_messages_queue.get_nowait())
+
+        if msgs:
+            logger.info(f"[frontier.ws] 增量扫描消费 WS 实时消息 count={len(msgs)}")
+        return msgs
 
     async def send_reply(
         self, account: "DouyinAccount", page: Any, *, conversation_id: str,
@@ -305,29 +336,129 @@ class FrontierWsDecorator(AccountTransport):
                 break
         return evt
 
-    def _on_inbound(self, hint) -> None:
-        now = time.time()
-        if now - self._last_signal_ts < self._signal_min_gap_sec:
+    def _on_inbound(self, m: Any) -> None:
+        """WS 线程接收消息的回调入口。"""
+        asyncio.create_task(self._process_message(m))
+
+    async def _process_message(self, m: Any) -> None:
+        """处理消息落库，若为新消息且是入向，放入 scanned 队列并唤醒 worker。"""
+        from datetime import datetime, timezone
+        from core.douyin.runtime.message_store import _upsert_conversation_and_message
+
+        # 0. 过滤非用户/系统消息
+        if not m.conversation_id or m.server_message_id <= 0:
             return
-        self._last_signal_ts = now
-        evt = InboundEvent(
-            account_id=self._account_id or "", source="ws", ts=now,
-            conversation_hint=hint.conversation_hint,
-            raw={"text_preview": (hint.text_candidate or "")[:120],
-                 "keywords": hint.keywords_matched},
+        if m.msg_type != 1 or not m.text:
+            logger.debug(f"[frontier.ws] 跳过非用户/系统消息 server_msg_id={m.server_message_id} msg_type={m.msg_type}")
+            return
+
+        # 1. 确定方向
+        direction = "in"
+        if self._account_sec_uid and m.sender_sec_uid == self._account_sec_uid:
+            direction = "out"
+
+        # 2. 获取接收时间
+        received_at = (
+            datetime.fromtimestamp(m.create_time_us / 1_000_000, tz=timezone.utc)
+            if m.create_time_us > 1577836800000000
+            else datetime.now(tz=timezone.utc)
         )
+
+        # 3. 解析或缓存用户信息
+        peer_nickname = None
+        peer_avatar = None
+        if direction == "in":
+            peer_nickname, peer_avatar = await self._get_existing_peer_info(m.sender_sec_uid)
+            if not peer_nickname:
+                try:
+                    account_orm = await self._get_account_orm()
+                    if account_orm:
+                        details = await self._inner._resolve_user_details_by_sec_uids(
+                            account_orm, [m.sender_sec_uid]
+                        )
+                        if m.sender_sec_uid in details:
+                            peer_nickname = details[m.sender_sec_uid].get("nickname")
+                            peer_avatar = details[m.sender_sec_uid].get("avatar")
+                except Exception as ex:
+                    logger.warning(
+                        f"[frontier.ws] 无法在线解析用户详情 sec_uid={m.sender_sec_uid}: {ex}"
+                    )
+
+        # 4. 落库
         try:
-            self._queue.put_nowait(evt)
-        except asyncio.QueueFull:
-            with suppress(Exception):
-                self._queue.get_nowait()
-            with suppress(Exception):
-                self._queue.put_nowait(evt)
-        self._signal.set()
-        logger.info(
-            f"[frontier.ws] 收到 IM 信号 account={self._account_id} "
-            f"text={evt.raw['text_preview']!r}"
-        )
+            res = await _upsert_conversation_and_message(
+                account_id=self._account_id,
+                peer_sec_uid=m.sender_sec_uid,
+                peer_nickname=peer_nickname,
+                peer_avatar=peer_avatar,
+                text=m.text,
+                received_at=received_at,
+                raw={
+                    "source": "frontier_ws.message",
+                    "conversation_id": m.conversation_id,
+                    "msg_type": m.msg_type,
+                    "server_message_id": m.server_message_id,
+                    "client_message_id": m.client_message_id,
+                    "sender_uid": m.sender_uid,
+                    "content_json": m.content_json,
+                },
+                external_msg_id=f"srv_{m.server_message_id}",
+                platform_conversation_id=m.conversation_id,
+                direction=direction,
+            )
+        except Exception as ex:
+            logger.exception(f"[frontier.ws] 消息落库异常 server_msg_id={m.server_message_id}: {ex}")
+            return
+
+        # 5. 如果是新插入的入向消息，放入 scanned 队列并唤醒 worker
+        if res is not None and direction == "in":
+            conv_id, msg_id = res
+            scanned = ScannedMessage(
+                message_id=msg_id,
+                conversation_id=conv_id,
+                peer_sec_uid=m.sender_sec_uid,
+                peer_nickname=peer_nickname,
+                text=m.text,
+                received_at=received_at.isoformat(),
+                raw={"conversation_id": m.conversation_id},
+            )
+            try:
+                self._scanned_messages_queue.put_nowait(scanned)
+
+                # 发送 InboundEvent 唤醒 worker 扫描
+                evt = InboundEvent(
+                    account_id=self._account_id or "",
+                    source="ws",
+                    ts=time.time(),
+                    conversation_hint=m.conversation_id,
+                    raw={"text_preview": (m.text or "")[:120]},
+                )
+                with suppress(asyncio.QueueFull):
+                    self._queue.put_nowait(evt)
+
+                self._signal.set()
+                logger.info(
+                    f"[frontier.ws] 收到新私信入库并唤醒: peer={peer_nickname or m.sender_sec_uid[:12]} "
+                    f"text={m.text!r}"
+                )
+            except Exception as ex:
+                logger.error(f"[frontier.ws] 队列操作异常: {ex}")
+
+    @sync_to_async
+    def _get_existing_peer_info(self, peer_sec_uid: str) -> tuple[Optional[str], Optional[str]]:
+        from core.douyin.douyin_conversation_model import DouyinConversation
+        conv = DouyinConversation.objects.filter(
+            account_id=self._account_id,
+            peer_sec_uid=peer_sec_uid
+        ).first()
+        if conv:
+            return conv.peer_nickname or None, conv.peer_avatar or None
+        return None, None
+
+    @sync_to_async
+    def _get_account_orm(self):
+        from core.douyin.douyin_account_model import DouyinAccount
+        return DouyinAccount.objects.filter(id=self._account_id).first()
 
 
 # ──────────────────────── helpers ────────────────────────

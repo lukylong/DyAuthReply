@@ -5,14 +5,13 @@ import type {
   DouyinSession,
 } from '#/api/core/douyin';
 
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 
 import { Page } from '@vben/common-ui';
 
 import {
   ElButton,
   ElCard,
-  ElDialog,
   ElDrawer,
   ElInput,
   ElMessage,
@@ -198,6 +197,37 @@ async function onTriggerAutoReplyTest() {
   }
 }
 
+
+
+let drawerTimer: null | ReturnType<typeof setInterval> = null;
+
+async function pollManualDrawerData() {
+  if (!activeSession.value || !manualDrawerVisible.value) return;
+  try {
+    conversations.value = await getSessionConversations(activeSession.value.id);
+    if (activeConversationId.value) {
+      messages.value = await getSessionMessages(
+        activeSession.value.id,
+        activeConversationId.value,
+      );
+    }
+  } catch (error) {
+    console.error('轮询手动回复会话或消息失败:', error);
+  }
+}
+
+watch(manualDrawerVisible, (visible) => {
+  if (visible) {
+    if (drawerTimer) clearInterval(drawerTimer);
+    drawerTimer = setInterval(pollManualDrawerData, 3000);
+  } else {
+    if (drawerTimer) {
+      clearInterval(drawerTimer);
+      drawerTimer = null;
+    }
+  }
+});
+
 onMounted(() => {
   loadSessions();
   timer = setInterval(loadSessions, 5000);
@@ -205,6 +235,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (timer) clearInterval(timer);
+  if (drawerTimer) clearInterval(drawerTimer);
 });
 </script>
 

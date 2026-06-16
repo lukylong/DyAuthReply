@@ -1930,6 +1930,10 @@ class HttpProtocolTransport(AccountTransport):
 
                 touched_conv_ids: set[str] = set()
                 for m, received_at, external_msg_id, direction in pending:
+                    # 跳过自己发出的消息（direction='out'），避免重复
+                    if direction == 'out':
+                        continue
+
                     info = user_details.get(m.sender_sec_uid, {}) if m.sender_sec_uid else {}
                     nickname = info.get("nickname") or None
                     avatar = info.get("avatar") or None
@@ -2246,6 +2250,11 @@ class HttpProtocolTransport(AccountTransport):
         touched_conv_ids: set[str] = set()
 
         for m, received_at, external_msg_id, direction in pending:
+            # 跳过自己发出的消息（direction='out'），因为发送时已通过 _record_auto_outbound_message 保存
+            # 避免重复：manual_out_* (发送时) + srv_* (扫描时) 两份相同消息
+            if direction == 'out':
+                continue
+
             info = user_details.get(m.sender_uid, {})
             nickname = info.get("nickname") or None
             avatar = info.get("avatar") or None

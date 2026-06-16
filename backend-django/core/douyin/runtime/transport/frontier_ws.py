@@ -384,7 +384,12 @@ class FrontierWsDecorator(AccountTransport):
                         f"[frontier.ws] 无法在线解析用户详情 sec_uid={m.sender_sec_uid}: {ex}"
                     )
 
-        # 4. 落库
+        # 4. 落库（跳过 out 消息，避免与手动发送时的记录重复）
+        if direction == 'out':
+            # 自己发出的消息在发送时已通过 write_manual_out_message 保存
+            # WebSocket 推送的 out 消息不需要再次保存
+            return
+
         try:
             res = await _upsert_conversation_and_message(
                 account_id=self._account_id,

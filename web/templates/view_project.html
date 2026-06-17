@@ -1,0 +1,257 @@
+{% extends "base.html" %}
+{% block title %}View Project {{ project_info.id }} - DyAuthReply{% endblock %}
+
+{% block content %}
+<div class="row pt-2 align-items-center">
+  <div class="col-md-6 text-center text-md-left">
+    <h2>Project: {{ project_info.id }}</h2>
+    <span class="badge badge-{% if project_info.status == 'ready' %}success{% elif project_info.status == 'processing' %}warning{% else %}secondary{% endif %} h5">
+      Status: {{ project_info.status }}
+    </span>
+  </div>
+  <div class="col-md-6 text-center text-md-right mt-2 mt-md-0">
+    <a href="/project/{{ project_info.id }}/run" class="btn btn-primary btn-sm"><i class="fas fa-play mr-1"></i>Run Project</a>
+    <a href="/project/{{ project_info.id }}/delete" class="btn btn-danger btn-sm" onclick="return confirm('Are you sure you want to delete this project?');"><i class="fas fa-trash-alt mr-1"></i>Delete</a>
+    <a href="/" class="btn btn-secondary btn-sm"><i class="fas fa-arrow-left mr-1"></i>Back</a>
+  </div>
+</div>
+<hr class="my-3">
+
+<!-- Tabs Navigation -->
+<ul class="nav nav-tabs" id="projectTab" role="tablist">
+  <li class="nav-item" role="presentation">
+    <button class="nav-link active" id="visualization-tab" data-toggle="tab" data-target="#visualization" type="button" role="tab" aria-controls="visualization" aria-selected="true"><i class="fas fa-chart-line mr-1"></i>Visualization</button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="records-tab" data-toggle="tab" data-target="#records" type="button" role="tab" aria-controls="records" aria-selected="false"><i class="fas fa-list mr-1"></i>Records</button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="project-info-tab" data-toggle="tab" data-target="#project-info" type="button" role="tab" aria-controls="project-info" aria-selected="false"><i class="fas fa-info-circle mr-1"></i>Project Info</button>
+  </li>
+</ul>
+
+<!-- Tabs Content -->
+<div class="tab-content" id="projectTabContent">
+  <!-- Visualization Tab -->
+  <div class="tab-pane fade show active" id="visualization" role="tabpanel" aria-labelledby="visualization-tab">
+    <div class="row pt-3">
+      <div class="col-md-12">
+        <div class="card shadow-sm mb-4">
+          <div class="card-header bg-white font-weight-bold d-flex justify-content-between align-items-center">
+            <span>Acceleration Waveform (Z-axis)</span>
+            <small class="text-muted">Total points: {{ plot_data.y|length }} | Sampling rate: {{ plot_data.sampling_rate }} Hz</small>
+          </div>
+          <div class="card-body">
+            {% if plot_data.y %}
+              <div style="position: relative; height: 350px; width: 100%;">
+                <canvas id="accelChart"></canvas>
+              </div>
+            {% else %}
+              <div class="alert alert-info text-center my-4">No plot data found for this project.</div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Records Tab -->
+  <div class="tab-pane fade" id="records" role="tabpanel" aria-labelledby="records-tab">
+    <div class="row pt-3">
+      <div class="col-md-12">
+        <div class="card shadow-sm">
+          <div class="card-header bg-white font-weight-bold">
+            Project Records
+          </div>
+          <div class="card-body p-0">
+            <div class="table-responsive">
+              <table class="table table-hover table-striped mb-0">
+                <thead class="thead-light">
+                  <tr>
+                    <th>Record ID</th>
+                    <th>Result File</th>
+                    <th>Status</th>
+                    <th>Created At</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for rec in records %}
+                    <tr>
+                      <td><code>{{ rec.id }}</code></td>
+                      <td>
+                        {% if rec.result_file %}
+                          <a href="/project/{{ project_info.id }}/record/{{ rec.id }}/download" class="btn btn-outline-primary btn-xs"><i class="fas fa-download mr-1"></i>Download Result</a>
+                        {% else %}
+                          <span class="text-muted">No result yet</span>
+                        {% endif %}
+                      </td>
+                      <td>
+                        <span class="badge badge-{% if rec.status == 'done' %}success{% elif rec.status == 'running' %}warning{% else %}danger{% endif %}">
+                          {{ rec.status }}
+                        </span>
+                      </td>
+                      <td>{{ rec.created_at }}</td>
+                    </tr>
+                  {% else %}
+                    <tr>
+                      <td colspan="4" class="text-center text-muted py-4">No execution records yet. Click "Run Project" to start one!</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Project Info Tab -->
+  <div class="tab-pane fade" id="project-info" role="tabpanel" aria-labelledby="project-info-tab">
+    <div class="row pt-3 py-3 rounded m-0 border" style="background-color: #fcfcfc;">
+      <div class="col-lg-12 col-md-12 text-center text-md-left">
+          <span class="h5">Project Information</span>
+           <hr>
+      </div>
+      <div class="col-lg-3 col-md-4 col-6 bg-light py-2 border-bottom">
+        <span class="text-secondary font-weight-bold">Id</span>
+      </div>
+      <div class="col-lg-9 col-md-8 col-6 py-2 border-bottom">
+        <span class="text-dark">{{ project_info.id }}</span>
+      </div>
+      <div class="col-lg-3 col-md-4 col-6 bg-light py-2 border-bottom">
+        <span class="text-secondary font-weight-bold">Status</span>
+      </div>
+      <div class="col-lg-9 col-md-8 col-6 py-2 border-bottom">
+        <span class="text-dark">{{ project_info.status }}</span>
+      </div>
+      <div class="col-lg-3 col-md-4 col-6 bg-light py-2 border-bottom">
+        <span class="text-secondary font-weight-bold">Target Path</span>
+      </div>
+      <div class="col-lg-9 col-md-8 col-6 py-2 border-bottom">
+        <span class="text-dark">{{ project_info.target_path }}</span>
+      </div>
+      <div class="col-lg-3 col-md-4 col-6 bg-light py-2 border-bottom">
+        <span class="text-secondary font-weight-bold">Task Target Path</span>
+      </div>
+      <div class="col-lg-9 col-md-8 col-6 py-2 border-bottom">
+        <span class="text-dark">{{ project_info.task_target_path }}</span>
+      </div>
+      <div class="col-lg-3 col-md-4 col-6 bg-light py-2 border-bottom">
+        <span class="text-secondary font-weight-bold">Host IP</span>
+      </div>
+      <div class="col-lg-9 col-md-8 col-6 py-2 border-bottom">
+        <span class="text-dark">{{ project_info.host_ip }}</span>
+      </div>
+      <div class="col-lg-3 col-md-4 col-6 bg-light py-2 border-bottom">
+        <span class="text-secondary font-weight-bold">Local IP</span>
+      </div>
+      <div class="col-lg-9 col-md-8 col-6 py-2 border-bottom">
+        <span class="text-dark">{{ project_info.local_ip }}</span>
+      </div>
+      <div class="col-lg-3 col-md-4 col-6 bg-light py-2 border-bottom">
+        <span class="text-secondary font-weight-bold">Host Port</span>
+      </div>
+      <div class="col-lg-9 col-md-8 col-6 py-2 border-bottom">
+        <span class="text-dark">{{ project_info.host_port }}</span>
+      </div>
+      <div class="col-lg-3 col-md-4 col-6 bg-light py-2 border-bottom">
+        <span class="text-secondary font-weight-bold">Target URL</span>
+      </div>
+      <div class="col-lg-9 col-md-8 col-6 py-2 border-bottom">
+        <span class="text-dark">{{ project_info.target_url }}</span>
+      </div>
+      <div class="col-lg-3 col-md-4 col-6 bg-light py-2 border-bottom">
+        <span class="text-secondary font-weight-bold">Source Code Folder</span>
+      </div>
+      <div class="col-lg-9 col-md-8 col-6 py-2 border-bottom">
+        <span class="text-dark">{{ project_info.source_code_folder }}</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+  let dataPoints = {{ plot_data.y | tojson }};
+  let totalDataPoints = dataPoints.length;
+  let samplingRate = {{ plot_data.sampling_rate }}; // Hz
+  
+  // Calculate labels in seconds based on sampling rate
+  let labels = dataPoints.map((_, index) => (index / samplingRate).toFixed(2));
+
+  // Determine standard grid color (light grey for light theme)
+  const isDarkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const gridColor = isDarkMode ? '#444' : '#e0e0e0';
+
+  const config = {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'Acceleration (Z)',
+        data: dataPoints,
+        borderColor: '#007bff',
+        borderWidth: 1.5,
+        fill: false,
+        pointRadius: 0,
+        pointHoverRadius: 5,
+        tension: 0.1
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: {
+        mode: 'index',
+        intersect: false,
+      },
+      plugins: {
+        legend: {
+          display: true,
+          position: 'top',
+        },
+        tooltip: {
+          enabled: true,
+          callbacks: {
+            title: function(tooltipItems) {
+              return 'Time: ' + tooltipItems[0].label + ' s';
+            },
+            label: function(context) {
+              return 'Value: ' + context.parsed.y.toFixed(4) + ' g';
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          title: {
+            display: true,
+            text: 'Time (seconds)'
+          },
+          grid: {
+            color: gridColor
+          },
+          ticks: {
+            maxTicksLimit: 20
+          }
+        },
+        y: {
+          title: {
+            display: true,
+            text: 'Acceleration (g)'
+          },
+          grid: {
+            color: gridColor
+          }
+        }
+      }
+    }
+  };
+
+  window.onload = function() {
+    const ctx = document.getElementById('accelChart').getContext('2d');
+    window.myLineChart = new Chart(ctx, config);
+  };
+</script>
+{% endblock %}

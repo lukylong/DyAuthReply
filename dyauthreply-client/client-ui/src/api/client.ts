@@ -1,4 +1,17 @@
-const API_PREFIX = '/api/client/v1';
+const getApiPrefix = () => {
+  if (
+    typeof window !== 'undefined' &&
+    ((window as any).__TAURI_INTERNALS__ ||
+      window.location.protocol.startsWith('tauri') ||
+      window.location.host.includes('tauri') ||
+      window.location.protocol === 'file:')
+  ) {
+    return 'http://127.0.0.1:8765/api/client/v1';
+  }
+  return '/api/client/v1';
+};
+
+const API_PREFIX = getApiPrefix();
 
 async function parseError(res: Response): Promise<string> {
   const text = await res.text();

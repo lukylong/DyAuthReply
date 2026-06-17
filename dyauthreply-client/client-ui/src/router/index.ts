@@ -1,10 +1,15 @@
-import { createRouter, createWebHistory } from 'vue-router';
+import { createRouter, createWebHashHistory } from 'vue-router';
 
 const router = createRouter({
-  history: createWebHistory('/app/'),
+  history: createWebHashHistory(),
   routes: [
     {
       path: '/',
+      name: 'splash',
+      component: () => import('../views/SplashView.vue'),
+    },
+    {
+      path: '/home',
       name: 'home',
       component: () => import('../views/HomeView.vue'),
     },

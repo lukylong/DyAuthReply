@@ -5,7 +5,7 @@ import { fileURLToPath, URL } from 'node:url';
 const apiTarget = process.env.VITE_DEV_API || 'http://127.0.0.1:8765';
 
 export default defineConfig({
-  base: '/app/',
+  base: './',
   plugins: [vue()],
   resolve: {
     alias: {

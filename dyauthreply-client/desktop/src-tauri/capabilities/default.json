@@ -6,6 +6,36 @@
   "permissions": [
     "core:default",
     "opener:default",
-    "shell:default"
+    "shell:default",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "binaries/launcher",
+          "sidecar": true,
+          "args": true
+        },
+        {
+          "name": "launcher",
+          "sidecar": true,
+          "args": true
+        }
+      ]
+    },
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        {
+          "name": "binaries/launcher",
+          "sidecar": true,
+          "args": true
+        },
+        {
+          "name": "launcher",
+          "sidecar": true,
+          "args": true
+        }
+      ]
+    }
   ]
 }

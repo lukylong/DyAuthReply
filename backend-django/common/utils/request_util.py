@@ -197,3 +197,23 @@ def get_ip_analysis(ip):
                     data = res_data.get('data')
             return data
     return data
+
+
+def get_request_user(request):
+    """
+    获取请求User
+    :param request:
+    :return:
+    """
+    user = getattr(request, 'user', None)
+    if user:
+        return user
+    
+    # Check for Django Ninja auth user
+    auth = getattr(request, 'auth', None)
+    if auth:
+        if hasattr(auth, 'username') or (isinstance(auth, dict) and 'username' in auth):
+            return auth
+            
+    from django.contrib.auth.models import AnonymousUser
+    return AnonymousUser()

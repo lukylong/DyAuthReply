@@ -50,7 +50,7 @@ onUnmounted(() => {
       </div>
 
       <nav class="nav-links">
-        <RouterLink to="/" class="nav-item">
+        <RouterLink to="/home" class="nav-item">
           <span class="icon">📊</span>概览
         </RouterLink>
         <RouterLink to="/accounts" class="nav-item">

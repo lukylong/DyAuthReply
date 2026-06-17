@@ -215,6 +215,7 @@ pub fn run() {
                     }
                 }
             }
+            #[cfg(target_os = "macos")]
             RunEvent::Reopen { .. } => {
                 if let Some(window) = app_handle.get_webview_window("main") {
                     let _ = window.show();

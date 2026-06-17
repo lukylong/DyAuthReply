@@ -223,13 +223,17 @@ def _ensure_env(args: argparse.Namespace) -> dict[str, str]:
 
 def _spawn(cmd: list[str], env: dict[str, str], cwd: Path, name: str) -> subprocess.Popen:
     _log(f'启动 {name}: {" ".join(cmd)}')
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(cwd),
-        env=env,
-        stdout=sys.stdout,
-        stderr=sys.stderr,
-    )
+    popen_kwargs: dict = {
+        'cwd': str(cwd),
+        'env': env,
+        'stdout': sys.stdout,
+        'stderr': sys.stderr,
+    }
+    if sys.platform == 'win32':
+        popen_kwargs['creationflags'] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+    else:
+        popen_kwargs['start_new_session'] = True
+    proc = subprocess.Popen(cmd, **popen_kwargs)
     PROCS.append(proc)
     return proc
 
@@ -237,7 +241,18 @@ def _spawn(cmd: list[str], env: dict[str, str], cwd: Path, name: str) -> subproc
 def _shutdown() -> None:
     for proc in reversed(PROCS):
         if proc.poll() is None:
-            proc.terminate()
+            if sys.platform == 'win32':
+                subprocess.run(
+                    ['taskkill', '/F', '/T', '/PID', str(proc.pid)],
+                    capture_output=True,
+                    timeout=15,
+                    check=False,
+                )
+            else:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    proc.terminate()
             try:
                 proc.wait(timeout=8)
             except subprocess.TimeoutExpired:

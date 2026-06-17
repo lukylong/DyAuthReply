@@ -1,10 +1,11 @@
 #[cfg(debug_assertions)]
 use std::path::PathBuf;
+use std::io::{Read, Write};
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
-use tauri::{Manager, RunEvent, WindowEvent};
+use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri_plugin_shell::ShellExt;
@@ -48,6 +49,33 @@ fn wait_for_api(port: u16) {
 #[cfg(debug_assertions)]
 fn dev_launcher_script() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../launcher/launcher.py")
+}
+
+fn request_backend_shutdown(port: u16) {
+    let host = "127.0.0.1";
+    let Ok(mut stream) = std::net::TcpStream::connect((host, port)) else {
+        return;
+    };
+    let req = format!(
+        "POST /api/client/v1/lifecycle/shutdown HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+    );
+    let _ = stream.write_all(req.as_bytes());
+    let _ = stream.flush();
+    let mut buf = [0u8; 256];
+    let _ = stream.read(&mut buf);
+    thread::sleep(Duration::from_millis(600));
+}
+
+fn shutdown_backend(app: &AppHandle) {
+    request_backend_shutdown(API_PORT);
+
+    if let Some(state) = app.try_state::<BackendChild>() {
+        if let Ok(mut guard) = state.0.lock() {
+            if let Some(child) = guard.take() {
+                let _ = child.kill();
+            }
+        }
+    }
 }
 
 fn spawn_backend(shell: &tauri_plugin_shell::Shell<tauri::Wry>) -> Option<CommandChild> {
@@ -145,6 +173,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .on_window_event(|window, event| match event {
+            // 点 × 仅隐藏到托盘，不退出；真正退出走托盘菜单 / Cmd+Q / ExitRequested
             WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 let _ = window.hide();
@@ -170,6 +199,7 @@ pub fn run() {
                 .on_menu_event(|app, event| {
                     match event.id().as_ref() {
                         "quit" => {
+                            shutdown_backend(app);
                             app.exit(0);
                         }
                         "show" => {
@@ -206,14 +236,11 @@ pub fn run() {
 
     app.run(|app_handle, event| {
         match event {
+            RunEvent::ExitRequested { .. } => {
+                shutdown_backend(app_handle);
+            }
             RunEvent::Exit => {
-                if let Some(state) = app_handle.try_state::<BackendChild>() {
-                    if let Ok(mut guard) = state.0.lock() {
-                        if let Some(child) = guard.take() {
-                            let _ = child.kill();
-                        }
-                    }
-                }
+                shutdown_backend(app_handle);
             }
             #[cfg(target_os = "macos")]
             RunEvent::Reopen { .. } => {

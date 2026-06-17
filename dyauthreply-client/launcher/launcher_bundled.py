@@ -8,7 +8,9 @@ Suitable for PyInstaller bundling and Tauri sidecar packaging.
 from __future__ import annotations
 
 import argparse
+import atexit
 import os
+import signal
 import sys
 import threading
 import time
@@ -98,6 +100,16 @@ if not os.environ.get('DOUYIN_STORAGE_ENCRYPTION_KEY'):
         key = Fernet.generate_key().decode()
         env_file.write_text(f'DOUYIN_STORAGE_ENCRYPTION_KEY={key}\n', encoding='utf-8')
     os.environ['DOUYIN_STORAGE_ENCRYPTION_KEY'] = key
+
+
+def _shutdown_bundled(*_args: object) -> None:
+    print('[launcher_bundled] 正在退出...', flush=True)
+    os._exit(0)
+
+
+atexit.register(_shutdown_bundled)
+signal.signal(signal.SIGINT, _shutdown_bundled)
+signal.signal(signal.SIGTERM, _shutdown_bundled)
 
 # Run migrations and setup Django (imports must happen AFTER env is set)
 import django

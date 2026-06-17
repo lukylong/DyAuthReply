@@ -139,6 +139,16 @@ def admin_emergency_stop(request, payload: EmergencyStopIn):
     return emergency_stop(reason=(payload.reason or '管理员急停').strip())
 
 
+@client_router.post('/lifecycle/shutdown', auth=None, summary='退出客户端（仅本机）')
+def lifecycle_shutdown(request):
+    from common.local_desktop_auth import _is_loopback
+    from core.client.lifecycle import schedule_shutdown
+
+    if not _is_loopback(request):
+        return client_api.create_response(request, {'detail': 'forbidden'}, status=403)
+    return schedule_shutdown(reason='api')
+
+
 client_api.add_router('/client/v1', client_router)
 client_api.add_router('/client/v1/douyin', douyin_account_router, tags=['Client-Douyin-Account'])
 client_api.add_router('/client/v1/douyin', douyin_rule_router, tags=['Client-Douyin-Rule'])

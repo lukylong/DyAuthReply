@@ -1,11 +1,33 @@
 :root {
-  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
   line-height: 1.5;
   font-weight: 400;
-  color-scheme: dark;
+  color-scheme: light;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  /* Theme variables - iOS 26 Liquid Light Glass Concept */
+  --bg-light: #f1f3f7;
+  --glass-bg: rgba(255, 255, 255, 0.45);
+  --glass-bg-hover: rgba(255, 255, 255, 0.6);
+  --glass-border: rgba(255, 255, 255, 0.45);
+  --glass-border-active: rgba(255, 255, 255, 0.8);
+  
+  --accent-white-glow: rgba(255, 255, 255, 0.35);
+  --accent-blue: #0284c7;
+  --accent-indigo: #4f46e5;
+  
+  /* Translucent clean gradient for buttons */
+  --accent-gradient: linear-gradient(135deg, rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0.45));
+
+  --text-primary: #1e293b;
+  --text-secondary: #475569;
+  --text-muted: #8e9cae;
+
+  --transition-smooth: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  --transition-quick: all 0.2s ease;
 }
 
 * {
@@ -16,8 +38,214 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  background-color: var(--bg-light);
+  color: var(--text-primary);
+  overflow: hidden;
+  position: relative;
 }
 
 #app {
   min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Glassmorphism Panel styles */
+.glass-panel {
+  background: var(--glass-bg);
+  backdrop-filter: blur(30px) saturate(140%);
+  -webkit-backdrop-filter: blur(30px) saturate(140%);
+  border: 1px solid var(--glass-border);
+  border-radius: 18px;
+  box-shadow: 
+    0 10px 40px -15px rgba(0, 0, 0, 0.08),
+    inset 0 1px 1px 0 rgba(255, 255, 255, 0.5);
+  transition: var(--transition-smooth);
+}
+
+.glass-panel:hover {
+  background: var(--glass-bg-hover);
+  border-color: var(--glass-border-active);
+  box-shadow: 
+    0 12px 42px -12px rgba(0, 0, 0, 0.12),
+    inset 0 1px 1px 0 rgba(255, 255, 255, 0.75);
+}
+
+/* Liquid fluid backgrounds - Light Glass Style */
+.liquid-bg-wrapper {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow: hidden;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 50%, #f4f6f9 0%, #e2e8f0 100%);
+}
+
+.liquid-blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(100px);
+  opacity: 0.22;
+  mix-blend-mode: multiply;
+}
+
+.blob-1 {
+  width: 50vw;
+  height: 50vw;
+  background: radial-gradient(circle, rgba(56, 189, 248, 0.6) 0%, transparent 70%);
+  top: -15%;
+  left: -10%;
+  animation: floatBlob1 25s infinite alternate ease-in-out;
+}
+
+.blob-2 {
+  width: 45vw;
+  height: 45vw;
+  background: radial-gradient(circle, rgba(251, 113, 133, 0.4) 0%, transparent 75%);
+  bottom: -15%;
+  right: -10%;
+  animation: floatBlob2 28s infinite alternate ease-in-out;
+}
+
+.blob-3 {
+  width: 40vw;
+  height: 40vw;
+  background: radial-gradient(circle, rgba(168, 85, 247, 0.35) 0%, transparent 70%);
+  top: 45%;
+  left: 45%;
+  transform: translate(-50%, -50%);
+  animation: floatBlob3 32s infinite alternate ease-in-out;
+}
+
+@keyframes floatBlob1 {
+  0% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(6vw, 10vh) scale(1.1); }
+  100% { transform: translate(-4vw, -3vh) scale(0.95); }
+}
+
+@keyframes floatBlob2 {
+  0% { transform: translate(0, 0) scale(1.05); }
+  50% { transform: translate(-8vw, -6vh) scale(0.95); }
+  100% { transform: translate(3vw, 4vh) scale(1.02); }
+}
+
+@keyframes floatBlob3 {
+  0% { transform: translate(-50%, -50%) rotate(0deg) scale(0.95); }
+  50% { transform: translate(-45%, -55%) rotate(180deg) scale(1.05); }
+  100% { transform: translate(-52%, -48%) rotate(360deg) scale(0.98); }
+}
+
+/* Premium Scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.08);
+  border-radius: 99px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.16);
+}
+
+/* Base button and form elements in Glass style */
+.btn-glass {
+  background: rgba(255, 255, 255, 0.35);
+  border: 1px solid var(--glass-border);
+  color: var(--text-primary);
+  border-radius: 12px;
+  padding: 10px 20px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition-smooth);
+  outline: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.02);
+}
+.btn-glass:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.65);
+  border-color: var(--glass-border-active);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.04);
+}
+.btn-glass:active:not(:disabled) {
+  transform: translateY(0);
+}
+.btn-glass:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-primary-glass {
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.03);
+}
+.btn-primary-glass:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.85);
+  border-color: rgba(255, 255, 255, 0.8);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.06);
+}
+
+/* Input Fields */
+.input-glass {
+  background: rgba(0, 0, 0, 0.03);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  color: var(--text-primary);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-family: inherit;
+  font-size: 0.95rem;
+  transition: var(--transition-smooth);
+  outline: none;
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.01);
+}
+.input-glass:focus {
+  border-color: var(--accent-blue);
+  background: #ffffff;
+  box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.12), inset 0 1px 1px rgba(0, 0, 0, 0.01);
+}
+.input-glass::placeholder {
+  color: var(--text-muted);
+}
+.input-glass:disabled {
+  opacity: 0.45;
+  background: rgba(0, 0, 0, 0.01);
+  border-color: rgba(0, 0, 0, 0.04);
+  cursor: not-allowed;
+}
+
+/* Select Fields */
+.select-glass {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23475569' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'></polyline></svg>");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 14px;
+  padding-right: 32px;
+  background-color: rgba(0, 0, 0, 0.03);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  color: var(--text-primary);
+  border-radius: 10px;
+  padding: 10px 14px;
+  outline: none;
+  font-family: inherit;
+  font-size: 0.95rem;
+  transition: var(--transition-smooth);
+  cursor: pointer;
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.01);
+}
+.select-glass:focus {
+  border-color: var(--accent-blue);
+  background-color: #ffffff;
+  box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.12), inset 0 1px 1px rgba(0, 0, 0, 0.01);
 }

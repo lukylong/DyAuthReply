@@ -19,7 +19,12 @@ def serve_client_ui(request, path=''):
     if not path and not request.path.endswith('/'):
         return redirect(request.path + '/')
 
-    dist_dir = getattr(settings, 'CLIENT_UI_DIST', None) or os.environ.get('CLIENT_UI_DIST', '')
+    from core.client.ui_updater import get_active_ui_dist
+
+    dist_dir = get_active_ui_dist()
+    if not dist_dir:
+        dist_dir = getattr(settings, 'CLIENT_UI_DIST', None) or os.environ.get('CLIENT_UI_DIST', '')
+    
     if not dist_dir or not os.path.isdir(dist_dir):
         return HttpResponse(
             '<h1>DyAuthReply Client</h1>'

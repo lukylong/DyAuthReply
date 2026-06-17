@@ -38,14 +38,14 @@ def launcher_source_path() -> Path:
 
 def ensure_node_available() -> None:
     if not shutil.which("node"):
-        raise SystemExit("错误: 构建机未安装 Node.js，launcher 将无法内嵌签名运行时")
+        raise SystemExit("ERROR: Node.js not found; launcher build requires Node for signing runtime")
 
 
 def build_launcher() -> None:
     ensure_node_available()
     node_path = shutil.which("node")
     print(f"Node: {subprocess.check_output(['node', '--version'], text=True).strip()} @ {node_path}")
-    print("PyInstaller 打包 launcher...")
+    print("Building launcher with PyInstaller...")
     subprocess.run(
         [sys.executable, "-m", "PyInstaller", str(SPEC), "--noconfirm"],
         cwd=ROOT,
@@ -54,7 +54,7 @@ def build_launcher() -> None:
 
     src = launcher_source_path()
     if not src.is_file():
-        raise SystemExit(f"错误: PyInstaller 产物不存在: {src}")
+        raise SystemExit(f"ERROR: PyInstaller output missing: {src}")
 
     dest = BINARIES_DIR / launcher_target_name()
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -63,7 +63,7 @@ def build_launcher() -> None:
         dest.chmod(dest.stat().st_mode | 0o111)
 
     size_mb = dest.stat().st_size / (1024 * 1024)
-    print(f"✅ launcher → {dest} ({size_mb:.1f} MB)")
+    print(f"launcher copied to {dest} ({size_mb:.1f} MB)")
 
 
 if __name__ == "__main__":

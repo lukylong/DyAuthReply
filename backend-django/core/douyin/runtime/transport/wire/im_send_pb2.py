@@ -142,7 +142,7 @@ def encode_send_message_request_pb2(
 
     msg_content = {
         "mention_users": [],
-        "aweType": 700,
+        "aweType": 774,
         "richTextInfos": [],
         "text": text,
     }

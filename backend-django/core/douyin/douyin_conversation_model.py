@@ -46,6 +46,13 @@ class DouyinConversation(RootModel):
         help_text="对方头像URL",
     )
 
+    peer_unique_id = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        help_text="对方抖音号（unique_id）",
+    )
+
     platform_conversation_id = models.CharField(
         max_length=128,
         null=True,

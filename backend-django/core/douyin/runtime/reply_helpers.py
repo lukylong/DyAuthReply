@@ -59,24 +59,48 @@ def render_template(content: str, *, peer_nickname: str = '', links: Optional[li
 
 
 # -------------------- 消息拆分 --------------------
+def _normalize_send_mode(send_mode: str | None, *, has_links: bool) -> str:
+    mode = (send_mode or '').strip() or 'multi_message'
+    if mode == 'card_fallback':
+        mode = 'multi_message'
+    if has_links and mode == 'merged':
+        mode = 'multi_message'
+    return mode
+
+
 def _build_segments(rule: "DouyinRule", peer_nickname: str) -> list[str]:
     """
     生成需要发送的消息段列表。
     优先级：rule.template.content > rule.reply_text；rule.template.links > rule.links
+
+    multi_message：先文本，再每条链接各发一条独立消息（与主项目 sender 行为一致）。
     """
     template = getattr(rule, 'template', None)
     if template is not None:
         base = template.content or ''
         links = template.links or []
-        send_mode = template.send_mode
+        raw_mode = template.send_mode
     else:
         base = rule.reply_text or ''
         links = rule.links or []
-        send_mode = rule.send_mode
+        raw_mode = rule.send_mode
 
-    text = render_template(base, peer_nickname=peer_nickname, links=links)
-    urls = [lk.get('url') if isinstance(lk, dict) else str(lk) for lk in links]
-    urls = [u for u in urls if u]
+    normalized_links: list[dict] = []
+    for lk in links or []:
+        if isinstance(lk, dict):
+            url = str(lk.get('url') or '').strip()
+            if url:
+                normalized_links.append({
+                    'title': str(lk.get('title') or url).strip(),
+                    'url': url,
+                })
+        elif isinstance(lk, str) and lk.strip():
+            url = lk.strip()
+            normalized_links.append({'title': url, 'url': url})
+
+    send_mode = _normalize_send_mode(raw_mode, has_links=bool(normalized_links))
+    text = render_template(base, peer_nickname=peer_nickname, links=normalized_links)
+    urls = [lk['url'] for lk in normalized_links]
 
     if send_mode == 'merged':
         merged = text
@@ -86,8 +110,11 @@ def _build_segments(rule: "DouyinRule", peer_nickname: str) -> list[str]:
 
     segs: list[str] = []
     if text.strip():
-        segs.append(text)
-    segs.extend(urls)
+        segs.append(text.strip())
+    for lk in normalized_links:
+        # 链接段优先发 title（抖音 UI 展示为独立卡片/链接消息），无 title 时发 URL
+        link_text = (lk.get('title') or '').strip() or lk['url']
+        segs.append(link_text)
     return segs
 
 

@@ -66,6 +66,15 @@ class DouyinSessionControlIn(Schema):
 class DouyinSessionControlOut(Schema):
     success: bool
     message: str
+    command_id: Optional[str] = None
+
+
+class DouyinWorkerCommandStatusOut(Schema):
+    command_id: str
+    consumed: bool
+    status: str = Field(..., description="pending | success | failed | unknown")
+    error: Optional[str] = None
+    message_id: Optional[str] = None
 
 
 class DouyinSessionBatchIdsIn(Schema):
@@ -77,6 +86,7 @@ class DouyinConversationItemOut(Schema):
     peer_sec_uid: str
     peer_nickname: Optional[str] = None
     peer_avatar: Optional[str] = None
+    peer_unique_id: Optional[str] = None
     last_message_at: Optional[datetime] = None
     last_message_preview: Optional[str] = None
     unread_count: int = 0

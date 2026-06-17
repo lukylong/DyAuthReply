@@ -38,6 +38,7 @@ from core.douyin.douyin_session_schema import (
     DouyinManualReplyIn,
     DouyinMessageItemOut,
     DouyinSessionControlOut,
+    DouyinWorkerCommandStatusOut,
 )
 
 router = Router()
@@ -916,14 +917,43 @@ def send_account_manual_reply(request, account_id: str, data: DouyinManualReplyI
     if not text:
         return DouyinSessionControlOut(success=False, message="回复内容不能为空")
 
-    ok = command_publisher.send_manual_reply(str(account.id), str(conv.id), text)
+    ok, command_id = command_publisher.send_manual_reply(str(account.id), str(conv.id), text)
     if not ok:
         return DouyinSessionControlOut(
             success=False,
             message="Redis 不可用，未能下发手动回复指令"
         )
 
-    return DouyinSessionControlOut(success=True, message="手动回复指令已下发")
+    return DouyinSessionControlOut(
+        success=True,
+        message="手动回复指令已下发",
+        command_id=command_id,
+    )
+
+
+@router.get(
+    "/worker-command/{command_id}",
+    response=DouyinWorkerCommandStatusOut,
+    summary="查询 Worker 命令执行结果（客户端手动发送轮询）",
+)
+def get_worker_command_status(request, command_id: str):
+    from core.douyin.douyin_worker_command_model import DouyinWorkerCommand
+
+    cmd = get_object_or_404(DouyinWorkerCommand, id=command_id)
+    result = (cmd.payload or {}).get('_result') if isinstance(cmd.payload, dict) else None
+    if cmd.consumed_at is None:
+        status = 'pending'
+    elif isinstance(result, dict) and result.get('status') in ('success', 'failed'):
+        status = str(result['status'])
+    else:
+        status = 'unknown'
+    return DouyinWorkerCommandStatusOut(
+        command_id=str(cmd.id),
+        consumed=cmd.consumed_at is not None,
+        status=status,
+        error=(result or {}).get('error') if isinstance(result, dict) else None,
+        message_id=(result or {}).get('message_id') if isinstance(result, dict) else None,
+    )
 
 
 @router.post(
@@ -1020,6 +1050,9 @@ def refresh_account_conversation_user(request, account_id: str, conversation_id:
                 break
         if avatar:
             conv.peer_avatar = avatar
+        unique_id = str(user_info.get('unique_id') or user_info.get('short_id') or '').strip()
+        if unique_id:
+            conv.peer_unique_id = unique_id
         # 如果原本的 peer_sec_uid 是 fallback 的，在这里更新成真实的
         if conv.peer_sec_uid != sec_uid or conv.peer_sec_uid.startswith('fallback_'):
             conv.peer_sec_uid = sec_uid
@@ -1027,6 +1060,7 @@ def refresh_account_conversation_user(request, account_id: str, conversation_id:
         conv.save(update_fields=[
             'peer_nickname',
             'peer_avatar',
+            'peer_unique_id',
             'peer_sec_uid',
             'sys_update_datetime',
         ])

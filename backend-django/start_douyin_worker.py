@@ -63,8 +63,8 @@ async def _amain() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, _graceful)
-        except NotImplementedError:
-            # Windows 下某些平台不支持 add_signal_handler
+        except (NotImplementedError, ValueError, RuntimeError):
+            # Windows or background thread doesn't support add_signal_handler
             pass
 
     await worker.run()
@@ -78,6 +78,8 @@ def main() -> None:
     try:
         asyncio.run(_amain())
     except KeyboardInterrupt:
+        pass
+    except asyncio.CancelledError:
         pass
     except Exception as e:  # noqa: BLE001
         logger.exception(f"Worker 异常退出: {e}")

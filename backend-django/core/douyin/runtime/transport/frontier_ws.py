@@ -234,8 +234,10 @@ class FrontierWsDecorator(AccountTransport):
         self._scanned_messages_queue: "asyncio.Queue[ScannedMessage]" = asyncio.Queue(maxsize=64)
         self._account_id: Optional[str] = None
         self._account_sec_uid: Optional[str] = None
+        self._self_uid: int = 0
         self._client: Optional[FrontierImWsClient] = None
         self._task: Optional[asyncio.Task] = None
+        self._last_http_fallback_at: float = 0.0
 
     async def start(self, account: "DouyinAccount") -> None:
         self._account_id = str(account.id)
@@ -294,14 +296,34 @@ class FrontierWsDecorator(AccountTransport):
                 conversation_hint=conversation_hint,
             )
 
-        # 增量阶段：完全消费 WebSocket 线程解析存入的增量 ScannedMessage 队列
-        msgs = []
+        # 优先消费 WS 实时队列
+        msgs: list[ScannedMessage] = []
         while not self._scanned_messages_queue.empty():
             msgs.append(self._scanned_messages_queue.get_nowait())
 
         if msgs:
             logger.info(f"[frontier.ws] 增量扫描消费 WS 实时消息 count={len(msgs)}")
-        return msgs
+            return msgs
+
+        # WS 离线或定期兜底：走 HTTP 增量，避免纯 WS 解码失败时完全收不到消息
+        from django.conf import settings
+
+        ws_ok = self._client is not None and self._client.connected
+        fallback_iv = float(getattr(settings, 'DOUYIN_WS_HTTP_FALLBACK_INTERVAL', 25) or 25)
+        now = time.monotonic()
+        if not ws_ok or (now - self._last_http_fallback_at >= fallback_iv):
+            self._last_http_fallback_at = now
+            reason = 'ws_offline' if not ws_ok else 'periodic_fallback'
+            logger.debug(
+                f"[frontier.ws] HTTP 兜底扫描 account={self._account_id} reason={reason}"
+            )
+            return await self._inner.scan_inbox(
+                account,
+                max_conversations=max_conversations,
+                include_recent_without_unread=False,
+                conversation_hint=conversation_hint,
+            )
+        return []
 
     async def send_reply(
         self, account: "DouyinAccount", page: Any, *, conversation_id: str,
@@ -340,6 +362,30 @@ class FrontierWsDecorator(AccountTransport):
         """WS 线程接收消息的回调入口。"""
         asyncio.create_task(self._process_message(m))
 
+    def _infer_message_direction(self, m: Any) -> str:
+        """判定 WS 帧方向：优先 sec_uid，再用 conversation_id 中的 numeric uid。"""
+        sender_sec = str(getattr(m, "sender_sec_uid", "") or "").strip()
+        sender_uid = int(getattr(m, "sender_uid", 0) or 0)
+        if self._account_sec_uid and sender_sec and sender_sec == self._account_sec_uid:
+            if sender_uid > 0:
+                self._self_uid = sender_uid
+            return "out"
+        if self._self_uid > 0 and sender_uid == self._self_uid:
+            return "out"
+        conv = str(getattr(m, "conversation_id", "") or "").strip()
+        parts = conv.split(":")
+        if len(parts) == 4 and sender_uid > 0:
+            try:
+                uid_a = int(parts[2])
+                uid_b = int(parts[3])
+            except ValueError:
+                uid_a = uid_b = 0
+            if self._self_uid > 0 and sender_uid == self._self_uid:
+                return "out"
+            if self._self_uid > 0 and sender_uid in (uid_a, uid_b) and sender_uid != self._self_uid:
+                return "in"
+        return "in"
+
     async def _process_message(self, m: Any) -> None:
         """处理消息落库，若为新消息且是入向，放入 scanned 队列并唤醒 worker。"""
         from datetime import datetime, timezone
@@ -353,9 +399,13 @@ class FrontierWsDecorator(AccountTransport):
             return
 
         # 1. 确定方向
-        direction = "in"
-        if self._account_sec_uid and m.sender_sec_uid == self._account_sec_uid:
-            direction = "out"
+        direction = self._infer_message_direction(m)
+        if direction == "out":
+            logger.info(
+                f"[frontier.ws] 跳过己方出站消息 account={self._account_id} "
+                f"sender_uid={getattr(m, 'sender_uid', 0)} text={(m.text or '')[:40]!r}"
+            )
+            return
 
         # 2. 获取接收时间
         received_at = (
@@ -384,12 +434,7 @@ class FrontierWsDecorator(AccountTransport):
                         f"[frontier.ws] 无法在线解析用户详情 sec_uid={m.sender_sec_uid}: {ex}"
                     )
 
-        # 4. 落库（跳过 out 消息，避免与手动发送时的记录重复）
-        if direction == 'out':
-            # 自己发出的消息在发送时已通过 write_manual_out_message 保存
-            # WebSocket 推送的 out 消息不需要再次保存
-            return
-
+        # 4. 落库
         try:
             res = await _upsert_conversation_and_message(
                 account_id=self._account_id,
@@ -415,7 +460,7 @@ class FrontierWsDecorator(AccountTransport):
             logger.exception(f"[frontier.ws] 消息落库异常 server_msg_id={m.server_message_id}: {ex}")
             return
 
-        # 5. 如果是新插入的入向消息，放入 scanned 队列并唤醒 worker
+        # 5. 新入向消息入库后唤醒 worker；重复入库但尚未处理的消息由 worker 补跑队列
         if res is not None and direction == "in":
             conv_id, msg_id = res
             scanned = ScannedMessage(

@@ -19,6 +19,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Optional
@@ -1112,7 +1113,12 @@ class HttpProtocolTransport(AccountTransport):
                                 if urls:
                                     avatar = str(urls[0])
                                     break
-                            return sec_uid, {"nickname": nickname, "avatar": avatar}
+                            unique_id = str(user.get("unique_id") or user.get("short_id") or "").strip()
+                            return sec_uid, {
+                                "nickname": nickname,
+                                "avatar": avatar,
+                                "unique_id": unique_id,
+                            }
             except Exception as e:
                 logger.warning(f"[transport.http] _resolve_user_details_by_sec_uids 异常 sec_uid={sec_uid} err={e}")
             return sec_uid, None
@@ -1132,6 +1138,71 @@ class HttpProtocolTransport(AccountTransport):
 
         return result
 
+    async def _resolve_peer_profiles_by_sec_uids(
+        self,
+        account: "DouyinAccount",
+        pending: list,
+    ) -> dict[str, dict[str, str]]:
+        """为待落库消息批量拉取对方资料（优先 profile/other，creator user_detail 常 403）。"""
+        account_sec = (account.sec_uid or "").strip()
+        sec_uids = sorted({
+            m.sender_sec_uid
+            for m, _, _, direction in pending
+            if direction == 'in'
+            and m.sender_sec_uid
+            and m.sender_sec_uid != account_sec
+            and not str(m.sender_sec_uid).startswith('fallback_')
+        })
+        if not sec_uids:
+            return {}
+        profiles = await self._resolve_user_details_by_sec_uids(account, sec_uids)
+        if profiles:
+            return profiles
+        # creator user_detail 兜底（Docker 管理端环境有时可用）
+        uid_map = await self._resolve_user_details(
+            account,
+            sorted({m.sender_uid for m, _, _, _ in pending if m.sender_uid > 0}),
+        )
+        by_sec: dict[str, dict[str, str]] = {}
+        for m, _, _, direction in pending:
+            if direction != 'in' or not m.sender_sec_uid:
+                continue
+            info = uid_map.get(m.sender_uid)
+            if info:
+                by_sec[m.sender_sec_uid] = info
+        return by_sec
+
+    @staticmethod
+    def _trim_backfill_pending(
+        pending: list,
+        *,
+        max_conversations: int,
+        max_messages_per_conv: int,
+    ) -> list:
+        """客户端历史补扫：只保留最近若干会话、每会话最近若干条，避免一次性落库卡顿。"""
+        if not pending or max_conversations <= 0:
+            return pending
+        from collections import defaultdict
+
+        by_key: dict[str, list] = defaultdict(list)
+        for item in pending:
+            m, received_at, _, _direction = item
+            key = str(m.conversation_id or m.sender_sec_uid or '')
+            if not key:
+                continue
+            by_key[key].append(item)
+
+        peer_order = sorted(
+            by_key.keys(),
+            key=lambda k: max(x[1] for x in by_key[k]),
+            reverse=True,
+        )
+        per_conv = max(max_messages_per_conv, 1)
+        trimmed: list = []
+        for key in peer_order[:max(max_conversations, 1)]:
+            items = sorted(by_key[key], key=lambda x: x[1], reverse=True)[:per_conv]
+            trimmed.extend(items)
+        return trimmed
 
     @staticmethod
     def _looks_like_platform_conversation_id(token: Optional[str]) -> bool:
@@ -1488,17 +1559,26 @@ class HttpProtocolTransport(AccountTransport):
             )
 
         if result.biz_status_code not in (0, 8101):
-            logger.warning(
-                f"[transport.http] {log_tag} 业务层失败 account={account.id} "
-                f"biz_status_code={result.biz_status_code} "
-                f"biz_status_text={result.biz_status_text!r} "
-                f"biz_raw_check_code={result.biz_raw_check_code} "
-                f"server_msg_id={result.server_msg_id} client_msg_id={result.client_msg_id}"
-            )
-            raise RuntimeError(
-                f"{log_tag} business status={result.biz_status_code} "
-                f"msg={result.biz_status_text or result.status_msg or 'unknown'}"
-            )
+            # 60021 等：协议层已分配 server_msg_id 时视为软成功（消息通常已发出）
+            if result.server_msg_id and result.biz_status_code not in (7911,):
+                logger.warning(
+                    f"[transport.http] {log_tag} 业务层软成功 account={account.id} "
+                    f"biz_status_code={result.biz_status_code} "
+                    f"biz_status_text={result.biz_status_text!r} "
+                    f"server_msg_id={result.server_msg_id} client_msg_id={result.client_msg_id}"
+                )
+            else:
+                logger.warning(
+                    f"[transport.http] {log_tag} 业务层失败 account={account.id} "
+                    f"biz_status_code={result.biz_status_code} "
+                    f"biz_status_text={result.biz_status_text!r} "
+                    f"biz_raw_check_code={result.biz_raw_check_code} "
+                    f"server_msg_id={result.server_msg_id} client_msg_id={result.client_msg_id}"
+                )
+                raise RuntimeError(
+                    f"{log_tag} business status={result.biz_status_code} "
+                    f"msg={result.biz_status_text or result.status_msg or 'unknown'}"
+                )
         if result.biz_status_code == 8101 and result.biz_status_text:
             logger.warning(
                 f"[transport.http] {log_tag} 业务层提示异常 account={account.id} "
@@ -1937,6 +2017,7 @@ class HttpProtocolTransport(AccountTransport):
                     info = user_details.get(m.sender_sec_uid, {}) if m.sender_sec_uid else {}
                     nickname = info.get("nickname") or None
                     avatar = info.get("avatar") or None
+                    unique_id = info.get("unique_id") or None
 
                     try:
                         upsert = await _upsert_conversation_and_message(
@@ -1944,6 +2025,7 @@ class HttpProtocolTransport(AccountTransport):
                             peer_sec_uid=m.sender_sec_uid,
                             peer_nickname=nickname,
                             peer_avatar=avatar,
+                            peer_unique_id=unique_id,
                             text=m.text,
                             received_at=received_at,
                             raw={
@@ -2220,9 +2302,9 @@ class HttpProtocolTransport(AccountTransport):
             )
             external_msg_id = f"srv_{m.server_message_id}"
 
-            if dry_run or is_baseline:
-                # dry_run（dual-run 影子模式）和 baseline（首轮 cursor=0）都只攒
-                # 候选清单，**不入库、不返回**。baseline 只推进 cursor，避免历史消息触发回复。
+            if dry_run or (is_baseline and not include_recent_without_unread):
+                # dry_run（dual-run 影子模式）和 baseline（首轮 cursor=0 且非 UI 补扫）只攒
+                # 候选清单，**不入库、不返回**。UI 补扫（include_recent_without_unread）仍落库。
                 if len(dry_run_candidates) >= max(max_conversations or 0, 50):
                     continue
                 dry_run_candidates.append({
@@ -2237,27 +2319,39 @@ class HttpProtocolTransport(AccountTransport):
 
             pending.append((m, received_at, external_msg_id, direction))
 
+        if is_baseline and include_recent_without_unread and pending:
+            max_conv = max(max_conversations or 0, 15)
+            max_msgs = int(os.environ.get('DOUYIN_CLIENT_BACKFILL_MAX_MESSAGES', '12'))
+            before = len(pending)
+            pending = self._trim_backfill_pending(
+                pending,
+                max_conversations=max_conv,
+                max_messages_per_conv=max_msgs,
+            )
+            logger.info(
+                f"[transport.http.baseline] 历史补扫限流 account={account_id} "
+                f"pending {before} → {len(pending)} "
+                f"(max_conv={max_conv} max_msgs={max_msgs})"
+            )
+
         # ---------------- 第二遍：批量补昵称 + 落库 + 静默 mark_read ----------------
-        # 仅在主路径（非 dry_run / 非 baseline）调 user_detail；
-        # baseline / dry_run 不落库自然也不需要昵称
-        user_details: dict[int, dict[str, str]] = {}
+        user_details_by_sec: dict[str, dict[str, str]] = {}
         if pending:
-            sender_uids = sorted({m.sender_uid for m, _, _, _ in pending})
-            user_details = await self._resolve_user_details(account, sender_uids)
+            user_details_by_sec = await self._resolve_peer_profiles_by_sec_uids(account, pending)
 
         # touched_conv_ids 收集本轮 upsert 成功的 conversation_id
         # 用一次性 silent mark_read 把它们的 unread 清零，避免对同一 conv 重复 update
         touched_conv_ids: set[str] = set()
 
         for m, received_at, external_msg_id, direction in pending:
-            # 跳过自己发出的消息（direction='out'），因为发送时已通过 _record_auto_outbound_message 保存
-            # 避免重复：manual_out_* (发送时) + srv_* (扫描时) 两份相同消息
-            if direction == 'out':
+            # 增量扫描时跳过出向（发送时已落库）；UI 历史补扫时保留出向记录。
+            if direction == 'out' and not (is_baseline and include_recent_without_unread):
                 continue
 
-            info = user_details.get(m.sender_uid, {})
+            info = user_details_by_sec.get(m.sender_sec_uid, {}) if m.sender_sec_uid else {}
             nickname = info.get("nickname") or None
             avatar = info.get("avatar") or None
+            unique_id = info.get("unique_id") or None
 
             try:
                 upsert = await _upsert_conversation_and_message(
@@ -2265,6 +2359,7 @@ class HttpProtocolTransport(AccountTransport):
                     peer_sec_uid=m.sender_sec_uid,
                     peer_nickname=nickname,
                     peer_avatar=avatar,
+                    peer_unique_id=unique_id,
                     text=m.text,
                     received_at=received_at,
                     raw={
@@ -2294,8 +2389,8 @@ class HttpProtocolTransport(AccountTransport):
             db_conv_id, db_msg_id = upsert
             touched_conv_ids.add(db_conv_id)
 
-            # 关键：只有入向消息才返回给 worker，以触发自动回复，出向消息只落库不回复
-            if direction == 'in':
+            # 历史 UI 补扫：落库供客户端展示，但不触发自动回复
+            if direction == 'in' and not (is_baseline and include_recent_without_unread):
                 new_messages.append(
                     ScannedMessage(
                         message_id=db_msg_id,
@@ -2309,6 +2404,11 @@ class HttpProtocolTransport(AccountTransport):
                             "server_message_id": m.server_message_id,
                         },
                     )
+                )
+            elif direction == 'in':
+                logger.debug(
+                    f"[transport.http.baseline] UI 补扫落库 inbound srv={m.server_message_id} "
+                    f"account={account_id}"
                 )
 
         # ---------------- silent mark_read：DB 内清 unread ----------------
@@ -2343,13 +2443,21 @@ class HttpProtocolTransport(AccountTransport):
             )
             return []
 
-        if is_baseline:
+        if is_baseline and not include_recent_without_unread:
             self._last_dry_run_candidates = dry_run_candidates
             logger.warning(
                 f"[transport.http.baseline] scan_inbox 首轮（cursor=0），仅建立基线 "
                 f"account={account_id} messages={len(result.messages)} "
                 f"baseline_skipped={len(dry_run_candidates)} "
                 f"→ next_cursor_us={result.next_cursor_us}（已落盘，下一轮起正常分发）"
+            )
+            return []
+
+        if is_baseline and include_recent_without_unread:
+            logger.info(
+                f"[transport.http.baseline] UI 历史补扫完成 account={account_id} "
+                f"messages={len(result.messages)} upserted_conversations={len(touched_conv_ids)} "
+                f"→ next_cursor_us={result.next_cursor_us}"
             )
             return []
 

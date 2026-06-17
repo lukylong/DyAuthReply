@@ -44,6 +44,7 @@ from core.douyin.runtime.message_store import (
     _norm_for_compare,
     _recent_outbound_replies_log,
     _recent_outbound_texts,
+    fetch_pending_inbound_messages,
 )
 from core.douyin.runtime.account_status import mark_account_login_invalid
 from core.douyin.runtime.matcher import match as match_rule
@@ -244,6 +245,42 @@ def _is_in_cooldown(conversation_id: str, rule_id: str, cooldown_seconds: int) -
 
 
 @sync_to_async
+def _trigger_already_replied(message_id: str) -> bool:
+    """触发消息是否已有成功回复（防止补跑队列重复触发）。"""
+    if not message_id:
+        return False
+    from core.douyin.douyin_reply_log_model import DouyinReplyLog
+    return DouyinReplyLog.objects.filter(
+        trigger_message_id=message_id,
+        result='success',
+    ).exists()
+
+
+@sync_to_async
+def _write_cooldown_skip_log(
+    account_id: str,
+    conversation_id: str,
+    trigger_message_id: str,
+    rule_id: str,
+    rule_name: str,
+) -> None:
+    from core.douyin.douyin_reply_log_model import DouyinReplyLog
+    from core.douyin.douyin_message_model import DouyinMessage
+
+    DouyinReplyLog.objects.create(
+        account_id=account_id,
+        conversation_id=conversation_id,
+        trigger_message_id=trigger_message_id,
+        matched_rule_id=rule_id,
+        reply_text='',
+        reply_links=[],
+        result='cooldown',
+        error_message=f'规则 {rule_name} 冷却中',
+    )
+    DouyinMessage.objects.filter(id=trigger_message_id).update(processed=True)
+
+
+@sync_to_async
 def _has_replied_to_peer_today(account_id: str, peer_sec_uid: str) -> bool:
     """同一账号对同一用户每天只自动回复一次。"""
     if not peer_sec_uid:
@@ -272,6 +309,85 @@ def _mark_history_sync_completed(account_id: str) -> None:
     DouyinAccount.objects.filter(id=account_id).update(
         last_history_sync_at=timezone.now(),
     )
+
+
+@sync_to_async
+def _account_conversation_count(account_id: str) -> int:
+    from core.douyin.douyin_conversation_model import DouyinConversation
+    return DouyinConversation.objects.filter(account_id=account_id).count()
+
+
+@sync_to_async
+def _list_conversations_missing_profile(account_id: str, limit: int = 8) -> list[dict]:
+    from django.db.models import Q
+    from core.douyin.douyin_conversation_model import DouyinConversation
+
+    rows = (
+        DouyinConversation.objects
+        .filter(account_id=account_id)
+        .filter(Q(peer_nickname__isnull=True) | Q(peer_nickname=''))
+        .order_by('-last_message_at')[:limit]
+    )
+    return [{'id': str(r.id), 'peer_sec_uid': r.peer_sec_uid} for r in rows]
+
+
+@sync_to_async
+def _apply_peer_profile(
+    conv_id: str,
+    nickname: str,
+    avatar: str = '',
+    unique_id: str = '',
+) -> None:
+    from core.douyin.douyin_conversation_model import DouyinConversation
+
+    fields: dict = {'peer_nickname': nickname}
+    if avatar:
+        fields['peer_avatar'] = avatar
+    if unique_id:
+        fields['peer_unique_id'] = unique_id
+    DouyinConversation.objects.filter(id=conv_id).update(**fields)
+
+
+async def _backfill_missing_peer_profiles(
+    account: 'DouyinAccount',
+    transport: AccountTransport,
+    account_id: str,
+) -> None:
+    """轻量补全本地缺昵称/头像的会话（客户端 creator user_detail 常不可用）。"""
+    missing = await _list_conversations_missing_profile(account_id, limit=8)
+    sec_uids = [
+        m['peer_sec_uid']
+        for m in missing
+        if m.get('peer_sec_uid') and not str(m['peer_sec_uid']).startswith('fallback_')
+    ]
+    if not sec_uids:
+        return
+    inner = getattr(transport, '_inner', transport)
+    resolve = getattr(inner, '_resolve_user_details_by_sec_uids', None)
+    if resolve is None:
+        return
+    try:
+        profiles = await resolve(account, sec_uids)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            f"[worker] 补全会话资料失败 account={account_id} err={type(e).__name__}: {e}"
+        )
+        return
+    sec_to_conv = {m['peer_sec_uid']: m['id'] for m in missing}
+    updated = 0
+    for sec, info in profiles.items():
+        nick = (info.get('nickname') or '').strip()
+        if not nick or sec not in sec_to_conv:
+            continue
+        await _apply_peer_profile(
+            sec_to_conv[sec],
+            nick,
+            info.get('avatar') or '',
+            info.get('unique_id') or '',
+        )
+        updated += 1
+    if updated:
+        logger.info(f"[worker] 补全会话资料 account={account_id} updated={updated}")
 
 
 @sync_to_async
@@ -366,6 +482,36 @@ def _log_event(account_id: Optional[str], event_type: str, level: str, title: st
         logger.warning(f"[worker] 写 DouyinEvent 失败: {e}")
 
 
+@sync_to_async
+def _fetch_pending_worker_commands() -> list[dict]:
+    from core.douyin.douyin_worker_command_model import DouyinWorkerCommand
+
+    cmds = (
+        DouyinWorkerCommand.objects.filter(consumed_at__isnull=True, is_deleted=False)
+        .order_by('sys_create_datetime')[:50]
+    )
+    return [
+        {'id': str(c.id), 'channel': c.channel, 'payload': c.payload or {}}
+        for c in cmds
+    ]
+
+
+@sync_to_async
+def _mark_worker_command_consumed(command_id: str, result: Optional[dict] = None) -> None:
+    from core.douyin.douyin_worker_command_model import DouyinWorkerCommand
+
+    qs = DouyinWorkerCommand.objects.filter(id=command_id, consumed_at__isnull=True)
+    if result is not None:
+        cmd = qs.first()
+        if cmd is None:
+            return
+        payload = dict(cmd.payload or {})
+        payload['_result'] = result
+        qs.update(consumed_at=timezone.now(), payload=payload)
+        return
+    qs.update(consumed_at=timezone.now())
+
+
 def _in_silent_window(silent_start: Optional[str], silent_end: Optional[str]) -> bool:
     if not silent_start or not silent_end:
         return False
@@ -439,15 +585,23 @@ class DouyinWorker:
         *,
         refresh_interval: int = 15,
         heartbeat_interval: int = 15,
-        idle_poll_min: int = 20,
-        idle_poll_max: int = 45,
+        idle_poll_min: int | None = None,
+        idle_poll_max: int | None = None,
         transport_factory=None,
     ) -> None:
         self.worker_id = f"{socket.gethostname()}:{os.getpid()}"
         self.refresh_interval = refresh_interval
         self.heartbeat_interval = heartbeat_interval
-        self.idle_poll_min = idle_poll_min
-        self.idle_poll_max = idle_poll_max
+        self.idle_poll_min = (
+            idle_poll_min
+            if idle_poll_min is not None
+            else int(getattr(settings, 'DOUYIN_WORKER_IDLE_POLL_MIN', 20))
+        )
+        self.idle_poll_max = (
+            idle_poll_max
+            if idle_poll_max is not None
+            else int(getattr(settings, 'DOUYIN_WORKER_IDLE_POLL_MAX', 45))
+        )
 
         self._tasks: dict[str, asyncio.Task] = {}
         self._account_metrics: dict[str, dict] = {}
@@ -504,6 +658,7 @@ class DouyinWorker:
                 self._loop_refresh_accounts(),
                 self._loop_heartbeat(),
                 self._loop_redis_commands(),
+                self._loop_db_commands(),
                 self._loop_renew_leases(),
             )
         finally:
@@ -618,6 +773,8 @@ class DouyinWorker:
 
     async def _loop_redis_commands(self) -> None:
         """订阅 douyin:cmd:* 频道并派发"""
+        if getattr(settings, 'DOUYIN_COMMAND_BACKEND', 'redis') == 'db':
+            return
         if self._redis is None:
             logger.warning("[worker] Redis 未连接，跳过命令监听")
             return
@@ -649,6 +806,21 @@ class DouyinWorker:
                 logger.warning(f"[worker] pubsub 异常: {e}（5 秒后重连）")
                 await asyncio.sleep(5)
 
+    async def _loop_db_commands(self) -> None:
+        """客户端模式：轮询 SQLite 命令队列（无需 Redis）。"""
+        if getattr(settings, 'DOUYIN_COMMAND_BACKEND', 'redis') != 'db':
+            return
+        logger.info("[worker] 已启用 SQLite 命令队列（客户端模式）")
+        while not self._stop.is_set():
+            try:
+                pending = await _fetch_pending_worker_commands()
+                for cmd in pending:
+                    result = await self._dispatch_command(cmd['channel'], cmd['payload'])
+                    await _mark_worker_command_consumed(cmd['id'], result)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[worker] SQLite 命令队列异常: {e}")
+            await self._sleep_or_stop(0.3)
+
     def _account_lock(self, account_id: str) -> asyncio.Lock:
         """每账号一把命令串行锁；首次访问时懒创建。"""
         lock = self._account_command_locks.get(account_id)
@@ -658,11 +830,11 @@ class DouyinWorker:
         return lock
 
     # ---------------- 命令派发 ----------------
-    async def _dispatch_command(self, channel: str, payload: dict) -> None:
+    async def _dispatch_command(self, channel: str, payload: dict) -> Optional[dict]:
         # channel 形如 douyin:cmd:login:<account_id>
         parts = channel.split(':')
         if len(parts) < 4:
-            return
+            return None
         _, _, action, account_id = parts[0], parts[1], parts[2], parts[3]
 
         # 命令定向路由：命令经 Redis Pub/Sub 广播给所有 worker，但账号只被一个 worker 托管。
@@ -673,7 +845,7 @@ class DouyinWorker:
             logger.debug(
                 f"[worker] 忽略非本实例托管账号的命令 action={action} account={account_id}"
             )
-            return
+            return None
 
         logger.info(f"[worker] 收到命令 action={action} account={account_id} payload={payload}")
 
@@ -683,7 +855,7 @@ class DouyinWorker:
         # 两个 task 并发：logout 还没 close_context，focus 已经从 _contexts 里
         # 取到旧 ctx 并 bring_to_front → 用户看到的是"已登录"页面。
         async with self._account_lock(account_id):
-            await self._dispatch_command_locked(action, account_id, parts, payload)
+            return await self._dispatch_command_locked(action, account_id, parts, payload)
 
     async def _dispatch_command_locked(
         self,
@@ -691,7 +863,7 @@ class DouyinWorker:
         account_id: str,
         parts: list[str],
         payload: dict,
-    ) -> None:
+    ) -> Optional[dict]:
         if action in ('login', 'login_cancel', 'focus'):
             # 浏览器扫码登录 / 监管页聚焦已废弃：改为前端导入凭证（cookie + keys + web_protect）。
             logger.warning(
@@ -699,7 +871,7 @@ class DouyinWorker:
             )
         elif action == 'manual_reply':
             logger.info(f"[worker] manual_reply 命令 account={account_id} payload={payload}")
-            await self._send_manual_reply(
+            return await self._send_manual_reply(
                 account_id,
                 conversation_id=str(payload.get('conversation_id') or ''),
                 text=str(payload.get('text') or ''),
@@ -735,12 +907,13 @@ class DouyinWorker:
                 await _log_event(account_id, 'session_resumed', 'info', '会话已恢复',
                                  '由后台命令恢复扫描/自动回复', self.worker_id)
                 logger.info(f"[worker] ▶ 账号已恢复 account={account_id}")
+        return None
 
     async def _stop_account(self, account_id: str) -> None:
         task = self._tasks.pop(account_id, None)
         if task is not None:
             task.cancel()
-            with suppress(Exception):
+            with suppress(asyncio.CancelledError, Exception):
                 await task
         # 释放该账号 transport 资源（WsInboundDecorator 会清空事件 queue）
         transport = self._transports.pop(account_id, None)
@@ -810,15 +983,15 @@ class DouyinWorker:
         self._transports[account_id] = transport
         return transport
 
-    async def _send_manual_reply(self, account_id: str, *, conversation_id: str, text: str) -> None:
+    async def _send_manual_reply(self, account_id: str, *, conversation_id: str, text: str) -> dict:
         if not conversation_id or not text.strip():
             logger.warning(f"[worker] manual_reply 参数不完整 account={account_id}")
-            return
+            return {'status': 'failed', 'error': '参数不完整'}
         account = await _fetch_account_orm(account_id)
         conv = await _fetch_conversation(account_id, conversation_id)
         if account is None or conv is None:
             logger.warning(f"[worker] manual_reply 忽略：账号或会话不存在 account={account_id} conv={conversation_id}")
-            return
+            return {'status': 'failed', 'error': '账号或会话不存在'}
 
         # 纯协议手动回复：与自动回复同一个 send_text verb，page=None，
         # 由 HttpProtocolTransport 用 platform_conversation_id 直发，不再开浏览器/定位 DOM。
@@ -841,7 +1014,11 @@ class DouyinWorker:
                 f"[reply] ✔ 手动回复成功 account={account_id} peer={conv.peer_nickname!r} "
                 f"conv={conversation_id} log={log_id}"
             )
+            return {'status': 'success', 'message_id': log_id}
         except LoginExpiredError as e:
+            err = (
+                f"登录失效（http={e.http_status} proto={e.proto_status_code}）：{e}"
+            )
             logger.warning(
                 f"[reply] ✘ 手动回复遇登录失效，打回账号 account={account_id} "
                 f"http={e.http_status} proto={e.proto_status_code}: {e}"
@@ -859,13 +1036,18 @@ class DouyinWorker:
                     'reason': '凭证已失效，请重新导入登录态',
                     'source': 'manual_send',
                 })
+            _log_event(account_id, 'manual_reply_failed', 'error', '手动发送失败', err, self.worker_id)
+            return {'status': 'failed', 'error': err}
         except Exception as e:  # noqa: BLE001
+            err = str(e)
             logger.exception(f"[reply] ✘ 手动回复失败 account={account_id} conv={conversation_id}: {e}")
             await push_to_user(account.owner_id, 'reply_failed', {
                 'account_id': account_id,
                 'peer_nickname': conv.peer_nickname,
-                'error': str(e),
+                'error': err,
             })
+            _log_event(account_id, 'manual_reply_failed', 'error', '手动发送失败', err, self.worker_id)
+            return {'status': 'failed', 'error': err}
 
     async def _run_manual_auto_reply_test(self, account_id: str, *, conversation_id: str, text: str) -> None:
         if not conversation_id or not text.strip():
@@ -995,15 +1177,24 @@ class DouyinWorker:
                     continue
                 if not _can_process_reply(acc_row.status, acc_row.auto_reply_enabled, session_active):
                     logger.info(
-                        f"[worker] 账号不可用于自动回复 account={account_id} "
+                        f"[worker] 账号自动回复已关闭，仍继续收信/落库 account={account_id} "
                         f"status={acc_row.status} auto_reply_enabled={acc_row.auto_reply_enabled} "
-                        f"session_active={session_active} 休眠 30s 等待状态恢复"
+                        f"session_active={session_active}"
                     )
-                    await asyncio.sleep(30)
-                    continue
+                can_reply = _can_process_reply(
+                    acc_row.status, acc_row.auto_reply_enabled, session_active
+                )
                 # 纯协议模式不再用浏览器校验登录态；cookie 失效由 scan_inbox 的 HTTP
                 # 调用失败暴露，再由 signer 健康度 / mark_account_login_invalid 打回。
                 backfill_mode = acc_row.last_history_sync_at is None
+                if not backfill_mode and await _account_conversation_count(account_id) == 0:
+                    backfill_mode = True
+                    from core.douyin.runtime.storage import delete_scan_cursor
+                    delete_scan_cursor(account_id)
+                    logger.info(
+                        f"[worker] 本地无会话记录，重置 scan cursor 并强制 HTTP 历史补扫 "
+                        f"account={account_id}"
+                    )
 
                 # 取（或首建）该账号的 transport（WS 快路径首次会在这里 attach 监听）
                 transport = await self._get_or_create_transport(acc_row)
@@ -1015,15 +1206,29 @@ class DouyinWorker:
                 )
                 # 全局并发闸：限制同一时刻并发扫描的账号数，错峰削峰
                 async with self._io_guard():
+                    scan_kwargs: dict = {
+                        'include_recent_without_unread': backfill_mode,
+                        'conversation_hint': pending_scan_hint,
+                    }
+                    if backfill_mode:
+                        scan_kwargs['max_conversations'] = int(
+                            os.environ.get('DOUYIN_CLIENT_BACKFILL_MAX_CONVERSATIONS', '20')
+                        )
                     new_msgs: list[ScannedMessage] = await transport.scan_inbox(
                         acc_row,
-                        include_recent_without_unread=backfill_mode,
-                        conversation_hint=pending_scan_hint,
+                        **scan_kwargs,
                     )
                 pending_scan_hint = None
+                await _backfill_missing_peer_profiles(acc_row, transport, account_id)
                 if backfill_mode:
-                    await _mark_history_sync_completed(account_id)
-                    logger.info(f"[worker] 已完成首次历史会话补扫标记 account={account_id}")
+                    conv_count = await _account_conversation_count(account_id)
+                    if conv_count > 0:
+                        await _mark_history_sync_completed(account_id)
+                        logger.info(f"[worker] 已完成首次历史会话补扫标记 account={account_id}")
+                    else:
+                        logger.warning(
+                            f"[worker] 历史补扫未落库会话，下次继续重试 account={account_id}"
+                        )
                 self._account_metrics[account_id]['messages_today'] += len(new_msgs)
                 # 扫描成功即视为本路健康，清掉上一次的错误描述，避免面板长期残留旧错误
                 self._account_metrics[account_id]['last_error'] = None
@@ -1047,13 +1252,32 @@ class DouyinWorker:
                     f"new_msgs={len(new_msgs)} messages_today={self._account_metrics[account_id]['messages_today']}"
                 )
 
-                if new_msgs:
+                if can_reply:
+                    pending = await fetch_pending_inbound_messages(account_id)
+                    if pending:
+                        seen = {m.message_id for m in new_msgs}
+                        added = 0
+                        for pm in pending:
+                            if pm.message_id not in seen:
+                                new_msgs.append(pm)
+                                seen.add(pm.message_id)
+                                added += 1
+                        if added:
+                            logger.info(
+                                f"[worker] 补跑未处理入向消息 account={account_id} count={added}"
+                            )
+
+                if new_msgs and can_reply:
                     rules = await _load_rules_for_account(account_id)
                     logger.info(
                         f"[worker] 加载规则 account={account_id} 启用中={len(rules)} 条"
                     )
                     for m in new_msgs:
                         await self._handle_one_message(acc_row, m, rules, owner_id)
+                elif new_msgs:
+                    logger.debug(
+                        f"[worker] 扫描到 {len(new_msgs)} 条新消息，自动回复已关闭 account={account_id}"
+                    )
                 # 随机间隔：
                 #   - 优先尊重账号自己的 min/max interval 配置
                 #   - 启用 WS 快路径时，空闲轮询可更保守，主要靠 WS 唤醒
@@ -1066,8 +1290,18 @@ class DouyinWorker:
                     int(getattr(acc_row, 'max_interval_seconds', 0) or 0),
                 )
                 if getattr(transport, "name", "") == "ws_inbound":
-                    wait_min = max(wait_min, 30)
-                    wait_max = max(wait_max, 60)
+                    ws_client = getattr(transport, "_client", None)
+                    if ws_client is not None and getattr(ws_client, "connected", False):
+                        # WS 已连接：主要靠推送唤醒，轮询间隔可放宽
+                        wait_min = max(5, min(wait_min, 12))
+                        wait_max = max(20, min(wait_max, 40))
+                    else:
+                        # WS 未连上：缩短 HTTP 兜底轮询
+                        wait_min = min(wait_min, self.idle_poll_min)
+                        wait_max = min(wait_max, self.idle_poll_max)
+                elif os.environ.get('ZQ_ENV') == 'client':
+                    wait_min = min(wait_min, self.idle_poll_min)
+                    wait_max = min(wait_max, self.idle_poll_max)
                 if wait_max < wait_min:
                     wait_max = wait_min
                 wait = random.uniform(wait_min, wait_max)
@@ -1215,6 +1449,13 @@ class DouyinWorker:
             f"msg_id={msg.message_id} text={preview!r}"
         )
 
+        if await _trigger_already_replied(msg.message_id):
+            logger.info(
+                f"[reply] ⏭ 跳过：该消息已成功回复过 account={account_id} msg_id={msg.message_id}"
+            )
+            await _mark_message_processed(msg.message_id)
+            return
+
         session_active = await _session_is_active(account_id)
         if not _can_process_reply(account.status, account.auto_reply_enabled, session_active):
             logger.info(
@@ -1260,6 +1501,7 @@ class DouyinWorker:
         reason = await _blacklist_hit(account_id, msg.peer_sec_uid, msg.peer_nickname or '', msg.text)
         if reason:
             logger.info(f"[reply] ⏭ 跳过：命中黑名单 account={account_id} peer={peer!r} reason={reason}")
+            await _mark_message_processed(msg.message_id)
             await _log_event(account_id, 'blacklist_hit', 'info', '跳过：命中黑名单', reason, self.worker_id)
             return
 
@@ -1288,6 +1530,7 @@ class DouyinWorker:
             )
             await _log_event(account_id, 'reply_failed', 'info', '跳过：无命中规则',
                              f"text={msg.text[:60]}", self.worker_id)
+            await _mark_message_processed(msg.message_id)
             return
         logger.info(
             f"[reply] ✔ 命中规则 account={account_id} rule={rule.name!r} "
@@ -1296,10 +1539,18 @@ class DouyinWorker:
         )
 
         # 冷却
-        if await _is_in_cooldown(msg.conversation_id, str(rule.id), rule.cooldown_seconds):
+        cooldown_seconds = int(getattr(rule, 'cooldown_seconds', 0) or 0)
+        if await _is_in_cooldown(msg.conversation_id, str(rule.id), cooldown_seconds):
             logger.info(
                 f"[reply] ⏭ 跳过：规则冷却中 account={account_id} "
-                f"rule={rule.name!r} conv={msg.conversation_id}"
+                f"rule={rule.name!r} conv={msg.conversation_id} cooldown={cooldown_seconds}s"
+            )
+            await _write_cooldown_skip_log(
+                account_id,
+                msg.conversation_id,
+                msg.message_id,
+                str(rule.id),
+                rule.name,
             )
             await _log_event(account_id, 'rate_limit', 'info', '跳过：规则冷却中',
                              f"rule={rule.name}", self.worker_id)
@@ -1361,6 +1612,7 @@ class DouyinWorker:
             )
             await _log_event(account_id, 'reply_failed', 'error', '回复失败',
                              f"{type(e).__name__}: {e}", self.worker_id)
+            await _mark_message_processed(msg.message_id)
             await push_to_user(owner_id, 'reply_failed', {
                 'account_id': account_id,
                 'peer_nickname': msg.peer_nickname,
@@ -1369,6 +1621,9 @@ class DouyinWorker:
 
     # ---------------- 基础设施 ----------------
     async def _connect_redis(self) -> None:
+        if getattr(settings, 'DOUYIN_COMMAND_BACKEND', 'redis') == 'db':
+            logger.info("[worker] 客户端 SQLite 命令队列模式，跳过 Redis")
+            return
         try:
             import redis.asyncio as aioredis
             url = getattr(settings, 'REDIS_URL', None)

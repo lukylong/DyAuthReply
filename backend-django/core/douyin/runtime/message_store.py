@@ -12,11 +12,25 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Optional
 
 from asgiref.sync import sync_to_async
+from django.conf import settings
 from django.utils import timezone
+
+
+def _to_db_datetime(dt: datetime | None) -> datetime | None:
+    """SQLite + USE_TZ=False 时须用 naive datetime，避免落库失败。"""
+    if dt is None:
+        return None
+    if settings.USE_TZ:
+        if timezone.is_naive(dt):
+            return timezone.make_aware(dt, timezone.get_current_timezone())
+        return dt
+    if timezone.is_aware(dt):
+        return timezone.make_naive(dt, dt_timezone.utc)
+    return dt
 
 
 # -------------------- 异常 --------------------
@@ -147,6 +161,7 @@ def _upsert_conversation_and_message(
     *,
     external_msg_id: Optional[str] = None,
     peer_avatar: Optional[str] = None,
+    peer_unique_id: Optional[str] = None,
     platform_conversation_id: Optional[str] = None,
     direction: str = 'in',
 ) -> Optional[tuple]:
@@ -161,6 +176,10 @@ def _upsert_conversation_and_message(
     from core.douyin.douyin_account_model import DouyinAccount
     from core.douyin.douyin_conversation_model import DouyinConversation
     from core.douyin.douyin_message_model import DouyinMessage
+
+    received_at = _to_db_datetime(received_at)
+    if received_at is None:
+        received_at = _to_db_datetime(timezone.now())
 
     account = DouyinAccount.objects.filter(id=account_id).first()
     if account is None:
@@ -191,6 +210,9 @@ def _upsert_conversation_and_message(
     avatar = (peer_avatar or '').strip()
     if avatar:
         defaults['peer_avatar'] = avatar
+    unique_id = (peer_unique_id or '').strip()
+    if unique_id:
+        defaults['peer_unique_id'] = unique_id
     if platform_conv_id:
         defaults['platform_conversation_id'] = platform_conv_id
 
@@ -208,6 +230,8 @@ def _upsert_conversation_and_message(
             update_fields['peer_nickname'] = nick
         if avatar:
             update_fields['peer_avatar'] = avatar
+        if unique_id:
+            update_fields['peer_unique_id'] = unique_id
         if platform_conv_id:
             update_fields['platform_conversation_id'] = platform_conv_id
 
@@ -248,3 +272,36 @@ def _upsert_conversation_and_message(
         msg.save(update_fields=['direction'])
 
     return (str(conv.id), str(msg.id)) if msg_created or (not msg_created and msg.direction != direction) else None
+
+
+@sync_to_async
+def fetch_pending_inbound_messages(account_id: str, *, limit: int = 30) -> list[ScannedMessage]:
+    """拉取已入库但未处理（processed=False）的入向消息，供 worker 补跑自动回复。"""
+    from core.douyin.douyin_message_model import DouyinMessage
+
+    rows = (
+        DouyinMessage.objects.filter(
+            conversation__account_id=account_id,
+            direction='in',
+            processed=False,
+        )
+        .exclude(reply_logs__result='success')
+        .select_related('conversation')
+        .order_by('received_at')[:limit]
+    )
+    out: list[ScannedMessage] = []
+    for msg in rows:
+        conv = msg.conversation
+        received_at = msg.received_at.isoformat() if msg.received_at else ''
+        out.append(
+            ScannedMessage(
+                message_id=str(msg.id),
+                conversation_id=str(conv.id),
+                peer_sec_uid=str(conv.peer_sec_uid or ''),
+                peer_nickname=conv.peer_nickname,
+                text=msg.content or '',
+                received_at=received_at,
+                raw=msg.raw_payload if isinstance(msg.raw_payload, dict) else {},
+            )
+        )
+    return out

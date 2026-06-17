@@ -140,10 +140,14 @@ def manual_reply(request, session_id: str, data: DouyinManualReplyIn):
     text = (data.text or '').strip()
     if not text:
         return DouyinSessionControlOut(success=False, message="回复内容不能为空")
-    ok = command_publisher.send_manual_reply(str(session.account_id), str(conv.id), text)
+    ok, command_id = command_publisher.send_manual_reply(str(session.account_id), str(conv.id), text)
     if not ok:
         return DouyinSessionControlOut(success=False, message="Redis 不可用，未能下发手动回复指令")
-    return DouyinSessionControlOut(success=True, message="手动回复指令已下发")
+    return DouyinSessionControlOut(
+        success=True,
+        message="手动回复指令已下发",
+        command_id=command_id,
+    )
 
 
 @router.post(

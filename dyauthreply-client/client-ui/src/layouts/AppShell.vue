@@ -1,9 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue';
-import { RouterLink, RouterView, useRoute } from 'vue-router';
+import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router';
 import { getHealth } from '../api/client';
+import { APP_VERSION, useVersionEasterEgg } from '../composables/useVersionEasterEgg';
+import AdminPasswordModal from '../components/AdminPasswordModal.vue';
 
 const route = useRoute();
+const router = useRouter();
+const showAdminModal = ref(false);
 const isWide = computed(() => Boolean(route.meta.wide));
 
 const isOnline = ref(false);
@@ -28,9 +32,23 @@ onMounted(() => {
 onUnmounted(() => {
   if (healthTimer) clearInterval(healthTimer);
 });
+
+const { onVersionClick } = useVersionEasterEgg(() => {
+  showAdminModal.value = true;
+});
+
+function onAdminSuccess() {
+  showAdminModal.value = false;
+  router.push('/admin');
+}
 </script>
 
 <template>
+  <AdminPasswordModal
+    :open="showAdminModal"
+    @close="showAdminModal = false"
+    @success="onAdminSuccess"
+  />
   <!-- Liquid glow animated background -->
   <div class="liquid-bg-wrapper">
     <div class="liquid-blob blob-1"></div>
@@ -63,7 +81,7 @@ onUnmounted(() => {
           <span class="icon">⚙️</span>自动回复规则
         </RouterLink>
         <RouterLink to="/logs" class="nav-item">
-          <span class="icon">📝</span>运行日志
+          <span class="icon">📝</span>回复记录
         </RouterLink>
       </nav>
 
@@ -76,6 +94,7 @@ onUnmounted(() => {
             <span class="service-name">{{ serviceName }}</span>
           </div>
         </div>
+        <div class="version-tag" @click="onVersionClick">{{ APP_VERSION }}</div>
       </div>
     </aside>
 
@@ -236,6 +255,16 @@ onUnmounted(() => {
 .service-name {
   font-size: 0.68rem;
   color: var(--text-muted);
+}
+
+.version-tag {
+  margin-top: 10px;
+  text-align: center;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  opacity: 0.55;
+  user-select: none;
+  cursor: default;
 }
 
 @keyframes pulse {

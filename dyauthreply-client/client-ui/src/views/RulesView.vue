@@ -15,6 +15,10 @@ import {
   type RuleLink,
 } from '../api/client';
 
+function ruleHasLinks(links: { url: string }[] | undefined) {
+  return (links || []).some((l) => (l.url || '').trim());
+}
+
 const loading = ref(true);
 const error = ref('');
 const accounts = ref<DouyinAccount[]>([]);
@@ -47,7 +51,13 @@ function normalizeLinks(raw?: DouyinRule['links']): RuleLink[] {
       if (typeof item === 'string') {
         return { title: '', url: item.trim() };
       }
-      return { title: (item.title || '').trim(), url: (item.url || '').trim() };
+      const url = (item.url || '').trim();
+      let title = (item.title || '').trim();
+      // 历史数据 title 被回填成 url，编辑时还原为「仅 URL 框有值」
+      if (title && url && title === url) {
+        title = '';
+      }
+      return { title, url };
     })
     .filter((item) => item.url);
 }
@@ -131,7 +141,10 @@ function openEdit(rule: DouyinRule) {
     keywordsText: (rule.keywords || []).join('\n'),
     reply_text: rule.reply_text || '',
     links: normalizeLinks(rule.links),
-    send_mode: (rule.send_mode === 'multi_message' ? 'multi_message' : 'merged'),
+    send_mode:
+      ruleHasLinks(normalizeLinks(rule.links)) || rule.send_mode === 'multi_message'
+        ? 'multi_message'
+        : 'merged',
     priority: rule.priority ?? 0,
     cooldown_seconds: rule.cooldown_seconds ?? 300,
     status: rule.status,
@@ -210,10 +223,10 @@ async function submitForm() {
       links: form.value.links
         .filter((l) => l.url.trim())
         .map((l) => ({
-          title: (l.title || '').trim() || l.url.trim(),
+          title: (l.title || '').trim(),
           url: l.url.trim(),
         })),
-      send_mode: form.value.send_mode,
+      send_mode: ruleHasLinks(form.value.links) ? 'multi_message' : form.value.send_mode,
       priority: Number(form.value.priority) || 0,
       cooldown_seconds: Number(form.value.cooldown_seconds) || 300,
       status: form.value.status,
@@ -267,6 +280,16 @@ async function confirmRemoveRule() {
 }
 
 watch(filterAccountId, loadRules);
+
+watch(
+  () => form.value.links,
+  (links) => {
+    if (ruleHasLinks(links)) {
+      form.value.send_mode = 'multi_message';
+    }
+  },
+  { deep: true },
+);
 
 onMounted(async () => {
   try {
@@ -422,8 +445,8 @@ onMounted(async () => {
           <span class="field-label">附件链接 (名片/卡片，可选)</span>
           <div v-if="form.links.length === 0" class="link-empty">暂无附件链接，点击下方按钮添加。</div>
           <div v-for="(_, idx) in form.links" :key="idx" class="link-row">
-            <input class="input-glass title-input" v-model="form.links[idx].title" type="text" placeholder="链接标题" />
-            <input class="input-glass url-input" v-model="form.links[idx].url" type="url" placeholder="抖音卡片链接地址 (https://...)" />
+            <input class="input-glass title-input" v-model="form.links[idx].title" type="text" placeholder="名片名称（如：名片，可选）" />
+            <input class="input-glass url-input" v-model="form.links[idx].url" type="url" placeholder="链接地址 (https://...)" />
             <button type="button" class="btn-glass delete-btn" @click="removeLinkRow(idx)">删除</button>
           </div>
           <button type="button" class="btn-glass add-link-btn" @click="addLinkRow">+ 添加链接</button>
@@ -431,10 +454,17 @@ onMounted(async () => {
         
         <label class="form-field">
           <span class="field-label">下发策略</span>
-          <select class="select-glass" v-model="form.send_mode">
-            <option value="multi_message">分条发送 (文本与卡片链接各自作为独立气泡)</option>
-            <option value="merged">合并发送 (富文本卡片集成)</option>
+          <select
+            class="select-glass"
+            v-model="form.send_mode"
+            :disabled="ruleHasLinks(form.links)"
+          >
+            <option value="multi_message">分条发送 (文本与链接各自独立一条消息)</option>
+            <option v-if="!ruleHasLinks(form.links)" value="merged">合并发送 (纯文本时合并为一条)</option>
           </select>
+          <p v-if="ruleHasLinks(form.links)" class="field-hint">
+            含附件链接时固定分条发送：先文本，再每条链接各发一条。
+          </p>
         </label>
         
         <div class="row-fields">
@@ -752,6 +782,13 @@ onMounted(async () => {
   font-size: 0.78rem;
   font-weight: 600;
   color: #334155;
+}
+
+.field-hint {
+  margin: 6px 0 0;
+  font-size: 0.75rem;
+  color: #64748b;
+  line-height: 1.4;
 }
 
 .form-field input, .form-field select, .form-field textarea {

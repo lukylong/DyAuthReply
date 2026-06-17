@@ -624,6 +624,14 @@ def import_credential(request, account_id: str, data: DouyinCredentialImportIn):
 
     account.save()
 
+    from core.douyin.runtime.command_publisher import send_session_control
+
+    try:
+        send_session_control(str(account_id), "restart")
+        logger.info(f"[import_credential] 已通知 worker 重启账号协程 account={account_id}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[import_credential] worker restart 通知失败 account={account_id}: {e}")
+
     msg = (
         "登录态已导入：可监控与发送私信。"
         if can_send
@@ -921,7 +929,7 @@ def send_account_manual_reply(request, account_id: str, data: DouyinManualReplyI
     if not ok:
         return DouyinSessionControlOut(
             success=False,
-            message="Redis 不可用，未能下发手动回复指令"
+            message="未能下发手动回复指令（Worker 命令队列不可用）"
         )
 
     return DouyinSessionControlOut(

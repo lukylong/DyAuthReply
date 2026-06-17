@@ -31,10 +31,27 @@ export async function sendAccountManualReply(
   conversationId: string,
   text: string,
 ) {
-  return requestClient.post<{ message: string; success: boolean }>(
-    `/api/core/douyin/account/${accountId}/manual-reply`,
-    { conversation_id: conversationId, text },
-  );
+  return requestClient.post<{
+    command_id?: string | null;
+    message: string;
+    success: boolean;
+  }>(`/api/core/douyin/account/${accountId}/manual-reply`, {
+    conversation_id: conversationId,
+    text,
+  });
+}
+
+/**
+ * 查询 Worker 手动发送命令执行结果
+ */
+export async function getWorkerCommandStatus(commandId: string) {
+  return requestClient.get<{
+    command_id: string;
+    consumed: boolean;
+    error?: string | null;
+    message_id?: string | null;
+    status: 'failed' | 'pending' | 'success' | 'unknown';
+  }>(`/api/core/douyin/worker-command/${commandId}`);
 }
 
 /**

@@ -1,3 +1,5 @@
+#[cfg(debug_assertions)]
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
@@ -10,29 +12,126 @@ use tauri_plugin_shell::process::CommandChild;
 
 struct BackendChild(Mutex<Option<CommandChild>>);
 
-fn wait_for_api(port: u16) {
+const API_PORT: u16 = 8765;
+
+fn api_is_ready(port: u16) -> bool {
     use std::io::{Read, Write};
 
     let host = "127.0.0.1";
-    for _ in 0..120 {
-        if let Ok(mut stream) = std::net::TcpStream::connect((host, port)) {
-            let req = format!(
-                "GET /api/client/v1/health HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
-            );
-            if stream.write_all(req.as_bytes()).is_ok() {
-                let mut buf = [0u8; 512];
-                if stream.read(&mut buf).is_ok() {
-                    let text = String::from_utf8_lossy(&buf);
-                    if text.contains("200") && text.contains("\"ok\"") {
-                        println!("[dyauthreply] API ready on {host}:{port}");
-                        return;
-                    }
-                }
+    if let Ok(mut stream) = std::net::TcpStream::connect((host, port)) {
+        let req = format!(
+            "GET /api/client/v1/health HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
+        );
+        if stream.write_all(req.as_bytes()).is_ok() {
+            let mut buf = [0u8; 512];
+            if stream.read(&mut buf).is_ok() {
+                let text = String::from_utf8_lossy(&buf);
+                return text.contains("200") && text.contains("\"ok\"");
             }
+        }
+    }
+    false
+}
+
+fn wait_for_api(port: u16) {
+    let host = "127.0.0.1";
+    for _ in 0..120 {
+        if api_is_ready(port) {
+            println!("[dyauthreply] API ready on {host}:{port}");
+            return;
         }
         thread::sleep(Duration::from_millis(500));
     }
     eprintln!("[dyauthreply] API health check timeout ({host}:{port})");
+}
+
+#[cfg(debug_assertions)]
+fn dev_launcher_script() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../launcher/launcher.py")
+}
+
+fn spawn_backend(shell: &tauri_plugin_shell::Shell<tauri::Wry>) -> Option<CommandChild> {
+    #[cfg(debug_assertions)]
+    {
+        if api_is_ready(API_PORT) {
+            println!("[dyauthreply] dev: reusing existing API on 127.0.0.1:{API_PORT}");
+            return None;
+        }
+        let script = dev_launcher_script();
+        if script.is_file() {
+            println!("[dyauthreply] dev: starting python launcher {}", script.display());
+            match shell
+                .command("python3")
+                .args([script.to_string_lossy().to_string()])
+                .spawn()
+            {
+                Ok((mut rx, child)) => {
+                    tauri::async_runtime::spawn(async move {
+                        use tauri_plugin_shell::process::CommandEvent;
+                        while let Some(event) = rx.recv().await {
+                            match event {
+                                CommandEvent::Stdout(line_bytes) => {
+                                    let line = String::from_utf8_lossy(&line_bytes);
+                                    print!("[launcher stdout] {}", line);
+                                }
+                                CommandEvent::Stderr(line_bytes) => {
+                                    let line = String::from_utf8_lossy(&line_bytes);
+                                    eprint!("[launcher stderr] {}", line);
+                                }
+                                CommandEvent::Terminated(payload) => {
+                                    println!("[launcher terminated] status: {:?}", payload.code);
+                                }
+                                _ => {}
+                            }
+                        }
+                    });
+                    return Some(child);
+                }
+                Err(err) => eprintln!("[dyauthreply] dev: failed to spawn python launcher: {err}"),
+            }
+        } else {
+            eprintln!(
+                "[dyauthreply] dev: launcher script not found at {}",
+                script.display()
+            );
+        }
+    }
+
+    match shell.sidecar("launcher") {
+        Ok(cmd) => match cmd.spawn() {
+            Ok((mut rx, child)) => {
+                println!("[dyauthreply] backend sidecar launcher started");
+                tauri::async_runtime::spawn(async move {
+                    use tauri_plugin_shell::process::CommandEvent;
+                    while let Some(event) = rx.recv().await {
+                        match event {
+                            CommandEvent::Stdout(line_bytes) => {
+                                let line = String::from_utf8_lossy(&line_bytes);
+                                print!("[sidecar stdout] {}", line);
+                            }
+                            CommandEvent::Stderr(line_bytes) => {
+                                let line = String::from_utf8_lossy(&line_bytes);
+                                eprint!("[sidecar stderr] {}", line);
+                            }
+                            CommandEvent::Terminated(payload) => {
+                                println!("[sidecar terminated] status: {:?}", payload.code);
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+                Some(child)
+            }
+            Err(err) => {
+                eprintln!("[dyauthreply] failed to spawn sidecar: {err}");
+                None
+            }
+        },
+        Err(err) => {
+            eprintln!("[dyauthreply] failed to find sidecar: {err}");
+            None
+        }
+    }
 }
 
 #[tauri::command]
@@ -93,49 +192,12 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Spawn Backend Sidecar
+            // Spawn Backend (dev: python launcher.py；release: PyInstaller sidecar)
             let shell = app.shell();
-            let sidecar_command = shell.sidecar("launcher");
-            let child = match sidecar_command {
-                Ok(cmd) => {
-                    match cmd.spawn() {
-                        Ok((mut rx, child)) => {
-                            println!("[dyauthreply] backend sidecar launcher started");
-                            tauri::async_runtime::spawn(async move {
-                                use tauri_plugin_shell::process::CommandEvent;
-                                while let Some(event) = rx.recv().await {
-                                    match event {
-                                        CommandEvent::Stdout(line_bytes) => {
-                                            let line = String::from_utf8_lossy(&line_bytes);
-                                            print!("[sidecar stdout] {}", line);
-                                        }
-                                        CommandEvent::Stderr(line_bytes) => {
-                                            let line = String::from_utf8_lossy(&line_bytes);
-                                            eprint!("[sidecar stderr] {}", line);
-                                        }
-                                        CommandEvent::Terminated(payload) => {
-                                            println!("[sidecar terminated] status: {:?}", payload.code);
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            });
-                            Some(child)
-                        }
-                        Err(err) => {
-                            eprintln!("[dyauthreply] failed to spawn sidecar: {err}");
-                            None
-                        }
-                    }
-                }
-                Err(err) => {
-                    eprintln!("[dyauthreply] failed to find sidecar: {err}");
-                    None
-                }
-            };
+            let child = spawn_backend(&shell);
             app.manage(BackendChild(Mutex::new(child)));
 
-            thread::spawn(|| wait_for_api(8765));
+            thread::spawn(|| wait_for_api(API_PORT));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![backend_status])

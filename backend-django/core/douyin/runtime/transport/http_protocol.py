@@ -29,6 +29,8 @@ from asgiref.sync import sync_to_async
 from core.douyin.runtime.reply_helpers import (
     _build_segments,
     _record_auto_outbound_message,
+    _resolve_rule_reply_fields,
+    _normalize_send_mode,
     _write_reply_log,
     write_manual_out_message,
 )
@@ -354,6 +356,10 @@ def _build_default_sign_provider():
         "[transport.http] 签名后端 = js（JsSignProvider：dy_ab.js + bd-ticket-guard，无浏览器）"
     )
     return JsSignProvider()
+
+
+# 业务层明确拒收（有 server_msg_id 也不能当成功落库）
+_HARD_BIZ_FAIL_CODES = frozenset({60021, 7905, 7911})
 
 
 class HttpProtocolTransport(AccountTransport):
@@ -1448,8 +1454,6 @@ class HttpProtocolTransport(AccountTransport):
 
         endpoint = _ENDPOINTS["send_message"]
 
-        # 优先走 pb2 编码器（带完整 bd-ticket-guard 鉴权）——仅当签名后端持有 bd_ticket（js）。
-        # 缺 private_key（如 browser 后端）时回退到旧的手写 codec / 模板路径。
         bd_ticket: dict = {}
         get_bd = getattr(self._sign, "get_bd_ticket", None)
         if callable(get_bd):
@@ -1457,6 +1461,11 @@ class HttpProtocolTransport(AccountTransport):
                 bd_ticket = get_bd() or {}
             except Exception:  # noqa: BLE001
                 bd_ticket = {}
+
+        template_body = await _load_latest_successful_send_template(
+            str(account.id),
+            conversation_id,
+        )
 
         encoder = "legacy"
         if bd_ticket.get("private_key"):
@@ -1480,23 +1489,18 @@ class HttpProtocolTransport(AccountTransport):
                 s_v_web_id=s_v_web_id,
             )
             encoder = "pb2"
-            template_body = None
-        else:
-            template_body = await _load_latest_successful_send_template(
-                str(account.id),
-                conversation_id,
+        elif template_body:
+            body, client_msg_id, seq_id = encode_send_message_request_from_template(
+                template_body=template_body,
+                conversation_id=conversation_id,
+                text=normalized,
             )
-            if template_body:
-                body, client_msg_id, seq_id = encode_send_message_request_from_template(
-                    template_body=template_body,
-                    conversation_id=conversation_id,
-                    text=normalized,
-                )
-            else:
-                body, client_msg_id, seq_id = encode_send_message_request(
-                    conversation_id=conversation_id,
-                    text=normalized,
-                )
+            encoder = "template"
+        else:
+            body, client_msg_id, seq_id = encode_send_message_request(
+                conversation_id=conversation_id,
+                text=normalized,
+            )
 
         logger.info(
             f"[transport.http] {log_tag} → POST {endpoint['url']} "
@@ -1559,8 +1563,8 @@ class HttpProtocolTransport(AccountTransport):
             )
 
         if result.biz_status_code not in (0, 8101):
-            # 60021 等：协议层已分配 server_msg_id 时视为软成功（消息通常已发出）
-            if result.server_msg_id and result.biz_status_code not in (7911,):
+            if result.server_msg_id and result.biz_status_code not in _HARD_BIZ_FAIL_CODES:
+                # 8513 等：协议已分配 server_msg_id，消息通常已发出（可能带风控提示）
                 logger.warning(
                     f"[transport.http] {log_tag} 业务层软成功 account={account.id} "
                     f"biz_status_code={result.biz_status_code} "
@@ -1596,6 +1600,17 @@ class HttpProtocolTransport(AccountTransport):
             logger.warning(
                 f"[transport.http] {log_tag} client_msg_id 不一致 "
                 f"sent={client_msg_id} echo={result.client_msg_id}"
+            )
+
+        if result.biz_status_code in (0, 8101) and not result.biz_status_text:
+            from core.douyin.runtime.send_template_cache import save_cached_send_template
+
+            await sync_to_async(save_cached_send_template)(
+                str(account.id),
+                conversation_id,
+                body,
+                source=log_tag,
+                request_len=len(body),
             )
 
         logger.info(
@@ -1634,7 +1649,10 @@ class HttpProtocolTransport(AccountTransport):
             return result.client_msg_id or client_msg_id
         # 落 DouyinMessage(direction='out', external_msg_id=manual_out_*)
         msg_id = await write_manual_out_message(
-            str(account.id), db_conversation_id, normalized
+            str(account.id),
+            db_conversation_id,
+            normalized,
+            external_msg_id=str(result.server_msg_id) if result.server_msg_id else None,
         )
         return msg_id
 
@@ -1676,12 +1694,13 @@ class HttpProtocolTransport(AccountTransport):
                 f"send_reply 需要本地会话 ID 映射才能记录 reply log: {conversation_id}"
             )
 
+        base, links_src, raw_mode = _resolve_rule_reply_fields(rule)
+        send_mode_effective = _normalize_send_mode(raw_mode, has_links=bool(links_src))
         segments = _build_segments(rule, peer_nickname)
         logger.info(
             f"[transport.http] send_reply 开始 account={account_id} peer={peer_nickname!r} "
-            f"rule={rule.name!r} send_mode={getattr(rule, 'send_mode', '?')} "
-            f"segments={len(segments)} conv={conversation_id} "
-            f"platform_conv={platform_conversation_id}"
+            f"rule={rule.name!r} send_mode={send_mode_effective} segments={len(segments)} "
+            f"conv={conversation_id} platform_conv={platform_conversation_id}"
         )
 
         if not segments:
@@ -1708,7 +1727,7 @@ class HttpProtocolTransport(AccountTransport):
                 f"account={account_id} len={len(seg)} preview={preview!r}"
             )
             # 协议层发送；任何失败让 _post_send_message 抛 → 上层 fallback
-            await self._post_send_message(
+            send_result, _client_msg_id = await self._post_send_message(
                 account,
                 platform_conversation_id,
                 seg,
@@ -1722,6 +1741,7 @@ class HttpProtocolTransport(AccountTransport):
                     conversation_id=db_conversation_id,
                     text=seg,
                     rule_id=rule_id,
+                    external_msg_id=str(send_result.server_msg_id) if send_result.server_msg_id else None,
                 )
             except Exception as e:  # noqa: BLE001
                 # 落库失败不影响主流程；下一轮 scan_inbox 还有 _recent_outbound_texts 兜底
@@ -1736,8 +1756,8 @@ class HttpProtocolTransport(AccountTransport):
                 await asyncio.sleep(gap)
 
         duration = int((datetime.utcnow().timestamp() - t0) * 1000)
-        tpl = getattr(rule, 'template', None)
-        links_payload = (tpl.links if tpl else getattr(rule, 'links', None)) or []
+        _, links_src, _ = _resolve_rule_reply_fields(rule)
+        links_payload = links_src or []
 
         log_id = await _write_reply_log(
             account_id=account_id,
@@ -2375,6 +2395,9 @@ class HttpProtocolTransport(AccountTransport):
                     external_msg_id=external_msg_id,
                     platform_conversation_id=m.conversation_id,
                     direction=direction,
+                    mark_processed=bool(
+                        is_baseline and include_recent_without_unread and direction == 'in'
+                    ),
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning(

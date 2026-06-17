@@ -74,13 +74,13 @@ function conversationsSignature(items: ConversationItem[]) {
   return items
     .map(
       (c) =>
-        `${c.id}:${c.last_message_at || ''}:${c.unread_count}:${c.peer_nickname || ''}:${c.peer_avatar || ''}`,
+        `${c.id}:${c.last_message_at || ''}:${c.last_message_preview || ''}:${c.unread_count}:${c.peer_nickname || ''}:${c.peer_avatar || ''}`,
     )
     .join('|');
 }
 
 function messagesSignature(items: MessageItem[]) {
-  return items.map((m) => `${m.id}:${m.received_at || ''}`).join('|');
+  return items.map((m) => `${m.id}:${m.received_at || ''}:${m.content || ''}`).join('|');
 }
 
 function formatTime(iso?: string | null) {
@@ -186,7 +186,7 @@ async function loadConversations(silent = false) {
   }
 }
 
-async function loadMessages(silent = false) {
+async function loadMessages(silent = false, force = false) {
   if (!activeAccountId.value || !activeConversationId.value) {
     messages.value = [];
     return;
@@ -197,7 +197,7 @@ async function loadMessages(silent = false) {
   try {
     const items = await listMessages(activeAccountId.value, activeConversationId.value);
     const sig = messagesSignature(items);
-    if (sig !== msgSig) {
+    if (force || sig !== msgSig) {
       msgSig = sig;
       messages.value = items;
       if (shouldScroll) {
@@ -223,7 +223,10 @@ function selectAccount(id: string) {
 }
 
 function selectConversation(id: string) {
-  if (activeConversationId.value === id) return;
+  if (activeConversationId.value === id) {
+    void loadMessages(true, true);
+    return;
+  }
   activeConversationId.value = id;
   msgSig = '';
   stickToBottom.value = true;
@@ -237,7 +240,7 @@ function pollTick() {
 
 function startPolling() {
   stopPolling();
-  pollTimer = setInterval(pollTick, 10000);
+  pollTimer = setInterval(pollTick, 3000);
 }
 
 function onVisibilityChange() {
@@ -248,21 +251,36 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function refreshAfterSend(maxAttempts = 5, intervalMs = 1200) {
+  for (let i = 0; i < maxAttempts; i += 1) {
+    await sleep(intervalMs);
+    await Promise.all([loadMessages(true, true), loadConversations(true)]);
+  }
+}
+
 async function waitManualReplyResult(commandId: string, sentText: string) {
   const deadline = Date.now() + 25000;
   while (Date.now() < deadline) {
     const st = await getWorkerCommandStatus(commandId);
     if (st.status === 'success') {
+      msgSig = '';
+      await Promise.all([loadMessages(true, true), loadConversations(true)]);
       return { ok: true as const };
     }
     if (st.status === 'failed') {
       return { ok: false as const, error: st.error || '发送失败' };
     }
     if (st.consumed && st.status === 'unknown') {
+      await refreshAfterSend(3, 800);
+      const latest = messages.value.filter((m) => m.direction === 'out').at(-1);
+      if (latest?.content?.trim() === sentText.trim()) {
+        return { ok: true as const };
+      }
       return { ok: false as const, error: '发送结果未知，请刷新消息列表' };
     }
     await sleep(500);
   }
+  await refreshAfterSend(3, 1000);
   const latest = messages.value.filter((m) => m.direction === 'out').at(-1);
   if (latest?.content?.trim() === sentText.trim()) {
     return { ok: true as const };
@@ -287,8 +305,6 @@ async function onSend() {
       const outcome = await waitManualReplyResult(res.command_id, text);
       if (outcome.ok) {
         toast.value = '发送成功';
-        await loadMessages(true);
-        await loadConversations();
         window.setTimeout(() => {
           if (toast.value === '发送成功') toast.value = '';
         }, 2500);
@@ -297,8 +313,8 @@ async function onSend() {
       toast.value = outcome.error || '发送失败';
       return;
     }
-    await loadMessages(true);
-    await loadConversations();
+    msgSig = '';
+    await refreshAfterSend();
   } catch (e) {
     toast.value = e instanceof Error ? e.message : String(e);
   } finally {

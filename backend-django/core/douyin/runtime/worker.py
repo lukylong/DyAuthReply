@@ -306,9 +306,16 @@ def _mark_message_processed(message_id: str) -> None:
 @sync_to_async
 def _mark_history_sync_completed(account_id: str) -> None:
     from core.douyin.douyin_account_model import DouyinAccount
-    DouyinAccount.objects.filter(id=account_id).update(
-        last_history_sync_at=timezone.now(),
-    )
+    from core.douyin.douyin_message_model import DouyinMessage
+
+    now = timezone.now()
+    DouyinAccount.objects.filter(id=account_id).update(last_history_sync_at=now)
+    # 历史补扫仅用于 UI 展示，不应触发自动回复
+    DouyinMessage.objects.filter(
+        conversation__account_id=account_id,
+        direction='in',
+        processed=False,
+    ).update(processed=True)
 
 
 @sync_to_async
@@ -810,13 +817,30 @@ class DouyinWorker:
         """客户端模式：轮询 SQLite 命令队列（无需 Redis）。"""
         if getattr(settings, 'DOUYIN_COMMAND_BACKEND', 'redis') != 'db':
             return
+        from django.db import close_old_connections
+
         logger.info("[worker] 已启用 SQLite 命令队列（客户端模式）")
         while not self._stop.is_set():
             try:
+                await sync_to_async(close_old_connections, thread_sensitive=False)()
                 pending = await _fetch_pending_worker_commands()
                 for cmd in pending:
-                    result = await self._dispatch_command(cmd['channel'], cmd['payload'])
-                    await _mark_worker_command_consumed(cmd['id'], result)
+                    cmd_id = cmd['id']
+                    try:
+                        result = await self._dispatch_command(cmd['channel'], cmd['payload'])
+                        if result is None:
+                            result = {'status': 'failed', 'error': '命令被忽略或未实现'}
+                    except Exception as e:  # noqa: BLE001
+                        logger.exception(
+                            f"[worker] SQLite 命令执行失败 id={cmd_id} channel={cmd.get('channel')}: {e}"
+                        )
+                        result = {'status': 'failed', 'error': str(e)}
+                    try:
+                        await _mark_worker_command_consumed(cmd_id, result)
+                    except Exception as mark_err:  # noqa: BLE001
+                        logger.error(
+                            f"[worker] SQLite 命令回写失败 id={cmd_id}: {mark_err}"
+                        )
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[worker] SQLite 命令队列异常: {e}")
             await self._sleep_or_stop(0.3)
@@ -1252,7 +1276,7 @@ class DouyinWorker:
                     f"new_msgs={len(new_msgs)} messages_today={self._account_metrics[account_id]['messages_today']}"
                 )
 
-                if can_reply:
+                if can_reply and not backfill_mode:
                     pending = await fetch_pending_inbound_messages(account_id)
                     if pending:
                         seen = {m.message_id for m in new_msgs}
@@ -1601,6 +1625,7 @@ class DouyinWorker:
                 'rule': rule.name,
                 'text_preview': (msg.text or '')[:60],
             })
+            await _mark_message_processed(msg.message_id)
         except LoginExpiredError:
             # 登录失效：交给 _account_loop 统一打回账号（标记失效 + WS 推送），不在此吞掉
             raise

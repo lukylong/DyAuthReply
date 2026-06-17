@@ -12,6 +12,7 @@ const getApiPrefix = () => {
 };
 
 const API_PREFIX = getApiPrefix();
+export const ADMIN_TOKEN_KEY = 'dyauthreply_admin_token';
 
 async function parseError(res: Response): Promise<string> {
   const text = await res.text();
@@ -48,13 +49,35 @@ function formatApiDetail(detail: unknown): string {
   return '';
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export function getAdminToken(): string {
+  if (typeof window === 'undefined') return '';
+  return sessionStorage.getItem(ADMIN_TOKEN_KEY) || '';
+}
+
+export function setAdminToken(token: string) {
+  sessionStorage.setItem(ADMIN_TOKEN_KEY, token);
+}
+
+export function clearAdminToken() {
+  sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+}
+
+export function isAdminLoggedIn(): boolean {
+  return Boolean(getAdminToken());
+}
+
+async function request<T>(path: string, init?: RequestInit, admin = false): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(init?.headers as Record<string, string> | undefined),
+  };
+  if (admin) {
+    const token = getAdminToken();
+    if (token) headers['X-Admin-Token'] = token;
+  }
   const res = await fetch(`${API_PREFIX}${path}`, {
     ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers || {}),
-    },
+    headers,
   });
   if (!res.ok) {
     throw new Error(await parseError(res));
@@ -114,6 +137,92 @@ export function getHealth() {
 
 export function getBootstrap() {
   return request<BootstrapInfo>('/bootstrap');
+}
+
+export interface RuntimeLogFile {
+  name: string;
+  path: string;
+  size: number;
+  modified_at: number;
+}
+
+export interface RuntimeLogTail {
+  files: string[];
+  content: string;
+  message: string;
+}
+
+export function listRuntimeLogFiles() {
+  return request<{ items: RuntimeLogFile[] }>('/runtime-logs/files', undefined, true);
+}
+
+export function tailRuntimeLogs(params?: { lines?: number; file?: string }) {
+  return request<RuntimeLogTail>(
+    withQuery('/runtime-logs/tail', {
+      lines: params?.lines ?? 400,
+      file: params?.file,
+    }),
+    undefined,
+    true,
+  );
+}
+
+export interface AdminLoginResult {
+  token: string;
+  expires_in: number;
+  expires_at: number;
+}
+
+export interface AdminDashboard {
+  service: {
+    env: string;
+    data_dir: string;
+    http_port: number;
+    accounts_total: number;
+    accounts_auto_reply_on: number;
+    accounts_online: number;
+    accounts: Array<Record<string, unknown>>;
+    sessions: Array<Record<string, unknown>>;
+    checked_at: string;
+  };
+  processes: {
+    api: Record<string, unknown>;
+    related_processes: Array<Record<string, unknown>>;
+    system: Record<string, unknown>;
+  };
+  database: Record<string, unknown>;
+}
+
+export interface EmergencyStopResult {
+  ok: boolean;
+  message: string;
+  accounts_stopped: number;
+  commands_cleared: number;
+  messages_marked_processed: number;
+  stopped_at: string;
+}
+
+export function adminLogin(password: string) {
+  return request<AdminLoginResult>(
+    '/admin/login',
+    { method: 'POST', body: JSON.stringify({ password }) },
+  );
+}
+
+export function adminLogout() {
+  return request<{ ok: boolean }>('/admin/logout', { method: 'POST' }, true);
+}
+
+export function getAdminDashboard() {
+  return request<AdminDashboard>('/admin/dashboard', undefined, true);
+}
+
+export function adminEmergencyStop(reason = '管理员急停') {
+  return request<EmergencyStopResult>(
+    '/admin/emergency-stop',
+    { method: 'POST', body: JSON.stringify({ reason }) },
+    true,
+  );
 }
 
 export function listAccounts() {

@@ -55,6 +55,13 @@ class DouyinRuleNormalizePayloadTests(SimpleTestCase):
         out = _normalize_rule_payload({'account_id': None})
         self.assertIsNone(out['account_id'])
 
+    def test_normalize_forces_multi_message_when_links_present(self):
+        out = _normalize_rule_payload({
+            'links': [{'title': '名片', 'url': 'https://example.com'}],
+            'send_mode': 'merged',
+        })
+        self.assertEqual(out['send_mode'], 'multi_message')
+
     def test_schema_in_accepts_global_rule_without_account_id(self):
         """Schema 层应允许 account_id 缺省（全局规则）"""
         data = DouyinRuleSchemaIn(

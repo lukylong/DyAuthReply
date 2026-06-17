@@ -1,0 +1,139 @@
+name: Build Client
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'client-v*'
+    paths:
+      - 'dyauthreply-client/**'
+      - 'backend-django/**'
+      - 'launcher.spec'
+      - 'scripts/client/**'
+      - '.github/workflows/client-build.yml'
+  pull_request:
+    paths:
+      - 'dyauthreply-client/**'
+      - 'backend-django/**'
+      - 'launcher.spec'
+      - 'scripts/client/**'
+      - '.github/workflows/client-build.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: client-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '20'
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform_label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform_label: macOS
+            artifact_name: dyauthreply-macos
+          - os: windows-latest
+            platform_label: Windows
+            artifact_name: dyauthreply-windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend-django/requirements.txt
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            dyauthreply-client/client-ui/package-lock.json
+            dyauthreply-client/desktop/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dyauthreply-client/desktop/src-tauri
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r backend-django/requirements.txt
+
+      - name: Build launcher sidecar
+        run: python scripts/client/build_launcher.py
+
+      - name: Install npm dependencies
+        shell: bash
+        run: |
+          npm ci --prefix dyauthreply-client/client-ui
+          npm ci --prefix dyauthreply-client/desktop
+
+      - name: Build Tauri desktop app
+        working-directory: dyauthreply-client/desktop
+        run: npm run tauri build
+
+      - name: Upload installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          if-no-files-found: error
+          path: |
+            dyauthreply-client/desktop/src-tauri/target/release/bundle/dmg/**
+            dyauthreply-client/desktop/src-tauri/target/release/bundle/macos/**
+            dyauthreply-client/desktop/src-tauri/target/release/bundle/nsis/**
+            dyauthreply-client/desktop/src-tauri/target/release/bundle/msi/**
+
+  release:
+    name: Publish Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/client-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dyauthreply-macos
+          path: release/macos
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dyauthreply-windows
+          path: release/windows
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: DyAuthReply Client ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            release/**/*

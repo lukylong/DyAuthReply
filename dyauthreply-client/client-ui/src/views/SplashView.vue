@@ -2,8 +2,11 @@
 import { onMounted, ref, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import { getHealth } from '../api/client';
+import { APP_VERSION, useVersionEasterEgg } from '../composables/useVersionEasterEgg';
+import AdminPasswordModal from '../components/AdminPasswordModal.vue';
 
 const router = useRouter();
+const showAdminModal = ref(false);
 const status = ref<'starting' | 'connecting' | 'ready' | 'failed'>('starting');
 const retryCount = ref(0);
 const maxRetries = 30; // 最多重试30次（约30秒）
@@ -76,9 +79,23 @@ async function retry() {
 onMounted(() => {
   startConnectionLoop();
 });
+
+const { onVersionClick } = useVersionEasterEgg(() => {
+  showAdminModal.value = true;
+});
+
+function onAdminSuccess() {
+  showAdminModal.value = false;
+  router.push('/admin');
+}
 </script>
 
 <template>
+  <AdminPasswordModal
+    :open="showAdminModal"
+    @close="showAdminModal = false"
+    @success="onAdminSuccess"
+  />
   <div class="splash-container">
     <!-- 背景动画 -->
     <div class="liquid-bg-wrapper">
@@ -120,9 +137,9 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- 版本信息 -->
-      <div class="version-info">
-        <span>v0.1.0</span>
+      <!-- 版本信息（连点 10 次 → 运行日志） -->
+      <div class="version-info" @click="onVersionClick">
+        <span>{{ APP_VERSION }}</span>
       </div>
     </div>
   </div>
@@ -418,6 +435,8 @@ onMounted(() => {
   font-size: 0.75rem;
   color: var(--text-muted);
   opacity: 0.6;
+  cursor: default;
+  user-select: none;
 }
 
 .glass-panel {

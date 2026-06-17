@@ -164,6 +164,7 @@ def _upsert_conversation_and_message(
     peer_unique_id: Optional[str] = None,
     platform_conversation_id: Optional[str] = None,
     direction: str = 'in',
+    mark_processed: bool = False,
 ) -> Optional[tuple]:
     """
     upsert DouyinConversation + DouyinMessage。
@@ -262,7 +263,7 @@ def _upsert_conversation_and_message(
             'content': text or '',
             'raw_payload': raw,
             'received_at': received_at,
-            'processed': False,
+            'processed': mark_processed or direction != 'in',
         },
     )
 

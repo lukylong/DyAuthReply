@@ -65,7 +65,7 @@ DOUYIN_DATA_DIR = _env('DOUYIN_DATA_DIR', str(_DATA_ROOT / 'douyin'))
 DOUYIN_WORKER_SHARD_COUNT = int(_env('DOUYIN_WORKER_SHARD_COUNT', '1'))
 DOUYIN_WORKER_SHARD_INDEX = int(_env('DOUYIN_WORKER_SHARD_INDEX', '0'))
 DOUYIN_WORKER_LEASE_ENABLED = _env('DOUYIN_WORKER_LEASE_ENABLED', 'false').lower() == 'true'
-DOUYIN_TRANSPORT_WS_INBOUND = _env('DOUYIN_TRANSPORT_WS_INBOUND', 'true').lower() == 'true'
+DOUYIN_TRANSPORT_WS_INBOUND = _env('DOUYIN_TRANSPORT_WS_INBOUND', 'false').lower() == 'true'
 
 # Worker 空闲轮询（WS 不可用时 HTTP 兜底；客户端默认更快）
 DOUYIN_WORKER_IDLE_POLL_MIN = int(_env('DOUYIN_WORKER_IDLE_POLL_MIN', '8'))
@@ -82,6 +82,10 @@ FILE_STORAGE_TYPE = _env('FILE_STORAGE_TYPE', 'local')
 FILE_STORAGE_LOCAL_PATH = str(_DATA_ROOT / 'media' / 'file_manager')
 
 CLIENT_DATA_DIR = str(_DATA_ROOT)
+
+# 客户端日志写入用户数据目录（打包后 _MEIPASS 不可持久化）
+SERVER_LOGS_FILE = str(_DATA_ROOT / 'logs' / 'server.log')
+ERROR_LOGS_FILE = str(_DATA_ROOT / 'logs' / 'error.log')
 
 # 客户端 API 默认端口（launcher 可覆盖 CLIENT_HTTP_PORT）
 CLIENT_HTTP_PORT = int(_env('CLIENT_HTTP_PORT', '8765'))

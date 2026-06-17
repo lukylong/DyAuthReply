@@ -409,16 +409,17 @@ AAD_CLIENT_ID = ''
 # ASGI 应用程序
 ASGI_APPLICATION = 'application.asgi.application'
 
-# Channels 层配置
-CHANNEL_LAYERS = {
-    "default": {
-        "BACKEND": "channels_redis.core.RedisChannelLayer",
-        "CONFIG": {
-            "hosts": [f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:6379/{REDIS_DB}"],
-            "symmetric_encryption_keys": [SECRET_KEY],
+# Channels 层配置（client/standalone 在 env 模块已设为 InMemoryChannelLayer）
+if 'CHANNEL_LAYERS' not in globals():
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "CONFIG": {
+                "hosts": [f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:6379/{REDIS_DB}"],
+                "symmetric_encryption_keys": [SECRET_KEY],
+            },
         },
-    },
-}
+    }
 
 DEFAULT_PASSWORD = "123456"
 

@@ -334,6 +334,18 @@ class User(RootModel):
         help_text="直属上级",
     )
 
+    # Django AUTH_USER_MODEL 系统检查所需（本系统 JWT 自管认证，不继承 AbstractUser）
+    USERNAME_FIELD = 'username'
+    REQUIRED_FIELDS: list[str] = []
+
+    @property
+    def is_anonymous(self):
+        return False
+
+    @property
+    def is_authenticated(self):
+        return True
+
     class Meta:
         db_table = "core_user"
         ordering = ("-sys_create_datetime",)

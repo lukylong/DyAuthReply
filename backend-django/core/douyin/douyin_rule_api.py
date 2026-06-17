@@ -44,7 +44,7 @@ def _normalize_rule_payload(payload: dict) -> dict:
     if 'links' in normalized:
         normalized['links'] = _normalize_links(normalized.get('links'))
     links = normalized.get('links') or []
-    if links and normalized.get('send_mode') in (None, '', 'merged'):
+    if links:
         normalized['send_mode'] = 'multi_message'
     if normalized.get('cooldown_seconds') is None:
         normalized['cooldown_seconds'] = 300
@@ -62,19 +62,23 @@ def _normalize_links(links) -> list[dict[str, str]]:
         if isinstance(item, str):
             url = item.strip()
             if url:
-                out.append({'title': url, 'url': url})
+                out.append({'title': '', 'url': url})
             continue
         if isinstance(item, dict):
             url = str(item.get('url') or '').strip()
             if not url:
                 continue
-            title = str(item.get('title') or url).strip()
+            title = str(item.get('title') or '').strip()
+            if title == url:
+                title = ''
             out.append({'title': title, 'url': url})
             continue
         # Pydantic Schema 对象
         url = str(getattr(item, 'url', '') or '').strip()
         if url:
-            title = str(getattr(item, 'title', '') or url).strip()
+            title = str(getattr(item, 'title', '') or '').strip()
+            if title == url:
+                title = ''
             out.append({'title': title, 'url': url})
     return out
 

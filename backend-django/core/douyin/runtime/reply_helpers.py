@@ -63,9 +63,26 @@ def _normalize_send_mode(send_mode: str | None, *, has_links: bool) -> str:
     mode = (send_mode or '').strip() or 'multi_message'
     if mode == 'card_fallback':
         mode = 'multi_message'
-    if has_links and mode == 'merged':
+    # 含链接卡片时一律分条发送（文本一条 + 每条链接各一条）
+    if has_links:
         mode = 'multi_message'
     return mode
+
+
+def _resolve_rule_reply_fields(rule: "DouyinRule") -> tuple[str, list, str | None]:
+    """合并 rule 与绑定 template 的文案/链接/发送模式（rule 字段优先）。"""
+    template = getattr(rule, 'template', None)
+    rule_links = rule.links or []
+    rule_text = (rule.reply_text or '').strip()
+    if template is not None:
+        base = rule_text or (template.content or '')
+        links = rule_links if rule_links else (template.links or [])
+        raw_mode = (rule.send_mode or '').strip() or template.send_mode
+    else:
+        base = rule.reply_text or ''
+        links = rule.links or []
+        raw_mode = rule.send_mode
+    return base, links, raw_mode
 
 
 def _build_segments(rule: "DouyinRule", peer_nickname: str) -> list[str]:
@@ -74,16 +91,9 @@ def _build_segments(rule: "DouyinRule", peer_nickname: str) -> list[str]:
     优先级：rule.template.content > rule.reply_text；rule.template.links > rule.links
 
     multi_message：先文本，再每条链接各发一条独立消息（与主项目 sender 行为一致）。
+    links[].title 仅用于后台展示/占位符 {{link_N_title}}，发送时一律忽略，只发 url。
     """
-    template = getattr(rule, 'template', None)
-    if template is not None:
-        base = template.content or ''
-        links = template.links or []
-        raw_mode = template.send_mode
-    else:
-        base = rule.reply_text or ''
-        links = rule.links or []
-        raw_mode = rule.send_mode
+    base, links, raw_mode = _resolve_rule_reply_fields(rule)
 
     normalized_links: list[dict] = []
     for lk in links or []:
@@ -91,12 +101,12 @@ def _build_segments(rule: "DouyinRule", peer_nickname: str) -> list[str]:
             url = str(lk.get('url') or '').strip()
             if url:
                 normalized_links.append({
-                    'title': str(lk.get('title') or url).strip(),
+                    'title': str(lk.get('title') or '').strip(),
                     'url': url,
                 })
         elif isinstance(lk, str) and lk.strip():
             url = lk.strip()
-            normalized_links.append({'title': url, 'url': url})
+            normalized_links.append({'title': '', 'url': url})
 
     send_mode = _normalize_send_mode(raw_mode, has_links=bool(normalized_links))
     text = render_template(base, peer_nickname=peer_nickname, links=normalized_links)
@@ -112,9 +122,8 @@ def _build_segments(rule: "DouyinRule", peer_nickname: str) -> list[str]:
     if text.strip():
         segs.append(text.strip())
     for lk in normalized_links:
-        # 链接段优先发 title（抖音 UI 展示为独立卡片/链接消息），无 title 时发 URL
-        link_text = (lk.get('title') or '').strip() or lk['url']
-        segs.append(link_text)
+        # 链接段发 URL 本体，抖音才会识别为可点击链接；title 仅用于后台展示/模板变量
+        segs.append(lk['url'])
     return segs
 
 
@@ -124,22 +133,28 @@ def write_manual_out_message(
     account_id: str,
     conversation_id: str,
     text: str,
+    *,
+    external_msg_id: Optional[str] = None,
 ) -> str:
     from core.douyin.douyin_conversation_model import DouyinConversation
     from core.douyin.douyin_message_model import DouyinMessage
 
     conv = DouyinConversation.objects.get(id=conversation_id, account_id=account_id)
-    msg = DouyinMessage.objects.create(
+    ext_id = (external_msg_id or '').strip() or f"manual_out_{timezone.now().timestamp()}"
+    now = timezone.now()
+    msg, _created = DouyinMessage.objects.get_or_create(
         conversation=conv,
-        external_msg_id=f"manual_out_{timezone.now().timestamp()}",
-        direction='out',
-        content_type='text',
-        content=text,
-        raw_payload={'manual': True},
-        received_at=timezone.now(),
-        processed=True,
+        external_msg_id=ext_id,
+        defaults={
+            'direction': 'out',
+            'content_type': 'text',
+            'content': text,
+            'raw_payload': {'manual': True},
+            'received_at': now,
+            'processed': True,
+        },
     )
-    conv.last_message_at = timezone.now()
+    conv.last_message_at = now
     conv.last_message_preview = text[:200]
     conv.save(update_fields=['last_message_at', 'last_message_preview', 'sys_update_datetime'])
     return str(msg.id)
@@ -152,6 +167,7 @@ def _record_auto_outbound_message(
     text: str,
     *,
     rule_id: Optional[str] = None,
+    external_msg_id: Optional[str] = None,
 ) -> Optional[str]:
     """
     自动回复发送成功后，落一条 direction='out' 的 DouyinMessage 行。
@@ -164,7 +180,7 @@ def _record_auto_outbound_message(
     if conv is None:
         return None
     now = timezone.now()
-    ext_id = f"auto_out_{int(now.timestamp() * 1000)}"
+    ext_id = (external_msg_id or '').strip() or f"auto_out_{int(now.timestamp() * 1000)}"
     msg, _ = DouyinMessage.objects.get_or_create(
         conversation=conv,
         external_msg_id=ext_id,

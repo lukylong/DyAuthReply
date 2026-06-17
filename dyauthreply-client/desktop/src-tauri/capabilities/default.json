@@ -19,6 +19,11 @@
           "name": "launcher",
           "sidecar": true,
           "args": true
+        },
+        {
+          "name": "python3",
+          "cmd": "python3",
+          "args": true
         }
       ]
     },
@@ -33,6 +38,11 @@
         {
           "name": "launcher",
           "sidecar": true,
+          "args": true
+        },
+        {
+          "name": "python3",
+          "cmd": "python3",
           "args": true
         }
       ]

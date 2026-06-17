@@ -28,6 +28,21 @@ from core.douyin.douyin_template_schema import (
 
 router = Router()
 
+
+def _normalize_template_payload(payload: dict) -> dict:
+    normalized = dict(payload)
+    if 'links' in normalized:
+        from core.douyin.douyin_rule_api import _normalize_links
+
+        normalized['links'] = _normalize_links(normalized.get('links'))
+    links = normalized.get('links') or []
+    if links:
+        normalized['send_mode'] = 'multi_message'
+    elif not (normalized.get('send_mode') or '').strip():
+        normalized['send_mode'] = 'multi_message'
+    return normalized
+
+
 # ============ 模板分类 ============
 
 @router.get("/template-category", response=List[DouyinTemplateCategorySchemaOut], summary="模板分类列表（分页）")
@@ -102,7 +117,7 @@ def get_template(request, tpl_id: str):
 
 @router.post("/template", response=DouyinTemplateSchemaOut, summary="创建模板")
 def create_template(request, data: DouyinTemplateSchemaIn):
-    payload = data.dict()
+    payload = _normalize_template_payload(data.dict())
     if not payload.get('owner_id'):
         payload['owner_id'] = request.auth.id
     # 自动推导 variables
@@ -113,7 +128,7 @@ def create_template(request, data: DouyinTemplateSchemaIn):
 @router.put("/template/{tpl_id}", response=DouyinTemplateSchemaOut, summary="更新模板")
 def update_template(request, tpl_id: str, data: DouyinTemplateSchemaIn):
     tpl = get_object_or_404(DouyinTemplate, id=tpl_id)
-    payload = data.dict(exclude_unset=True)
+    payload = _normalize_template_payload(data.dict(exclude_unset=True))
     if 'content' in payload:
         payload['variables'] = _extract_variables(payload['content'])
     for attr, value in payload.items():
@@ -125,7 +140,7 @@ def update_template(request, tpl_id: str, data: DouyinTemplateSchemaIn):
 @router.patch("/template/{tpl_id}", response=DouyinTemplateSchemaOut, summary="部分更新模板")
 def patch_template(request, tpl_id: str, data: DouyinTemplateSchemaPatch):
     tpl = get_object_or_404(DouyinTemplate, id=tpl_id)
-    payload = data.dict(exclude_unset=True)
+    payload = _normalize_template_payload(data.dict(exclude_unset=True))
     if 'content' in payload:
         payload['variables'] = _extract_variables(payload['content'])
     for attr, value in payload.items():

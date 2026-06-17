@@ -40,16 +40,28 @@ import logging
 import os
 import queue
 import subprocess
+import sys
 import threading
 import time
 from functools import partial
 from pathlib import Path
+from shutil import which
 from typing import Any, Optional, Union
 
 logger = logging.getLogger(__name__)
 
+
+def _resolve_js_dir() -> Path:
+    """Locate vendored dy_ab.js (dev tree or PyInstaller _MEIPASS)."""
+    if getattr(sys, 'frozen', False):
+        bundled = Path(sys._MEIPASS) / 'core' / 'douyin' / 'runtime' / 'transport' / 'sign' / 'js'
+        if bundled.is_dir():
+            return bundled
+    return Path(__file__).resolve().parent / 'js'
+
+
 # dy_ab.js 与其 node_modules 的位置（与本文件同级的 js/ 目录）
-_JS_DIR = Path(__file__).resolve().parent / "js"
+_JS_DIR = _resolve_js_dir()
 _DY_AB_JS = _JS_DIR / "dy_ab.js"
 _NODE_MODULES = _JS_DIR / "node_modules"
 _POOL_RUNNER = _JS_DIR / "sign_pool_runner.js"
@@ -71,7 +83,16 @@ class JsSignerUnavailable(RuntimeError):
 
 
 def _node_bin() -> str:
-    return os.environ.get("DOUYIN_NODE_BIN", "node")
+    explicit = os.environ.get('DOUYIN_NODE_BIN', '').strip()
+    if explicit and Path(explicit).is_file():
+        return explicit
+    if getattr(sys, 'frozen', False):
+        runtime = Path(sys._MEIPASS) / 'runtime'
+        for name in ('node', 'node.exe'):
+            candidate = runtime / name
+            if candidate.is_file():
+                return str(candidate)
+    return os.environ.get('DOUYIN_NODE_BIN', 'node')
 
 
 def _pool_enabled() -> bool:
@@ -252,6 +273,10 @@ def _pool_or_ctx_call(method: str, *args: Any) -> str:
 
 def _compile():
     """编译 dy_ab.js，返回 execjs 上下文。失败抛 JsSignerUnavailable。"""
+    os.environ.setdefault('EXECJS_RUNTIME', 'Node')
+    node = _node_bin()
+    if node != 'node' and Path(node).is_file():
+        os.environ['EXECJS_RUNTIME'] = 'Node'
     try:
         import execjs  # noqa: PLC0415  延迟导入，未装时给清晰提示
     except ImportError as e:
@@ -262,6 +287,11 @@ def _compile():
     if not _DY_AB_JS.exists():
         raise JsSignerUnavailable(
             f"签名脚本缺失: {_DY_AB_JS}（应从 DouYin_Spider/static/dy_ab.js vendoring 进来）"
+        )
+
+    if not Path(_node_bin()).is_file() and which('node') is None:
+        raise JsSignerUnavailable(
+            'Node.js 不可用（打包客户端需内嵌 runtime/node，或设置 DOUYIN_NODE_BIN）'
         )
 
     # Windows 下 subprocess 默认编码可能不是 utf-8，导致 JS 输出乱码/解析失败。

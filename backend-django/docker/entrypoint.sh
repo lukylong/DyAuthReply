@@ -62,7 +62,7 @@ ensure_douyin_sign_deps() {
 # -------------------------------------------------------------
 if [[ "${ROLE}" == "web" && "${AUTO_MIGRATE:-true}" == "true" ]]; then
     echo "🔧 执行数据库迁移 ..."
-    python manage.py migrate --noinput || {
+    python manage.py migrate --noinput --skip-checks || {
         echo "⚠️  migrate 失败，继续启动（可手动排查）" >&2
     }
 

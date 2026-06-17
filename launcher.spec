@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+import shutil
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path('backend-django').resolve()))
@@ -11,10 +12,18 @@ hidden_modules.extend(collect_submodules('core'))
 hidden_modules.extend(collect_submodules('scheduler'))
 hidden_modules.extend(collect_submodules('common'))
 
+# 打包时内嵌 Node.js（抖音 JS 签名必需；Tauri sidecar 无 shell PATH）
+node_binaries = []
+_node = shutil.which('node')
+if _node:
+    node_binaries = [(str(Path(_node).resolve()), 'runtime')]
+else:
+    print('WARNING: node not found on build machine — launcher will not bundle Node.js')
+
 a = Analysis(
     ['dyauthreply-client/launcher/launcher_bundled.py'],
-    pathex=['backend-django'],
-    binaries=[],
+    pathex=['backend-django', 'dyauthreply-client/launcher'],
+    binaries=node_binaries,
     datas=[('backend-django/core/douyin/runtime/transport/sign/js', 'core/douyin/runtime/transport/sign/js')],
     hiddenimports=hidden_modules,
     hookspath=[],

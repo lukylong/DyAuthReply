@@ -191,6 +191,19 @@ def _ensure_env(args: argparse.Namespace) -> dict[str, str]:
     env['REDIS_PORT'] = str(args.redis_port)
     env['PYTHONPATH'] = str(BACKEND)
 
+    launcher_dir = ROOT / 'dyauthreply-client' / 'launcher'
+    if str(launcher_dir) not in sys.path:
+        sys.path.insert(0, str(launcher_dir))
+    from node_runtime import configure_node_env
+
+    node = configure_node_env(app_root=ROOT)
+    if node:
+        env['DOUYIN_NODE_BIN'] = node
+        env.setdefault('EXECJS_RUNTIME', 'Node')
+        _log(f'Node.js → {node}')
+    else:
+        _log('警告: 未找到 Node.js，抖音签名/收消息将不可用')
+
     env_file = data_dir / '.env'
     if not env.get('DOUYIN_STORAGE_ENCRYPTION_KEY'):
         if env_file.is_file():
@@ -308,6 +321,15 @@ def main() -> int:
         return 1
 
     env = _ensure_env(args)
+
+    data_dir = Path(args.data_dir).resolve()
+    from instance_lock import acquire_instance_lock
+
+    _instance_lock = acquire_instance_lock(data_dir)
+    if _instance_lock is None:
+        _log('已有 DyAuthReply 实例在运行，请勿重复启动')
+        return 1
+
     atexit.register(_shutdown)
     signal.signal(signal.SIGINT, lambda *_: (_shutdown(), sys.exit(0)))
     signal.signal(signal.SIGTERM, lambda *_: (_shutdown(), sys.exit(0)))

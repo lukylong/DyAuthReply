@@ -37,7 +37,11 @@ async def push_to_user(user_id: str | int, event: str, payload: Optional[dict[st
 
     前端 DouyinConsumer 会在 `douyin_event` 处理器里把它转发为 WebSocket 消息。
     """
-    layer = get_channel_layer()
+    try:
+        layer = get_channel_layer()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[ws_notify] channel_layer 不可用，跳过推送: {e}")
+        return
     if layer is None:
         logger.warning("channel_layer 为空，跳过推送（通常是 Channels 未启用）")
         return

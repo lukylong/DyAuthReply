@@ -17,11 +17,14 @@ from pathlib import Path
 # Add backend-django to PYTHONPATH programmatically
 if getattr(sys, 'frozen', False):
     ROOT = Path(sys._MEIPASS)
+    REPO_ROOT = Path(__file__).resolve().parents[2]
 else:
-    ROOT = Path(__file__).resolve().parents[2]
+    REPO_ROOT = Path(__file__).resolve().parents[2]
+    ROOT = REPO_ROOT
 
 BACKEND = ROOT / 'backend-django'
 sys.path.insert(0, str(BACKEND))
+sys.path.insert(0, str(REPO_ROOT / 'dyauthreply-client' / 'launcher'))
 
 # Set default settings
 os.environ.setdefault('ZQ_ENV', 'client')
@@ -59,6 +62,29 @@ os.environ['CLIENT_HTTP_PORT'] = str(args.port)
 os.environ['CLIENT_HTTP_HOST'] = args.host
 os.environ['PYTHONPATH'] = str(BACKEND)
 
+from node_runtime import configure_node_env
+from instance_lock import acquire_instance_lock
+
+_instance_lock = acquire_instance_lock(data_dir)
+if _instance_lock is None:
+    print(
+        '[launcher_bundled] 已有 DyAuthReply 实例在运行，请勿重复启动。',
+        file=sys.stderr,
+        flush=True,
+    )
+    sys.exit(1)
+
+_node_bin = configure_node_env(app_root=REPO_ROOT if not getattr(sys, 'frozen', False) else None)
+if _node_bin:
+    print(f'[launcher_bundled] Node.js → {_node_bin}', flush=True)
+else:
+    print(
+        '[launcher_bundled] 警告: 未找到 Node.js，抖音签名/收消息将不可用。'
+        '请重新打包 launcher（需本机构建机已安装 Node.js 18+）。',
+        file=sys.stderr,
+        flush=True,
+    )
+
 # Set up cryptography key
 env_file = data_dir / '.env'
 if not os.environ.get('DOUYIN_STORAGE_ENCRYPTION_KEY'):
@@ -76,6 +102,52 @@ if not os.environ.get('DOUYIN_STORAGE_ENCRYPTION_KEY'):
 # Run migrations and setup Django (imports must happen AFTER env is set)
 import django
 django.setup()
+
+# Fix database migration issues before running migrations
+from django.db import connection
+
+def fix_worker_command_migration():
+    """修复 DouyinWorkerCommand 迁移冲突"""
+    try:
+        with connection.cursor() as cursor:
+            # 检查表是否存在
+            cursor.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name='core_douyin_worker_command'
+            """)
+            if not cursor.fetchone():
+                return  # 表不存在，首次运行，无需修复
+
+            # 检查字段
+            cursor.execute("PRAGMA table_info(core_douyin_worker_command)")
+            columns = {row[1] for row in cursor.fetchall()}
+            has_root_fields = 'sys_creator_id' in columns
+
+            # 检查迁移记录
+            cursor.execute("""
+                SELECT id FROM django_migrations
+                WHERE app='core' AND name='0022_douyin_worker_command_root_fields'
+            """)
+            migration_applied = cursor.fetchone() is not None
+
+            if has_root_fields and not migration_applied:
+                # 字段已存在（0021 创建时就带了），但迁移未记录
+                print("[launcher_bundled] 修复迁移记录: 0022", flush=True)
+                cursor.execute("""
+                    INSERT INTO django_migrations (app, name, applied)
+                    VALUES ('core', '0022_douyin_worker_command_root_fields', datetime('now'))
+                """)
+            elif not has_root_fields and migration_applied:
+                # 迁移已记录，但字段不存在
+                print("[launcher_bundled] 删除错误的迁移记录: 0022", flush=True)
+                cursor.execute("""
+                    DELETE FROM django_migrations
+                    WHERE app='core' AND name='0022_douyin_worker_command_root_fields'
+                """)
+    except Exception as e:
+        print(f"[launcher_bundled] 迁移修复失败: {e}", file=sys.stderr, flush=True)
+
+fix_worker_command_migration()
 
 # Import start_client migration logic and uvicorn runner
 import start_client

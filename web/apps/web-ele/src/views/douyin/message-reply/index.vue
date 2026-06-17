@@ -13,6 +13,7 @@ import { ElMessage } from 'element-plus';
 import {
   getAccountConversations,
   getAccountMessages,
+  getWorkerCommandStatus,
   sendAccountManualReply,
   refreshConversationUserApi,
 } from '#/api/core/douyin/message-reply';
@@ -150,6 +151,39 @@ async function loadMessages() {
 }
 
 /**
+ * 发送后多次刷新消息/会话列表（Worker 异步处理 + 落库有延迟）
+ */
+async function refreshAfterSend(maxAttempts = 5, intervalMs = 1200) {
+  for (let i = 0; i < maxAttempts; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    await Promise.all([loadMessages(), loadConversations()]);
+  }
+}
+
+/**
+ * 轮询 Worker 命令结果（客户端 db 模式有 command_id；Docker redis 模式跳过）
+ */
+async function waitManualReplyResult(commandId?: string | null) {
+  if (!commandId) {
+    await refreshAfterSend();
+    return { ok: true, message: '发送指令已下发' };
+  }
+  for (let i = 0; i < 20; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const st = await getWorkerCommandStatus(commandId);
+    if (st.status === 'success') {
+      await Promise.all([loadMessages(), loadConversations()]);
+      return { ok: true, message: '发送成功' };
+    }
+    if (st.status === 'failed') {
+      return { ok: false, message: st.error || '发送失败' };
+    }
+  }
+  await refreshAfterSend(3, 1000);
+  return { ok: true, message: '发送指令已下发（结果确认超时，已刷新列表）' };
+}
+
+/**
  * 发送消息
  */
 async function onSendMessage(text: string) {
@@ -165,17 +199,16 @@ async function onSendMessage(text: string) {
       text,
     );
 
-    if (res.success) {
-      ElMessage.success(res.message || '发送成功');
-      // 延迟刷新消息列表和会话列表，等待 worker 处理
-      setTimeout(async () => {
-        await Promise.all([
-          loadMessages(),
-          loadConversations(),
-        ]);
-      }, 1000);
-    } else {
+    if (!res.success) {
       ElMessage.error(res.message || '发送失败');
+      return;
+    }
+
+    const outcome = await waitManualReplyResult(res.command_id);
+    if (outcome.ok) {
+      ElMessage.success(outcome.message || res.message || '发送成功');
+    } else {
+      ElMessage.error(outcome.message || '发送失败');
     }
   } catch (error: any) {
     ElMessage.error(error.message || '发送失败');

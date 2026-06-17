@@ -30,7 +30,11 @@ def _setup_django() -> None:
 
 
 def _setup_logging() -> None:
-    log_dir = Path(__file__).resolve().parent / 'logs'
+    if os.environ.get('ZQ_ENV') == 'client':
+        from env import CLIENT_DATA_DIR
+        log_dir = Path(CLIENT_DATA_DIR) / 'logs'
+    else:
+        log_dir = Path(__file__).resolve().parent / 'logs'
     log_dir.mkdir(parents=True, exist_ok=True)
     worker_log_file = log_dir / 'douyin_worker.log'
     logging.basicConfig(

@@ -248,6 +248,18 @@ def merge_storage_state(
 
     # bd-ticket：旧值为基底 → cookie 自动解析覆盖 → 显式 web_protect/keys 覆盖
     bd: dict[str, str] = dict(base.get("_bd_ticket") or {})
+    if new_cookies:
+        old_cookies = {
+            c.get("name"): c.get("value", "")
+            for c in (base.get("cookies") or [])
+            if c.get("name")
+        }
+        old_sid = old_cookies.get("sessionid") or old_cookies.get("sessionid_ss") or ""
+        new_sid = cookies.get("sessionid") or cookies.get("sessionid_ss") or ""
+        # session 已切换但未同步提供 web_protect/keys 时，旧签名材料必失效，必须丢弃
+        if old_sid and new_sid and old_sid != new_sid and not web_protect.strip() and not keys.strip():
+            bd = {}
+
     old_ts_sign = bd.get("ts_sign")
     new_bd = parse_bd_ticket_from_cookie(cookies)
     bd.update(new_bd)

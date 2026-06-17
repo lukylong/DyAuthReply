@@ -3,7 +3,7 @@
 """桌面客户端 API 路由（仅抖音私信相关）。"""
 from datetime import datetime
 
-from ninja import Router
+from ninja import Router, Schema
 from ninja.renderers import JSONRenderer
 from ninja.responses import NinjaJSONEncoder
 
@@ -19,6 +19,14 @@ from core.douyin.douyin_template_api import router as douyin_template_router
 from ninja.main import NinjaAPI
 
 client_router = Router()
+
+
+class AdminLoginIn(Schema):
+    password: str
+
+
+class EmergencyStopIn(Schema):
+    reason: str = '管理员急停'
 
 
 class _ClientJsonEncoder(NinjaJSONEncoder):
@@ -68,6 +76,67 @@ def bootstrap_info(request):
         'http_port': CLIENT_HTTP_PORT,
         'api_prefix': '/api/client/v1',
     }
+
+
+@client_router.get('/runtime-logs/files', summary='运行日志文件列表（隐藏入口）')
+def runtime_log_files(request):
+    from core.client.admin_auth import require_admin
+    from core.client.runtime_logs import list_runtime_log_files
+
+    require_admin(request)
+    return {'items': list_runtime_log_files()}
+
+
+@client_router.get('/runtime-logs/tail', summary='运行日志 tail（隐藏入口）')
+def runtime_log_tail(request, lines: int = 400, file: str = ''):
+    from core.client.admin_auth import require_admin
+    from core.client.runtime_logs import tail_runtime_logs
+
+    require_admin(request)
+    safe_lines = max(50, min(int(lines or 400), 2000))
+    return tail_runtime_logs(max_lines=safe_lines, file_name=file or None)
+
+
+@client_router.post('/admin/login', auth=None, summary='管理员登录（隐藏入口）')
+def admin_login(request, payload: AdminLoginIn):
+    from common.local_desktop_auth import _is_loopback
+    from core.client.admin_auth import issue_admin_token, verify_admin_password
+
+    if not _is_loopback(request):
+        return client_api.create_response(request, {'detail': 'forbidden'}, status=403)
+
+    password = (payload.password or '').strip()
+    if not verify_admin_password(password):
+        return client_api.create_response(request, {'detail': '密码错误'}, status=401)
+    return issue_admin_token()
+
+
+@client_router.post('/admin/logout', summary='管理员退出')
+def admin_logout(request):
+    from core.client.admin_auth import require_admin, revoke_admin_token
+
+    require_admin(request)
+    token = request.headers.get('X-Admin-Token') or request.META.get('HTTP_X_ADMIN_TOKEN')
+    revoke_admin_token(token)
+    return {'ok': True}
+
+
+@client_router.get('/admin/dashboard', summary='管理员控制台概览')
+def admin_dashboard(request):
+    from core.client.admin_auth import require_admin
+    from core.client.admin_console import get_admin_dashboard
+
+    require_admin(request)
+    return get_admin_dashboard()
+
+
+@client_router.post('/admin/emergency-stop', summary='急停：关闭自动回复并清空待发命令')
+def admin_emergency_stop(request, payload: EmergencyStopIn):
+    from core.client.admin_auth import require_admin
+    from core.client.admin_console import emergency_stop
+
+    require_admin(request)
+    return emergency_stop(reason=(payload.reason or '管理员急停').strip())
 
 
 client_api.add_router('/client/v1', client_router)

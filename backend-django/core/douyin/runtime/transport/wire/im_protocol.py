@@ -294,7 +294,7 @@ def encode_send_message_request_from_template(
     sq_id = seq_id if seq_id is not None else next_seq_id()
     stime = f"{time.time() * 1000:.4f}".rstrip("0").rstrip(".")
     content_json = json.dumps(
-        {"text": text, "aweType": 774},
+        {"text": text, "aweType": 700},
         ensure_ascii=False,
         separators=(",", ":"),
     )

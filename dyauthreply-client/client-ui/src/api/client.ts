@@ -157,13 +157,25 @@ export function listMessages(accountId: string, conversationId: string) {
 }
 
 export function sendManualReply(accountId: string, conversationId: string, text: string) {
-  return request<{ success: boolean; message?: string }>(
+  return request<{ success: boolean; message?: string; command_id?: string | null }>(
     `/douyin/account/${accountId}/manual-reply`,
     {
       method: 'POST',
       body: JSON.stringify({ conversation_id: conversationId, text }),
     },
   );
+}
+
+export interface WorkerCommandStatus {
+  command_id: string;
+  consumed: boolean;
+  status: 'pending' | 'success' | 'failed' | 'unknown';
+  error?: string | null;
+  message_id?: string | null;
+}
+
+export function getWorkerCommandStatus(commandId: string) {
+  return request<WorkerCommandStatus>(`/douyin/worker-command/${commandId}`);
 }
 
 export interface PageResult<T> {
@@ -298,7 +310,7 @@ export function createRule(data: DouyinRuleInput) {
     body: JSON.stringify({
       channel: 'dm',
       weekday_mask: '1111111',
-      send_mode: 'merged',
+      send_mode: 'multi_message',
       priority: 0,
       status: true,
       cooldown_seconds: 300,

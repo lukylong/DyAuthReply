@@ -145,7 +145,7 @@ class DouyinRuleQuickEnableIn(Schema):
     reply_text: str = Field(..., description="自动回复文案")
     keywords: Optional[List[str]] = Field(default=None, description="可选关键词列表；填写后创建关键词规则")
     cooldown_seconds: int = Field(300, description="同会话冷却秒数")
-    send_mode: str = Field("merged", description="发送模式：merged/multi_message/card_fallback")
+    send_mode: str = Field("multi_message", description="发送模式：merged/multi_message/card_fallback")
 
 
 class DouyinRuleQuickEnableOut(Schema):

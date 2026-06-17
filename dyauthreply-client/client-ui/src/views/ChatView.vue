@@ -2,10 +2,10 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { RouterLink } from 'vue-router';
 import {
+  getWorkerCommandStatus,
   listAccounts,
   listConversations,
   listMessages,
-  patchAccount,
   sendManualReply,
   type ConversationItem,
   type DouyinAccount,
@@ -19,13 +19,15 @@ const activeConversationId = ref('');
 const messages = ref<MessageItem[]>([]);
 const replyText = ref('');
 const messagesEl = ref<HTMLElement | null>(null);
+const messagesEndRef = ref<HTMLElement | null>(null);
+const convsColEl = ref<HTMLElement | null>(null);
+const stickToBottom = ref(true);
 
 const loadingAccounts = ref(true);
 const loadingConversations = ref(false);
 const loadingMessages = ref(false);
 const syncing = ref(false);
 const sending = ref(false);
-const savingAccount = ref(false);
 const error = ref('');
 const toast = ref('');
 
@@ -101,24 +103,37 @@ function previewText(conv: ConversationItem) {
   return conv.last_message_preview || '暂无消息';
 }
 
-async function scrollMessagesToBottom() {
-  await nextTick();
-  const el = messagesEl.value;
-  if (el) el.scrollTop = el.scrollHeight;
+function sortConversations(items: ConversationItem[]) {
+  return [...items].sort((a, b) => {
+    const ta = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
+    const tb = b.last_message_at ? new Date(b.last_message_at).getTime() : 0;
+    return tb - ta;
+  });
 }
 
-async function toggleAccAutoReply(acc: DouyinAccount, event: Event) {
-  const checked = (event.target as HTMLInputElement).checked;
-  savingAccount.value = true;
-  try {
-    const updated = await patchAccount(acc.id, { auto_reply_enabled: checked });
-    acc.auto_reply_enabled = updated.auto_reply_enabled;
-  } catch (e) {
-    toast.value = e instanceof Error ? e.message : String(e);
-    await loadAccounts();
-  } finally {
-    savingAccount.value = false;
-  }
+function isNearBottom(el: HTMLElement, threshold = 96) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
+}
+
+async function scrollMessagesToBottom() {
+  await nextTick();
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  });
+  const el = messagesEl.value;
+  if (el) el.scrollTop = el.scrollHeight;
+  messagesEndRef.value?.scrollIntoView({ block: 'end' });
+}
+
+function onMessagesScroll() {
+  const el = messagesEl.value;
+  if (!el) return;
+  stickToBottom.value = isNearBottom(el);
+}
+
+function resetConversationsScroll() {
+  const el = convsColEl.value;
+  if (el) el.scrollTop = 0;
 }
 
 async function loadAccounts() {
@@ -144,11 +159,13 @@ async function loadConversations(silent = false) {
   if (!silent) loadingConversations.value = true;
   else syncing.value = true;
   try {
-    const items = await listConversations(activeAccountId.value);
+    const items = sortConversations(await listConversations(activeAccountId.value));
     const sig = conversationsSignature(items);
     if (sig !== convSig) {
       convSig = sig;
       conversations.value = items;
+      await nextTick();
+      resetConversationsScroll();
     }
     if (
       activeConversationId.value &&
@@ -157,6 +174,9 @@ async function loadConversations(silent = false) {
       activeConversationId.value = '';
       messages.value = [];
       msgSig = '';
+    }
+    if (!activeConversationId.value && conversations.value.length > 0) {
+      activeConversationId.value = conversations.value[0].id;
     }
   } catch (e) {
     if (!silent) toast.value = e instanceof Error ? e.message : String(e);
@@ -174,13 +194,17 @@ async function loadMessages(silent = false) {
   }
   if (!silent) loadingMessages.value = true;
   else syncing.value = true;
+  const shouldScroll = !silent || stickToBottom.value;
   try {
     const items = await listMessages(activeAccountId.value, activeConversationId.value);
     const sig = messagesSignature(items);
     if (sig !== msgSig) {
       msgSig = sig;
       messages.value = items;
-      await scrollMessagesToBottom();
+      if (shouldScroll) {
+        stickToBottom.value = true;
+        await scrollMessagesToBottom();
+      }
     }
   } catch (e) {
     if (!silent) toast.value = e instanceof Error ? e.message : String(e);
@@ -203,6 +227,7 @@ function selectConversation(id: string) {
   if (activeConversationId.value === id) return;
   activeConversationId.value = id;
   msgSig = '';
+  stickToBottom.value = true;
 }
 
 function pollTick() {
@@ -220,6 +245,33 @@ function onVisibilityChange() {
   if (!document.hidden) pollTick();
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitManualReplyResult(commandId: string, sentText: string) {
+  const deadline = Date.now() + 25000;
+  while (Date.now() < deadline) {
+    const st = await getWorkerCommandStatus(commandId);
+    if (st.status === 'success') {
+      return { ok: true as const };
+    }
+    if (st.status === 'failed') {
+      return { ok: false as const, error: st.error || '发送失败' };
+    }
+    if (st.consumed && st.status === 'unknown') {
+      return { ok: false as const, error: '发送结果未知，请刷新消息列表' };
+    }
+    await sleep(500);
+  }
+  // 无 command_id 轮询时的兜底：看是否已落库出站消息
+  const latest = messages.value.filter((m) => m.direction === 'out').at(-1);
+  if (latest?.content?.trim() === sentText.trim()) {
+    return { ok: true as const };
+  }
+  return { ok: false as const, error: '等待 worker 回执超时，请稍后刷新或重试' };
+}
+
 async function onSend() {
   const text = replyText.value.trim();
   if (!text || !activeAccountId.value || !activeConversationId.value) return;
@@ -233,28 +285,26 @@ async function onSend() {
     }
     replyText.value = '';
     toast.value = '已发送，等待 worker 回执…';
+    if (res.command_id) {
+      const outcome = await waitManualReplyResult(res.command_id, text);
+      if (outcome.ok) {
+        toast.value = '发送成功';
+        await loadMessages(true);
+        await loadConversations();
+        window.setTimeout(() => {
+          if (toast.value === '发送成功') toast.value = '';
+        }, 2500);
+        return;
+      }
+      toast.value = outcome.error || '发送失败';
+      return;
+    }
     await loadMessages(true);
     await loadConversations();
   } catch (e) {
     toast.value = e instanceof Error ? e.message : String(e);
   } finally {
     sending.value = false;
-  }
-}
-
-async function toggleAutoReply(event: Event) {
-  const acc = activeAccount.value;
-  if (!acc) return;
-  const checked = (event.target as HTMLInputElement).checked;
-  savingAccount.value = true;
-  try {
-    const updated = await patchAccount(acc.id, { auto_reply_enabled: checked });
-    acc.auto_reply_enabled = updated.auto_reply_enabled;
-  } catch (e) {
-    toast.value = e instanceof Error ? e.message : String(e);
-    await loadAccounts();
-  } finally {
-    savingAccount.value = false;
   }
 }
 
@@ -296,29 +346,22 @@ onUnmounted(() => {
       <div v-else-if="accounts.length === 0" class="col-empty">
         暂无账号，请先在「我的抖音号」导入
       </div>
-      <button
+      <div
         v-for="acc in accounts"
         :key="acc.id"
-        type="button"
         class="acc-item"
         :class="{ active: acc.id === activeAccountId }"
+        role="button"
+        tabindex="0"
         @click="selectAccount(acc.id)"
+        @keydown.enter="selectAccount(acc.id)"
       >
         <span class="acc-name">{{ acc.nickname }}</span>
         <span class="acc-sub">今日 {{ acc.reply_today ?? 0 }}/{{ acc.daily_reply_quota ?? 200 }}</span>
-        <label class="acc-switch" @click.stop>
-          <input
-            type="checkbox"
-            :checked="Boolean(acc.auto_reply_enabled)"
-            :disabled="savingAccount"
-            @change="toggleAccAutoReply(acc, $event)"
-          />
-          自动回复
-        </label>
-      </button>
+      </div>
     </aside>
 
-    <aside class="col convs">
+    <aside ref="convsColEl" class="col convs">
       <div class="col-head">
         会话
         <span v-if="loadingConversations" class="spin">…</span>
@@ -378,8 +421,8 @@ onUnmounted(() => {
           </div>
         </header>
 
-        <div v-if="loadingMessages" class="chat-loading">加载消息…</div>
-        <div v-else ref="messagesEl" class="messages">
+        <div ref="messagesEl" class="messages" @scroll="onMessagesScroll">
+          <div v-if="loadingMessages && messages.length === 0" class="chat-loading inline">加载消息…</div>
           <div
             v-for="msg in messages"
             :key="msg.id"
@@ -403,7 +446,8 @@ onUnmounted(() => {
               <span v-else>{{ avatarInitial(activeAccount?.nickname || '我') }}</span>
             </div>
           </div>
-          <p v-if="messages.length === 0" class="no-msg">还没有消息记录</p>
+          <p v-if="messages.length === 0 && !loadingMessages" class="no-msg">还没有消息记录</p>
+          <div ref="messagesEndRef" class="messages-end" aria-hidden="true" />
         </div>
 
         <footer class="composer">
@@ -427,15 +471,6 @@ onUnmounted(() => {
       <div class="col-head">本账号</div>
       <div class="side-body">
         <p class="side-name">{{ activeAccount.nickname }}</p>
-        <label class="side-switch">
-          <input
-            type="checkbox"
-            :checked="activeAccount.auto_reply_enabled"
-            :disabled="savingAccount"
-            @change="toggleAutoReply"
-          />
-          自动回复
-        </label>
         <p class="side-meta">
           今日 {{ activeAccount.reply_today ?? 0 }} / {{ activeAccount.daily_reply_quota ?? 200 }}
         </p>
@@ -534,6 +569,7 @@ onUnmounted(() => {
   cursor: pointer;
   padding: 12px 16px;
   border-bottom: 1px solid rgba(148, 163, 184, 0.06);
+  display: block;
 }
 
 .acc-item:hover,
@@ -557,16 +593,6 @@ onUnmounted(() => {
   font-size: 0.75rem;
   color: #94a3b8;
   margin-top: 4px;
-}
-
-.acc-switch {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 8px;
-  font-size: 0.78rem;
-  color: #cbd5e1;
-  cursor: pointer;
 }
 
 .conv-item {
@@ -742,10 +768,18 @@ onUnmounted(() => {
 }
 
 .chat-loading {
-  flex: 1;
-  display: grid;
-  place-items: center;
-  color: #94a3b8;
+  text-align: center;
+  color: #64748b;
+  padding: 24px;
+}
+
+.chat-loading.inline {
+  padding: 12px;
+}
+
+.messages-end {
+  height: 1px;
+  flex-shrink: 0;
 }
 
 .composer {
@@ -840,15 +874,6 @@ onUnmounted(() => {
 .side-name {
   margin: 0 0 12px;
   font-weight: 600;
-}
-
-.side-switch {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 0.88rem;
-  margin-bottom: 12px;
-  cursor: pointer;
 }
 
 .side-meta {

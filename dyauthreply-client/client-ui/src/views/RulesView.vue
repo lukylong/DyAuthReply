@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { onBeforeRouteLeave } from 'vue-router';
+import AppModal from '../components/AppModal.vue';
 import {
   createRule,
   deleteRule,
@@ -22,6 +24,8 @@ const showForm = ref(false);
 const editing = ref<DouyinRule | null>(null);
 const submitting = ref(false);
 const formError = ref('');
+const pendingDelete = ref<DouyinRule | null>(null);
+const deleting = ref(false);
 
 const form = ref({
   name: '',
@@ -29,7 +33,7 @@ const form = ref({
   keywordsText: '',
   reply_text: '',
   links: [] as RuleLink[],
-  send_mode: 'merged' as 'merged' | 'multi_message',
+  send_mode: 'multi_message' as 'merged' | 'multi_message',
   priority: 0,
   cooldown_seconds: 300,
   status: true,
@@ -109,7 +113,7 @@ function openCreate() {
     keywordsText: '',
     reply_text: '',
     links: [],
-    send_mode: 'merged',
+    send_mode: 'multi_message',
     priority: 0,
     cooldown_seconds: 300,
     status: true,
@@ -141,6 +145,34 @@ function closeForm() {
   showForm.value = false;
   editing.value = null;
 }
+
+function onEscapeKey(e: KeyboardEvent) {
+  if (e.key !== 'Escape') return;
+  if (pendingDelete.value) {
+    closeDeleteConfirm();
+    return;
+  }
+  if (showForm.value) closeForm();
+}
+
+const dialogOpen = computed(() => showForm.value || Boolean(pendingDelete.value));
+
+watch(dialogOpen, (open) => {
+  if (open) {
+    document.addEventListener('keydown', onEscapeKey);
+  } else {
+    document.removeEventListener('keydown', onEscapeKey);
+  }
+});
+
+onBeforeRouteLeave(() => {
+  closeForm();
+  closeDeleteConfirm();
+});
+
+onUnmounted(() => {
+  document.removeEventListener('keydown', onEscapeKey);
+});
 
 function parseKeywords(text: string) {
   return text
@@ -210,13 +242,27 @@ async function toggleStatus(rule: DouyinRule) {
   }
 }
 
-async function removeRule(rule: DouyinRule) {
-  if (!confirm(`删除规则「${rule.name}」？`)) return;
+function askRemoveRule(rule: DouyinRule) {
+  pendingDelete.value = rule;
+}
+
+function closeDeleteConfirm() {
+  pendingDelete.value = null;
+}
+
+async function confirmRemoveRule() {
+  const rule = pendingDelete.value;
+  if (!rule) return;
+  deleting.value = true;
+  error.value = '';
   try {
     await deleteRule(rule.id);
+    closeDeleteConfirm();
     await loadRules();
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    deleting.value = false;
   }
 }
 
@@ -273,7 +319,7 @@ onMounted(async () => {
               {{ rule.status ? '停用' : '启用' }}
             </button>
             <button type="button" class="btn ghost sm" @click="openEdit(rule)">编辑</button>
-            <button type="button" class="btn ghost sm danger" @click="removeRule(rule)">删除</button>
+            <button type="button" class="btn ghost sm danger" @click="askRemoveRule(rule)">删除</button>
           </div>
         </div>
         <p class="meta">
@@ -287,9 +333,11 @@ onMounted(async () => {
       </article>
     </section>
 
-    <div v-if="showForm" class="overlay" @click.self="closeForm">
-      <div class="modal">
-        <h3>{{ editing ? '编辑规则' : '新建规则' }}</h3>
+    <AppModal
+      :open="showForm"
+      :title="editing ? '编辑规则' : '新建规则'"
+      @close="closeForm"
+    >
         <label class="field">
           规则名称
           <input v-model="form.name" type="text" placeholder="例如：询价自动回复" />
@@ -334,8 +382,8 @@ onMounted(async () => {
         <label class="field">
           发送方式
           <select v-model="form.send_mode">
+            <option value="multi_message">分条发送（文案与链接各一条消息）</option>
             <option value="merged">合并一条（文案 + 链接）</option>
-            <option value="multi_message">分条发送（先文案后链接）</option>
           </select>
         </label>
         <div class="row2">
@@ -359,8 +407,22 @@ onMounted(async () => {
             {{ submitting ? '保存中…' : '保存' }}
           </button>
         </div>
-      </div>
-    </div>
+    </AppModal>
+
+    <AppModal
+      :open="Boolean(pendingDelete)"
+      title="删除规则"
+      dialog-role="alertdialog"
+      @close="closeDeleteConfirm"
+    >
+          <p class="confirm-text">确定删除规则「{{ pendingDelete?.name }}」？此操作不可恢复。</p>
+          <div class="actions-bottom">
+            <button type="button" class="btn ghost" :disabled="deleting" @click="closeDeleteConfirm">取消</button>
+            <button type="button" class="btn danger" :disabled="deleting" @click="confirmRemoveRule">
+              {{ deleting ? '删除中…' : '确认删除' }}
+            </button>
+          </div>
+    </AppModal>
   </div>
 </template>
 
@@ -508,28 +570,16 @@ textarea {
   color: #fca5a5;
 }
 
-.overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.55);
-  display: grid;
-  place-items: center;
-  padding: 20px;
-  z-index: 100;
+.btn.danger {
+  background: linear-gradient(135deg, #dc2626, #ef4444);
+  color: #fff;
+  font-weight: 600;
 }
 
-.modal {
-  width: min(560px, 100%);
-  max-height: 90vh;
-  overflow-y: auto;
-  background: #1e293b;
-  border-radius: 16px;
-  padding: 22px;
-  border: 1px solid rgba(148, 163, 184, 0.2);
-}
-
-.modal h3 {
-  margin: 0 0 16px;
+.confirm-text {
+  margin: 0 0 8px;
+  color: #cbd5e1;
+  line-height: 1.5;
 }
 
 .field {

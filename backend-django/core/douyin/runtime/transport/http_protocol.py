@@ -1559,17 +1559,26 @@ class HttpProtocolTransport(AccountTransport):
             )
 
         if result.biz_status_code not in (0, 8101):
-            logger.warning(
-                f"[transport.http] {log_tag} 业务层失败 account={account.id} "
-                f"biz_status_code={result.biz_status_code} "
-                f"biz_status_text={result.biz_status_text!r} "
-                f"biz_raw_check_code={result.biz_raw_check_code} "
-                f"server_msg_id={result.server_msg_id} client_msg_id={result.client_msg_id}"
-            )
-            raise RuntimeError(
-                f"{log_tag} business status={result.biz_status_code} "
-                f"msg={result.biz_status_text or result.status_msg or 'unknown'}"
-            )
+            # 60021 等：协议层已分配 server_msg_id 时视为软成功（消息通常已发出）
+            if result.server_msg_id and result.biz_status_code not in (7911,):
+                logger.warning(
+                    f"[transport.http] {log_tag} 业务层软成功 account={account.id} "
+                    f"biz_status_code={result.biz_status_code} "
+                    f"biz_status_text={result.biz_status_text!r} "
+                    f"server_msg_id={result.server_msg_id} client_msg_id={result.client_msg_id}"
+                )
+            else:
+                logger.warning(
+                    f"[transport.http] {log_tag} 业务层失败 account={account.id} "
+                    f"biz_status_code={result.biz_status_code} "
+                    f"biz_status_text={result.biz_status_text!r} "
+                    f"biz_raw_check_code={result.biz_raw_check_code} "
+                    f"server_msg_id={result.server_msg_id} client_msg_id={result.client_msg_id}"
+                )
+                raise RuntimeError(
+                    f"{log_tag} business status={result.biz_status_code} "
+                    f"msg={result.biz_status_text or result.status_msg or 'unknown'}"
+                )
         if result.biz_status_code == 8101 and result.biz_status_text:
             logger.warning(
                 f"[transport.http] {log_tag} 业务层提示异常 account={account.id} "

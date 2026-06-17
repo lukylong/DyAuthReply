@@ -66,6 +66,15 @@ class DouyinSessionControlIn(Schema):
 class DouyinSessionControlOut(Schema):
     success: bool
     message: str
+    command_id: Optional[str] = None
+
+
+class DouyinWorkerCommandStatusOut(Schema):
+    command_id: str
+    consumed: bool
+    status: str = Field(..., description="pending | success | failed | unknown")
+    error: Optional[str] = None
+    message_id: Optional[str] = None
 
 
 class DouyinSessionBatchIdsIn(Schema):

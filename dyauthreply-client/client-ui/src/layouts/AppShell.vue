@@ -35,6 +35,8 @@ const isWide = computed(() => Boolean(route.meta.wide));
   height: 100vh;
   min-height: 100vh;
   overflow: hidden;
+  position: relative;
+  isolation: isolate;
   background: linear-gradient(160deg, #0f172a 0%, #1e293b 45%, #0b1220 100%);
   color: #e2e8f0;
   display: flex;
@@ -48,6 +50,8 @@ const isWide = computed(() => Boolean(route.meta.wide));
   padding: 16px 28px;
   border-bottom: 1px solid rgba(148, 163, 184, 0.15);
   flex-shrink: 0;
+  position: relative;
+  z-index: 300;
 }
 
 .brand {
@@ -105,6 +109,9 @@ const isWide = computed(() => Boolean(route.meta.wide));
   padding: 24px 28px 48px;
   flex: 1;
   box-sizing: border-box;
+  position: relative;
+  z-index: 1;
+  min-height: 0;
 }
 
 .main.wide {

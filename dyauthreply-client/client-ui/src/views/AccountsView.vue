@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { onBeforeRouteLeave } from 'vue-router';
+import { onMounted, onUnmounted, ref, watch } from 'vue';
+import AppModal from '../components/AppModal.vue';
 import {
   credentialLabel,
   importCredential,
@@ -45,6 +47,26 @@ function closeImport() {
   showImport.value = false;
   reimportTarget.value = null;
 }
+
+function onEscapeKey(e: KeyboardEvent) {
+  if (e.key === 'Escape') closeImport();
+}
+
+watch(showImport, (open) => {
+  if (open) {
+    document.addEventListener('keydown', onEscapeKey);
+  } else {
+    document.removeEventListener('keydown', onEscapeKey);
+  }
+});
+
+onBeforeRouteLeave(() => {
+  closeImport();
+});
+
+onUnmounted(() => {
+  document.removeEventListener('keydown', onEscapeKey);
+});
 
 async function submitImport() {
   const text = bundle.value.trim();
@@ -153,9 +175,11 @@ onMounted(load);
       </article>
     </section>
 
-    <div v-if="showImport" class="overlay" @click.self="closeImport">
-      <div class="modal">
-        <h3>{{ reimportTarget ? `更新「${reimportTarget.nickname}」` : '导入抖音账号' }}</h3>
+    <AppModal
+      :open="showImport"
+      :title="reimportTarget ? `更新「${reimportTarget.nickname}」` : '导入抖音账号'"
+      @close="closeImport"
+    >
         <p class="hint">
           在 creator.douyin.com 私信页打开扩展 → 复制一键导入串（DYCRED1. 开头）粘贴 below
         </p>
@@ -175,8 +199,7 @@ onMounted(load);
             {{ submitting ? '导入中…' : '确认导入' }}
           </button>
         </div>
-      </div>
-    </div>
+    </AppModal>
   </div>
 </template>
 
@@ -299,28 +322,6 @@ onMounted(load);
 .btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
-}
-
-.overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.55);
-  display: grid;
-  place-items: center;
-  padding: 20px;
-  z-index: 100;
-}
-
-.modal {
-  width: min(520px, 100%);
-  background: #1e293b;
-  border-radius: 16px;
-  padding: 22px;
-  border: 1px solid rgba(148, 163, 184, 0.2);
-}
-
-.modal h3 {
-  margin: 0 0 8px;
 }
 
 .hint {

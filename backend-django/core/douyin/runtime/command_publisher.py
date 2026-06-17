@@ -47,35 +47,42 @@ def _client():
 
 def publish(channel: str, payload: Optional[dict] = None) -> bool:
     """发布一条命令。返回 True 表示成功；False 表示 Redis 不可用。"""
+    ok, _ = publish_with_id(channel, payload)
+    return ok
+
+
+def publish_with_id(channel: str, payload: Optional[dict] = None) -> tuple[bool, Optional[str]]:
+    """发布命令；DB 模式下返回 (True, command_id)，Redis 模式返回 (True, None)。"""
     backend = getattr(settings, 'DOUYIN_COMMAND_BACKEND', 'redis')
     if backend == 'db':
-        return _publish_db(channel, payload)
+        cmd_id = _publish_db(channel, payload)
+        return (cmd_id is not None, cmd_id)
 
     client = _client()
     if client is None:
-        return False
+        return False, None
     try:
         data = json.dumps(payload or {}, ensure_ascii=False).encode('utf-8')
         client.publish(channel, data)
-        return True
+        return True, None
     except Exception as e:  # noqa: BLE001
         logger.warning(f"publish 失败 channel={channel} err={e}")
-        return False
+        return False, None
 
 
-def _publish_db(channel: str, payload: Optional[dict] = None) -> bool:
+def _publish_db(channel: str, payload: Optional[dict] = None) -> Optional[str]:
     try:
         from core.douyin.douyin_worker_command_model import DouyinWorkerCommand
 
-        DouyinWorkerCommand.objects.create(channel=channel, payload=payload or {})
-        return True
+        cmd = DouyinWorkerCommand.objects.create(channel=channel, payload=payload or {})
+        return str(cmd.id)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"db publish 失败 channel={channel} err={e}")
-        return False
+        return None
 
 
-def send_manual_reply(account_id: str, conversation_id: str, text: str) -> bool:
-    return publish(
+def send_manual_reply(account_id: str, conversation_id: str, text: str) -> tuple[bool, Optional[str]]:
+    return publish_with_id(
         f"douyin:cmd:manual_reply:{account_id}",
         {
             "action": "manual_reply",

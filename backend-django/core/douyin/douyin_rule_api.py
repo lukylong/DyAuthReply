@@ -43,6 +43,13 @@ def _normalize_rule_payload(payload: dict) -> dict:
     normalized['account_id'] = account_id
     if 'links' in normalized:
         normalized['links'] = _normalize_links(normalized.get('links'))
+    links = normalized.get('links') or []
+    if links and normalized.get('send_mode') in (None, '', 'merged'):
+        normalized['send_mode'] = 'multi_message'
+    if normalized.get('cooldown_seconds') is None:
+        normalized['cooldown_seconds'] = 300
+    elif int(normalized.get('cooldown_seconds') or 0) < 0:
+        normalized['cooldown_seconds'] = 0
     return normalized
 
 

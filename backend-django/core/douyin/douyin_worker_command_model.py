@@ -15,7 +15,7 @@ class DouyinWorkerCommand(RootModel):
 
     class Meta:
         db_table = 'core_douyin_worker_command'
-        ordering = ['sys_create_datetime']
+        ordering = ['is_deleted', '-sort', '-sys_create_datetime']
         indexes = [
-            models.Index(fields=['consumed_at', 'sys_create_datetime']),
+            models.Index(fields=['consumed_at', 'sys_create_datetime'], name='core_douyin_consume_idx'),
         ]

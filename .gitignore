@@ -19,3 +19,10 @@ __pycache__/
 /.trellis
 /.pnpm-store
 /.pytest_cache
+
+# 桌面客户端构建产物（dyauthreply-client/）
+/dyauthreply-client/**/target/
+/dyauthreply-client/**/node_modules/
+/dyauthreply-client/**/dist/
+/data/client/
+/data/standalone/

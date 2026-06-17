@@ -41,7 +41,35 @@ def _normalize_rule_payload(payload: dict) -> dict:
     if account_id == '':
         account_id = None
     normalized['account_id'] = account_id
+    if 'links' in normalized:
+        normalized['links'] = _normalize_links(normalized.get('links'))
     return normalized
+
+
+def _normalize_links(links) -> list[dict[str, str]]:
+    """统一 links 为 [{title, url}, ...]（兼容纯 URL 字符串）。"""
+    if not links:
+        return []
+    out: list[dict[str, str]] = []
+    for item in links:
+        if isinstance(item, str):
+            url = item.strip()
+            if url:
+                out.append({'title': url, 'url': url})
+            continue
+        if isinstance(item, dict):
+            url = str(item.get('url') or '').strip()
+            if not url:
+                continue
+            title = str(item.get('title') or url).strip()
+            out.append({'title': title, 'url': url})
+            continue
+        # Pydantic Schema 对象
+        url = str(getattr(item, 'url', '') or '').strip()
+        if url:
+            title = str(getattr(item, 'title', '') or url).strip()
+            out.append({'title': title, 'url': url})
+    return out
 
 
 def _normalize_keywords(keywords: list[str] | None) -> list[str]:

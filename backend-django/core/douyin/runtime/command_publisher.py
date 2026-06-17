@@ -47,6 +47,10 @@ def _client():
 
 def publish(channel: str, payload: Optional[dict] = None) -> bool:
     """发布一条命令。返回 True 表示成功；False 表示 Redis 不可用。"""
+    backend = getattr(settings, 'DOUYIN_COMMAND_BACKEND', 'redis')
+    if backend == 'db':
+        return _publish_db(channel, payload)
+
     client = _client()
     if client is None:
         return False
@@ -56,6 +60,17 @@ def publish(channel: str, payload: Optional[dict] = None) -> bool:
         return True
     except Exception as e:  # noqa: BLE001
         logger.warning(f"publish 失败 channel={channel} err={e}")
+        return False
+
+
+def _publish_db(channel: str, payload: Optional[dict] = None) -> bool:
+    try:
+        from core.douyin.douyin_worker_command_model import DouyinWorkerCommand
+
+        DouyinWorkerCommand.objects.create(channel=channel, payload=payload or {})
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"db publish 失败 channel={channel} err={e}")
         return False
 
 

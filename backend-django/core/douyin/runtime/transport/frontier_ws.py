@@ -236,6 +236,7 @@ class FrontierWsDecorator(AccountTransport):
         self._account_sec_uid: Optional[str] = None
         self._client: Optional[FrontierImWsClient] = None
         self._task: Optional[asyncio.Task] = None
+        self._last_http_fallback_at: float = 0.0
 
     async def start(self, account: "DouyinAccount") -> None:
         self._account_id = str(account.id)
@@ -294,14 +295,34 @@ class FrontierWsDecorator(AccountTransport):
                 conversation_hint=conversation_hint,
             )
 
-        # 增量阶段：完全消费 WebSocket 线程解析存入的增量 ScannedMessage 队列
-        msgs = []
+        # 优先消费 WS 实时队列
+        msgs: list[ScannedMessage] = []
         while not self._scanned_messages_queue.empty():
             msgs.append(self._scanned_messages_queue.get_nowait())
 
         if msgs:
             logger.info(f"[frontier.ws] 增量扫描消费 WS 实时消息 count={len(msgs)}")
-        return msgs
+            return msgs
+
+        # WS 离线或定期兜底：走 HTTP 增量，避免纯 WS 解码失败时完全收不到消息
+        from django.conf import settings
+
+        ws_ok = self._client is not None and self._client.connected
+        fallback_iv = float(getattr(settings, 'DOUYIN_WS_HTTP_FALLBACK_INTERVAL', 25) or 25)
+        now = time.monotonic()
+        if not ws_ok or (now - self._last_http_fallback_at >= fallback_iv):
+            self._last_http_fallback_at = now
+            reason = 'ws_offline' if not ws_ok else 'periodic_fallback'
+            logger.debug(
+                f"[frontier.ws] HTTP 兜底扫描 account={self._account_id} reason={reason}"
+            )
+            return await self._inner.scan_inbox(
+                account,
+                max_conversations=max_conversations,
+                include_recent_without_unread=False,
+                conversation_hint=conversation_hint,
+            )
+        return []
 
     async def send_reply(
         self, account: "DouyinAccount", page: Any, *, conversation_id: str,

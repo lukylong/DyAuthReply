@@ -61,7 +61,9 @@ MIDDLEWARE = [
     # 'common.middleware.ApiLoggingMiddleware',
 ]
 
-ROOT_URLCONF = 'application.urls'
+# env 模块可覆盖（client 模式使用 application.client_urls）
+if 'ROOT_URLCONF' not in globals():
+    ROOT_URLCONF = 'application.urls'
 AUTH_USER_MODEL = 'core.User'
 
 WSGI_APPLICATION = 'application.wsgi.application'
@@ -142,11 +144,12 @@ elif DATABASE_TYPE == "POSTGRESQL":
         },
     }
 else:
-    # sqlite3 数据库
+    # sqlite3 数据库（standalone 可通过 DATABASE_SQLITE_PATH 指定路径）
+    _sqlite_path = globals().get('DATABASE_SQLITE_PATH') or os.path.join(BASE_DIR, 'db.sqlite3')
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': os.path.join(BASE_DIR, 'db.sqlite3'),
+            'NAME': _sqlite_path,
             'OPTIONS': {
                 'timeout': 20,
             },

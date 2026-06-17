@@ -77,6 +77,7 @@ class DouyinConversationItemOut(Schema):
     peer_sec_uid: str
     peer_nickname: Optional[str] = None
     peer_avatar: Optional[str] = None
+    peer_unique_id: Optional[str] = None
     last_message_at: Optional[datetime] = None
     last_message_preview: Optional[str] = None
     unread_count: int = 0

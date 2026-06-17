@@ -12,11 +12,25 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Optional
 
 from asgiref.sync import sync_to_async
+from django.conf import settings
 from django.utils import timezone
+
+
+def _to_db_datetime(dt: datetime | None) -> datetime | None:
+    """SQLite + USE_TZ=False 时须用 naive datetime，避免落库失败。"""
+    if dt is None:
+        return None
+    if settings.USE_TZ:
+        if timezone.is_naive(dt):
+            return timezone.make_aware(dt, timezone.get_current_timezone())
+        return dt
+    if timezone.is_aware(dt):
+        return timezone.make_naive(dt, dt_timezone.utc)
+    return dt
 
 
 # -------------------- 异常 --------------------
@@ -147,6 +161,7 @@ def _upsert_conversation_and_message(
     *,
     external_msg_id: Optional[str] = None,
     peer_avatar: Optional[str] = None,
+    peer_unique_id: Optional[str] = None,
     platform_conversation_id: Optional[str] = None,
     direction: str = 'in',
 ) -> Optional[tuple]:
@@ -161,6 +176,10 @@ def _upsert_conversation_and_message(
     from core.douyin.douyin_account_model import DouyinAccount
     from core.douyin.douyin_conversation_model import DouyinConversation
     from core.douyin.douyin_message_model import DouyinMessage
+
+    received_at = _to_db_datetime(received_at)
+    if received_at is None:
+        received_at = _to_db_datetime(timezone.now())
 
     account = DouyinAccount.objects.filter(id=account_id).first()
     if account is None:
@@ -191,6 +210,9 @@ def _upsert_conversation_and_message(
     avatar = (peer_avatar or '').strip()
     if avatar:
         defaults['peer_avatar'] = avatar
+    unique_id = (peer_unique_id or '').strip()
+    if unique_id:
+        defaults['peer_unique_id'] = unique_id
     if platform_conv_id:
         defaults['platform_conversation_id'] = platform_conv_id
 
@@ -208,6 +230,8 @@ def _upsert_conversation_and_message(
             update_fields['peer_nickname'] = nick
         if avatar:
             update_fields['peer_avatar'] = avatar
+        if unique_id:
+            update_fields['peer_unique_id'] = unique_id
         if platform_conv_id:
             update_fields['platform_conversation_id'] = platform_conv_id
 

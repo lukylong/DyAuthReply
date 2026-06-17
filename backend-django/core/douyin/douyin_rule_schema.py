@@ -6,7 +6,7 @@
 """
 import re
 from datetime import time as dtime
-from typing import List, Optional
+from typing import Any, List, Optional, Union
 
 from ninja import Field, ModelSchema, Schema
 from pydantic import field_validator
@@ -24,6 +24,12 @@ class DouyinRuleFilters(FuFilters):
     status: Optional[bool] = Field(None, q="status", alias="status")
 
 
+class DouyinRuleLinkIn(Schema):
+    """规则附带链接（与模板 links 结构一致）"""
+    title: Optional[str] = ''
+    url: str
+
+
 class DouyinRuleSchemaIn(ModelSchema):
     """规则输入模式
 
@@ -31,6 +37,7 @@ class DouyinRuleSchemaIn(ModelSchema):
     """
     account_id: Optional[str] = Field(None, description="所属抖音账号ID；为空表示全局规则，对所有账号生效")
     template_id: Optional[str] = Field(None, description="引用模板ID")
+    links: Optional[List[Union[DouyinRuleLinkIn, str, dict[str, Any]]]] = None
 
     class Config:
         model = DouyinRule
@@ -55,7 +62,7 @@ class DouyinRuleSchemaPatch(Schema):
     keywords: Optional[List[str]] = None
     regex_pattern: Optional[str] = None
     reply_text: Optional[str] = None
-    links: Optional[List[str]] = None
+    links: Optional[List[Union[DouyinRuleLinkIn, str, dict[str, Any]]]] = None
     template_id: Optional[str] = None
     send_mode: Optional[str] = None
     channel: Optional[str] = None

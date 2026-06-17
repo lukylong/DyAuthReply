@@ -116,13 +116,18 @@ class DouyinAccountSchemaOut(ModelSchema):
 
 
 class DouyinAccountSimpleOut(Schema):
-    """抖音账号简单输出（用于选择器）"""
+    """抖音账号简单输出（用于选择器 / 客户端列表）"""
     id: str
     nickname: str
     status: int
     status_display: str
     avatar: Optional[str] = None
     unique_id: Optional[str] = None
+    auto_reply_enabled: bool = True
+    reply_today: int = 0
+    daily_reply_quota: int = 200
+    credential_state: Optional[str] = None
+    sec_uid: Optional[str] = None
 
     @staticmethod
     def resolve_status_display(obj):

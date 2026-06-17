@@ -79,6 +79,8 @@ def main() -> None:
         asyncio.run(_amain())
     except KeyboardInterrupt:
         pass
+    except asyncio.CancelledError:
+        pass
     except Exception as e:  # noqa: BLE001
         logger.exception(f"Worker 异常退出: {e}")
         sys.exit(1)

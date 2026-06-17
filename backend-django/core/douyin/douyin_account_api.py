@@ -1020,6 +1020,9 @@ def refresh_account_conversation_user(request, account_id: str, conversation_id:
                 break
         if avatar:
             conv.peer_avatar = avatar
+        unique_id = str(user_info.get('unique_id') or user_info.get('short_id') or '').strip()
+        if unique_id:
+            conv.peer_unique_id = unique_id
         # 如果原本的 peer_sec_uid 是 fallback 的，在这里更新成真实的
         if conv.peer_sec_uid != sec_uid or conv.peer_sec_uid.startswith('fallback_'):
             conv.peer_sec_uid = sec_uid
@@ -1027,6 +1030,7 @@ def refresh_account_conversation_user(request, account_id: str, conversation_id:
         conv.save(update_fields=[
             'peer_nickname',
             'peer_avatar',
+            'peer_unique_id',
             'peer_sec_uid',
             'sys_update_datetime',
         ])

@@ -1,16 +1,43 @@
-/backend-django/tmp
-.codex-tasks/
-.env
-.env.bak
+# ── Python ──────────────────────────────────────────────────────────
 __pycache__/
 **/__pycache__/
 *.py[cod]
 *$py.class
 *.sqlite3
 *.log
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# 抖音 JS 签名引擎：dy_ab.js 提交，npm 依赖（jsrsasign 等）不提交
+# ── 环境变量与密钥 ──────────────────────────────────────────────────
+.env
+.env.bak
+.env.local
+.env.*.local
+
+# ── PyInstaller 构建产物（根目录 launcher.spec）────────────────────
+/build/
+/dist/
+dyauthreply-client/launcher/build/
+
+# ── 桌面客户端（dyauthreply-client/）──────────────────────────────
+/dyauthreply-client/**/target/
+/dyauthreply-client/**/node_modules/
+/dyauthreply-client/**/dist/
+/dyauthreply-client/desktop/src-tauri/binaries/launcher-*
+
+# ── 本地运行数据 ────────────────────────────────────────────────────
+/data/client/
+/data/standalone/
+/backend-django/tmp/
+
+# ── 抖音 JS 签名引擎：dy_ab.js 提交，npm 依赖不提交 ──────────────
 /backend-django/core/douyin/runtime/transport/sign/js/node_modules/
+
+# ── IDE / AI 工具 / 本地配置 ───────────────────────────────────────
+.codex-tasks/
 /.codegraph
 /.agents
 /.claude
@@ -18,11 +45,12 @@ __pycache__/
 /.cursor
 /.trellis
 /.pnpm-store
-/.pytest_cache
-
-# 桌面客户端构建产物（dyauthreply-client/）
-/dyauthreply-client/**/target/
-/dyauthreply-client/**/node_modules/
-/dyauthreply-client/**/dist/
-/data/client/
-/data/standalone/
+.idea/
+.vscode/
+!.vscode/extensions.json
+.DS_Store
+*.swp
+*.suo
+*.ntvs*
+*.njsproj
+*.sln

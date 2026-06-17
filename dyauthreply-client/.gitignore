@@ -1,0 +1,16 @@
+# 依赖与构建产物
+node_modules/
+dist/
+dist-ssr/
+target/
+
+# PyInstaller 中间文件
+launcher/build/
+
+# Tauri sidecar（CI / 本地 build_launcher.py 生成）
+desktop/src-tauri/binaries/launcher-*
+
+# 日志与本地配置
+*.log
+*.local
+.DS_Store

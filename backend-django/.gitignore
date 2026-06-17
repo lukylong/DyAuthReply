@@ -1,7 +1,6 @@
-
 venv
+.venv/
 .idea/
 static/
-.venv/
 logs/
 

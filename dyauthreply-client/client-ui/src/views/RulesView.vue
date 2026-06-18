@@ -14,6 +14,7 @@ import {
   type DouyinRule,
   type RuleLink,
 } from '../api/client';
+import { useClientLicense } from '../composables/useClientLicense';
 
 function ruleHasLinks(links: { url: string }[] | undefined) {
   return (links || []).some((l) => (l.url || '').trim());
@@ -21,6 +22,7 @@ function ruleHasLinks(links: { url: string }[] | undefined) {
 
 const loading = ref(true);
 const error = ref('');
+const { licenseStatus: license, ensureStatus } = useClientLicense();
 const accounts = ref<DouyinAccount[]>([]);
 const rules = ref<DouyinRule[]>([]);
 const filterAccountId = ref('');
@@ -94,6 +96,7 @@ const filterLabel = computed(() => {
 });
 
 async function loadAccounts() {
+  await ensureStatus();
   accounts.value = await listAccounts();
 }
 
@@ -195,6 +198,10 @@ function parseKeywords(text: string) {
 }
 
 async function submitForm() {
+  if (!license.value?.can_use_business) {
+    formError.value = `当前授权状态为「${license.value?.state_label || '未激活'}」，无法保存规则`;
+    return;
+  }
   if (!form.value.name.trim()) {
     formError.value = '请填写规则名称';
     return;
@@ -308,6 +315,9 @@ onMounted(async () => {
       <div>
         <h2>自动回复规则</h2>
         <p class="sub">通过精细化匹配规则设置，当客户消息触发特定关键词时进行自动分发投递。</p>
+        <p v-if="license && !license.can_use_business" class="license-tip">
+          当前授权状态为「{{ license.state_label }}」，规则编辑已限制。
+        </p>
       </div>
       <button type="button" class="btn-glass btn-primary-glass" @click="openCreate">
         + 新增匹配规则
@@ -541,6 +551,12 @@ onMounted(async () => {
   margin: 0;
   color: var(--text-secondary);
   font-size: 0.9rem;
+}
+
+.license-tip {
+  margin: 8px 0 0;
+  color: #b45309;
+  font-size: 0.88rem;
 }
 
 .loading-state, .empty-state {

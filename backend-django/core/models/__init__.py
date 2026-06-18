@@ -32,6 +32,13 @@ from core.kuaishou.kuaishou_message_model import KuaishouMessage
 from core.kuaishou.kuaishou_reply_log_model import KuaishouReplyLog
 from core.kuaishou.kuaishou_session_model import KuaishouSession
 from core.login_log.login_log_model import LoginLog
+from core.license.license_model import (
+    LicensePlan,
+    LicenseKey,
+    ClientDevice,
+    LicenseActivation,
+    LicenseEvent,
+)
 from core.page_manager.page_model import PageMeta
 from core.social.blacklist_model import Blacklist
 from core.social.quick_reply_model import QuickReply

@@ -65,10 +65,12 @@ data_dir.mkdir(parents=True, exist_ok=True)
 (data_dir / 'logs').mkdir(parents=True, exist_ok=True)
 
 from launcher_logging import configure_windows_stdio, setup_launcher_logging
+from defaults import load_launcher_defaults
 
 configure_windows_stdio()
 launcher_log = setup_launcher_logging(data_dir)
 print(f'[launcher_bundled] log file: {launcher_log}', flush=True)
+bundled_defaults = load_launcher_defaults(ROOT)
 
 # Export environment variables so uvicorn and worker read them
 os.environ['ZQ_ENV'] = 'client'
@@ -106,17 +108,45 @@ else:
 
 # Set up cryptography key
 env_file = data_dir / '.env'
+env_lines = env_file.read_text(encoding='utf-8').splitlines() if env_file.is_file() else []
+
+
+def _read_env_file_value(key: str) -> str:
+    for line in env_lines:
+        if line.startswith(f'{key}='):
+            return line.split('=', 1)[1].strip().strip("'\"")
+    return ''
+
+
 if not os.environ.get('DOUYIN_STORAGE_ENCRYPTION_KEY'):
     key = None
-    if env_file.is_file():
-        for line in env_file.read_text(encoding='utf-8').splitlines():
-            if line.startswith('DOUYIN_STORAGE_ENCRYPTION_KEY='):
-                key = line.split('=', 1)[1].strip().strip("'\"")
+    key = _read_env_file_value('DOUYIN_STORAGE_ENCRYPTION_KEY') or None
     if not key:
         from cryptography.fernet import Fernet
         key = Fernet.generate_key().decode()
         env_file.write_text(f'DOUYIN_STORAGE_ENCRYPTION_KEY={key}\n', encoding='utf-8')
     os.environ['DOUYIN_STORAGE_ENCRYPTION_KEY'] = key
+
+if not os.environ.get('LICENSE_LEASE_PUBLIC_KEY_B64'):
+    lease_public_key = _read_env_file_value('LICENSE_LEASE_PUBLIC_KEY_B64')
+    if not lease_public_key:
+        lease_public_key = str(bundled_defaults.get('license_lease_public_key_b64') or '').strip()
+    if lease_public_key:
+        os.environ['LICENSE_LEASE_PUBLIC_KEY_B64'] = lease_public_key
+
+if not os.environ.get('LICENSE_LEASE_PUBLIC_KEY'):
+    lease_public_key_pem = _read_env_file_value('LICENSE_LEASE_PUBLIC_KEY')
+    if not lease_public_key_pem:
+        lease_public_key_pem = str(bundled_defaults.get('license_lease_public_key') or '').strip()
+    if lease_public_key_pem:
+        os.environ['LICENSE_LEASE_PUBLIC_KEY'] = lease_public_key_pem
+
+if not os.environ.get('CLIENT_LICENSE_SERVER_URL'):
+    default_license_server = _read_env_file_value('CLIENT_LICENSE_SERVER_URL')
+    if not default_license_server:
+        default_license_server = str(bundled_defaults.get('client_license_server_url') or '').strip()
+    if default_license_server:
+        os.environ['CLIENT_LICENSE_SERVER_URL'] = default_license_server
 
 
 def _shutdown_bundled(*_args: object) -> None:

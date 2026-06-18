@@ -9,7 +9,8 @@
 #   DEPLOY_PATH            项目目录，默认 /opt/DyAuthReply
 #   COMPOSE_FILES          默认 docker-compose.yml:docker-compose.deploy.yml
 #   RUN_MIGRATE            true|false，默认 true
-#   DEPLOY_WORKERS         true|false，默认 true
+#   DEPLOY_SCHEDULER       true|false，默认 false
+#   DEPLOY_WORKERS         true|false，默认 false
 #   GHCR_USER / GHCR_TOKEN 私有镜像仓库登录（拉取 ghcr.io 时）
 # -----------------------------------------------------------------------------
 set -euo pipefail
@@ -17,7 +18,8 @@ set -euo pipefail
 DEPLOY_PATH="${DEPLOY_PATH:-/opt/DyAuthReply}"
 COMPOSE_FILES="${COMPOSE_FILES:-docker-compose.yml:docker-compose.deploy.yml}"
 RUN_MIGRATE="${RUN_MIGRATE:-true}"
-DEPLOY_WORKERS="${DEPLOY_WORKERS:-true}"
+DEPLOY_SCHEDULER="${DEPLOY_SCHEDULER:-false}"
+DEPLOY_WORKERS="${DEPLOY_WORKERS:-false}"
 
 if [[ -z "${DEPLOY_BACKEND_IMAGE:-}" ]]; then
   echo "❌ 请设置 DEPLOY_BACKEND_IMAGE" >&2
@@ -26,6 +28,28 @@ fi
 
 cd "${DEPLOY_PATH}"
 export DEPLOY_BACKEND_IMAGE
+
+if [[ -n "${LICENSE_LEASE_PRIVATE_KEY:-}" ]]; then
+  export LICENSE_LEASE_PRIVATE_KEY
+fi
+if [[ -n "${LICENSE_LEASE_PRIVATE_KEY_B64:-}" ]]; then
+  export LICENSE_LEASE_PRIVATE_KEY_B64
+fi
+if [[ -n "${LICENSE_LEASE_PUBLIC_KEY:-}" ]]; then
+  export LICENSE_LEASE_PUBLIC_KEY
+fi
+if [[ -n "${LICENSE_LEASE_PUBLIC_KEY_B64:-}" ]]; then
+  export LICENSE_LEASE_PUBLIC_KEY_B64
+fi
+if [[ -n "${LICENSE_LEASE_TTL_MINUTES:-}" ]]; then
+  export LICENSE_LEASE_TTL_MINUTES
+fi
+if [[ -n "${LICENSE_LEASE_RENEW_SKEW_SECONDS:-}" ]]; then
+  export LICENSE_LEASE_RENEW_SKEW_SECONDS
+fi
+if [[ -n "${ENABLE_HOSTED_ACCOUNT_SCHEDULER_JOBS:-}" ]]; then
+  export ENABLE_HOSTED_ACCOUNT_SCHEDULER_JOBS
+fi
 
 compose() {
   docker compose -f "${COMPOSE_FILES}" "$@"
@@ -43,7 +67,15 @@ elif [[ -n "${DOCKER_PASSWORD:-}" && -n "${DOCKER_USERNAME:-}" && -n "${DOCKER_R
 fi
 
 echo "==> 拉取镜像 ..."
-compose pull backend scheduler douyin-worker-0 douyin-worker-1 douyin-worker-2 || true
+compose pull backend || true
+
+if [[ "${DEPLOY_SCHEDULER}" == "true" ]]; then
+  compose --profile hosted pull scheduler || true
+fi
+
+if [[ "${DEPLOY_WORKERS}" == "true" ]]; then
+  compose pull douyin-worker-0 douyin-worker-1 douyin-worker-2 || true
+fi
 
 echo "==> 启动基础设施 ..."
 compose up -d postgres redis
@@ -56,8 +88,15 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 
-echo "==> 更新 backend / scheduler ..."
-compose up -d --no-build backend scheduler
+echo "==> 更新 backend ..."
+compose up -d --no-build backend
+
+if [[ "${DEPLOY_SCHEDULER}" == "true" ]]; then
+  echo "==> 更新 scheduler ..."
+  compose --profile hosted up -d --no-build scheduler
+else
+  echo "==> 跳过 scheduler 部署（DEPLOY_SCHEDULER=false）"
+fi
 
 if [[ "${RUN_MIGRATE}" == "true" ]]; then
   echo "==> 数据库迁移 ..."
@@ -68,10 +107,13 @@ if [[ "${DEPLOY_WORKERS}" == "true" ]]; then
   echo "==> 更新抖音 worker（3 分片）..."
   compose --profile douyin up -d --no-build --remove-orphans \
     douyin-worker-0 douyin-worker-1 douyin-worker-2
+else
+  echo "==> 跳过抖音 worker 部署（DEPLOY_WORKERS=false）"
 fi
 
 echo "==> 服务状态"
 compose ps
+compose --profile hosted ps
 compose --profile douyin ps
 
 echo "✅ 部署完成"

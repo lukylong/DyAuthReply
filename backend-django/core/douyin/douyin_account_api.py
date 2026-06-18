@@ -1075,4 +1075,3 @@ def refresh_account_conversation_user(request, account_id: str, conversation_id:
         return DouyinSessionControlOut(success=True, message="用户资料已成功更新")
     else:
         return DouyinSessionControlOut(success=False, message="已拉取资料，但未获取到对方的有效昵称")
-

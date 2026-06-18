@@ -26,7 +26,10 @@ a = Analysis(
     ['dyauthreply-client/launcher/launcher_bundled.py'],
     pathex=['backend-django', 'dyauthreply-client/launcher'],
     binaries=node_binaries,
-    datas=[('backend-django/core/douyin/runtime/transport/sign/js', 'core/douyin/runtime/transport/sign/js')],
+    datas=[
+        ('backend-django/core/douyin/runtime/transport/sign/js', 'core/douyin/runtime/transport/sign/js'),
+        ('dyauthreply-client/launcher/generated_defaults.json', 'launcher'),
+    ],
     hiddenimports=hidden_modules,
     hookspath=[],
     hooksconfig={},

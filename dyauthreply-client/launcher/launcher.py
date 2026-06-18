@@ -194,9 +194,11 @@ def _ensure_env(args: argparse.Namespace) -> dict[str, str]:
     launcher_dir = ROOT / 'dyauthreply-client' / 'launcher'
     if str(launcher_dir) not in sys.path:
         sys.path.insert(0, str(launcher_dir))
+    from defaults import load_launcher_defaults
     from node_runtime import configure_node_env
 
     node = configure_node_env(app_root=ROOT)
+    bundled_defaults = load_launcher_defaults(ROOT)
     if node:
         env['DOUYIN_NODE_BIN'] = node
         env.setdefault('EXECJS_RUNTIME', 'Node')
@@ -205,11 +207,18 @@ def _ensure_env(args: argparse.Namespace) -> dict[str, str]:
         _log('警告: 未找到 Node.js，抖音签名/收消息将不可用')
 
     env_file = data_dir / '.env'
+    env_lines = env_file.read_text(encoding='utf-8').splitlines() if env_file.is_file() else []
+
+    def _read_env_file_value(key: str) -> str:
+        for line in env_lines:
+            if line.startswith(f'{key}='):
+                return line.split('=', 1)[1].strip().strip("'\"")
+        return ''
+
     if not env.get('DOUYIN_STORAGE_ENCRYPTION_KEY'):
-        if env_file.is_file():
-            for line in env_file.read_text(encoding='utf-8').splitlines():
-                if line.startswith('DOUYIN_STORAGE_ENCRYPTION_KEY='):
-                    env['DOUYIN_STORAGE_ENCRYPTION_KEY'] = line.split('=', 1)[1].strip().strip("'\"")
+        existing = _read_env_file_value('DOUYIN_STORAGE_ENCRYPTION_KEY')
+        if existing:
+            env['DOUYIN_STORAGE_ENCRYPTION_KEY'] = existing
         else:
             from cryptography.fernet import Fernet
 
@@ -217,6 +226,27 @@ def _ensure_env(args: argparse.Namespace) -> dict[str, str]:
             env_file.write_text(f'DOUYIN_STORAGE_ENCRYPTION_KEY={key}\n', encoding='utf-8')
             env['DOUYIN_STORAGE_ENCRYPTION_KEY'] = key
             _log(f'已生成 DOUYIN_STORAGE_ENCRYPTION_KEY → {env_file}')
+
+    if not env.get('LICENSE_LEASE_PUBLIC_KEY_B64'):
+        lease_public_key = _read_env_file_value('LICENSE_LEASE_PUBLIC_KEY_B64')
+        if not lease_public_key:
+            lease_public_key = str(bundled_defaults.get('license_lease_public_key_b64') or '').strip()
+        if lease_public_key:
+            env['LICENSE_LEASE_PUBLIC_KEY_B64'] = lease_public_key
+
+    if not env.get('LICENSE_LEASE_PUBLIC_KEY'):
+        lease_public_key_pem = _read_env_file_value('LICENSE_LEASE_PUBLIC_KEY')
+        if not lease_public_key_pem:
+            lease_public_key_pem = str(bundled_defaults.get('license_lease_public_key') or '').strip()
+        if lease_public_key_pem:
+            env['LICENSE_LEASE_PUBLIC_KEY'] = lease_public_key_pem
+
+    if not env.get('CLIENT_LICENSE_SERVER_URL'):
+        default_license_server = _read_env_file_value('CLIENT_LICENSE_SERVER_URL')
+        if not default_license_server:
+            default_license_server = str(bundled_defaults.get('client_license_server_url') or '').strip()
+        if default_license_server:
+            env['CLIENT_LICENSE_SERVER_URL'] = default_license_server
 
     return env
 

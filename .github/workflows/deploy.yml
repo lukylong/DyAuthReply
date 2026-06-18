@@ -11,10 +11,14 @@ on:
       - 'docs/**'
   workflow_dispatch:
     inputs:
+      deploy_scheduler:
+        description: '同时更新 scheduler（历史托管/定时任务链路）'
+        type: boolean
+        default: false
       deploy_workers:
         description: '同时更新 3 个 douyin-worker'
         type: boolean
-        default: true
+        default: false
       run_migrate:
         description: '执行数据库 migrate'
         type: boolean
@@ -99,6 +103,7 @@ jobs:
             export DEPLOY_PATH="${{ vars.DEPLOY_PATH || '/opt/DyAuthReply' }}"
             export DEPLOY_BACKEND_IMAGE="${{ env.REGISTRY }}/${{ github.repository }}/backend:${{ github.sha }}"
             export RUN_MIGRATE="${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_migrate }}"
+            export DEPLOY_SCHEDULER="${{ github.event_name != 'workflow_dispatch' || github.event.inputs.deploy_scheduler }}"
             export DEPLOY_WORKERS="${{ github.event_name != 'workflow_dispatch' || github.event.inputs.deploy_workers }}"
             export GHCR_USER="${{ github.repository_owner }}"
             export GHCR_TOKEN="${{ secrets.GHCR_PULL_TOKEN }}"

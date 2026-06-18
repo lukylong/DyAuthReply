@@ -34,6 +34,14 @@ x-backend-env: &backend-env
   DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-dev-compose-secret-change-me}
   JWT_ACCESS_SECRET_KEY: ${JWT_ACCESS_SECRET_KEY:-dev-compose-access-secret}
   JWT_REFRESH_SECRET_KEY: ${JWT_REFRESH_SECRET_KEY:-dev-compose-refresh-secret}
+  ENABLE_SCHEDULER: ${ENABLE_SCHEDULER:-false}
+  ENABLE_HOSTED_ACCOUNT_SCHEDULER_JOBS: ${ENABLE_HOSTED_ACCOUNT_SCHEDULER_JOBS:-false}
+  LICENSE_LEASE_PRIVATE_KEY: ${LICENSE_LEASE_PRIVATE_KEY:-}
+  LICENSE_LEASE_PRIVATE_KEY_B64: ${LICENSE_LEASE_PRIVATE_KEY_B64:-}
+  LICENSE_LEASE_PUBLIC_KEY: ${LICENSE_LEASE_PUBLIC_KEY:-}
+  LICENSE_LEASE_PUBLIC_KEY_B64: ${LICENSE_LEASE_PUBLIC_KEY_B64:-}
+  LICENSE_LEASE_TTL_MINUTES: ${LICENSE_LEASE_TTL_MINUTES:-30}
+  LICENSE_LEASE_RENEW_SKEW_SECONDS: ${LICENSE_LEASE_RENEW_SKEW_SECONDS:-120}
   # --- Douyin (纯 HTTP 协议，无浏览器) ---
   DOUYIN_DATA_DIR: /var/lib/zq-platform/douyin
   DOUYIN_STORAGE_ENCRYPTION_KEY: ${DOUYIN_STORAGE_ENCRYPTION_KEY:-}
@@ -187,6 +195,7 @@ services:
     image: zq-platform/backend:dev
     container_name: zq-scheduler
     restart: unless-stopped
+    profiles: ["hosted"]
     environment:
       <<: *backend-env
       ROLE: scheduler
@@ -205,8 +214,9 @@ services:
     networks:
       - zq-net
 
-  # 抖音 worker ×3：md5(account_id) % SHARD_COUNT 静态分片 + Redis 租约（SET NX + TTL）
-  # 启动（建议带 --remove-orphans 清理旧版单 worker 容器，避免重复托管）：
+  # scheduler / 抖音 worker：历史托管账号能力，默认不参与本地 license/client 联调或常规发布
+  # 仅在明确需要托管账号业务时，手动带 profile 启动：
+  #   docker compose --profile hosted up -d scheduler
   #   docker compose --profile douyin up -d --remove-orphans \
   #     douyin-worker-0 douyin-worker-1 douyin-worker-2
   douyin-worker-0:

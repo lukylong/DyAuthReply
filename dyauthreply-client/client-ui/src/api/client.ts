@@ -103,6 +103,43 @@ export interface BootstrapInfo {
   data_dir: string;
   http_port: number;
   api_prefix: string;
+  license?: ClientLicenseStatus;
+}
+
+export interface ClientLicensePlanSummary {
+  id: string;
+  code: string;
+  name: string;
+  feature_flags?: Record<string, unknown>;
+  heartbeat_interval_minutes: number;
+  grace_period_minutes: number;
+  max_devices: number;
+}
+
+export interface ClientLicenseStatus {
+  state: 'unactivated' | 'active' | 'grace' | 'expired' | 'revoked' | 'invalid';
+  state_label: string;
+  can_use_business: boolean;
+  needs_activation: boolean;
+  device_fingerprint: string;
+  device_name: string;
+  os_type: string;
+  os_version: string;
+  app_version: string;
+  activation_status: string;
+  license_key_id: string;
+  masked_code: string;
+  activated_at?: string | null;
+  last_check_in_at?: string | null;
+  next_check_in_at?: string | null;
+  last_valid_until?: string | null;
+  expires_at?: string | null;
+  lease_expires_at?: string | null;
+  lease_sequence?: number;
+  heartbeat_interval_minutes: number;
+  grace_period_minutes: number;
+  last_error?: string;
+  plan?: ClientLicensePlanSummary | null;
 }
 
 export interface DouyinAccount {
@@ -139,6 +176,31 @@ export function getHealth() {
 
 export function getBootstrap() {
   return request<BootstrapInfo>('/bootstrap');
+}
+
+export function getLicenseStatus() {
+  return request<ClientLicenseStatus>('/license/status');
+}
+
+export function activateLicense(data: { license_code: string }) {
+  return request<ClientLicenseStatus>('/license/activate', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function refreshLicenseStatus() {
+  return request<ClientLicenseStatus>('/license/check-in', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+export function deactivateLicense(reason = '客户端主动解绑') {
+  return request<ClientLicenseStatus>('/license/deactivate', {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  });
 }
 
 export interface RuntimeLogFile {

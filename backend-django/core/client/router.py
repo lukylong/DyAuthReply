@@ -29,6 +29,14 @@ class EmergencyStopIn(Schema):
     reason: str = '管理员急停'
 
 
+class ClientLicenseActivateIn(Schema):
+    license_code: str
+
+
+class ClientLicenseDeactivateIn(Schema):
+    reason: str = '客户端主动解绑'
+
+
 class _ClientJsonEncoder(NinjaJSONEncoder):
     def default(self, o):
         if isinstance(o, datetime):
@@ -67,19 +75,64 @@ def health(request):
 def bootstrap_info(request):
     from common.local_desktop_auth import _is_loopback
     from core.client.bootstrap import get_or_create_local_user
+    from core.client.license_auth import get_public_license_status, refresh_remote_license
     from env import CLIENT_DATA_DIR, CLIENT_HTTP_PORT
 
     if not _is_loopback(request):
         return client_api.create_response(request, {'detail': 'forbidden'}, status=403)
 
     user = get_or_create_local_user()
+    license_status = refresh_remote_license(force=False)
     return {
         'user_id': str(user.id),
         'username': user.username,
         'data_dir': CLIENT_DATA_DIR,
         'http_port': CLIENT_HTTP_PORT,
         'api_prefix': '/api/client/v1',
+        'license': license_status or get_public_license_status(),
     }
+
+
+@client_router.get('/license/status', auth=None, summary='客户端授权状态')
+def license_status(request):
+    from common.local_desktop_auth import _is_loopback
+    from core.client.license_auth import refresh_remote_license
+
+    if not _is_loopback(request):
+        return client_api.create_response(request, {'detail': 'forbidden'}, status=403)
+    return refresh_remote_license(force=False)
+
+
+@client_router.post('/license/activate', auth=None, summary='客户端激活授权')
+def license_activate(request, payload: ClientLicenseActivateIn):
+    from common.local_desktop_auth import _is_loopback
+    from core.client.license_auth import activate_remote_license
+
+    if not _is_loopback(request):
+        return client_api.create_response(request, {'detail': 'forbidden'}, status=403)
+    return activate_remote_license(
+        license_code=payload.license_code,
+    )
+
+
+@client_router.post('/license/check-in', auth=None, summary='客户端刷新授权状态')
+def license_check_in(request):
+    from common.local_desktop_auth import _is_loopback
+    from core.client.license_auth import refresh_remote_license
+
+    if not _is_loopback(request):
+        return client_api.create_response(request, {'detail': 'forbidden'}, status=403)
+    return refresh_remote_license(force=True)
+
+
+@client_router.post('/license/deactivate', auth=None, summary='客户端解绑授权')
+def license_deactivate(request, payload: ClientLicenseDeactivateIn):
+    from common.local_desktop_auth import _is_loopback
+    from core.client.license_auth import deactivate_remote_license
+
+    if not _is_loopback(request):
+        return client_api.create_response(request, {'detail': 'forbidden'}, status=403)
+    return deactivate_remote_license(reason=(payload.reason or '').strip())
 
 
 @client_router.get('/runtime-logs/files', summary='运行日志文件列表（隐藏入口）')

@@ -3,6 +3,7 @@ export * from './database-manager';
 export * from './dept';
 
 export * from './menu';
+export * from './license';
 export * from './oauth';
 
 export * from './server-monitor';

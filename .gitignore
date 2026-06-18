@@ -27,6 +27,7 @@ dyauthreply-client/launcher/build/
 /dyauthreply-client/**/node_modules/
 /dyauthreply-client/**/dist/
 /dyauthreply-client/desktop/src-tauri/binaries/launcher-*
+/dyauthreply-client/launcher/generated_defaults.json
 
 # ── 本地运行数据 ────────────────────────────────────────────────────
 /data/client/

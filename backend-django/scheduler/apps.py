@@ -20,6 +20,18 @@ from application import settings
 logger = logging.getLogger(__name__)
 
 
+def _load_workflow_timeout_job_factory():
+    """按需加载工作流超时任务创建器；当前部署未安装该模块时静默跳过。"""
+    try:
+        from core.workflow.engine.task_timeout_process import create_timeout_check_job
+        return create_timeout_check_job
+    except ModuleNotFoundError as exc:
+        if exc.name == 'core.workflow':
+            logger.info("未检测到工作流模块，跳过工作流超时检查任务初始化")
+            return None
+        raise
+
+
 class SchedulerConfig(AppConfig):
     """定时任务应用配置"""
     default_auto_field = 'django.db.models.BigAutoField'
@@ -66,7 +78,9 @@ class SchedulerConfig(AppConfig):
     def _init_workflow_timeout_job(self):
         """初始化工作流任务超时检查定时任务"""
         try:
-            from core.workflow.engine.task_timeout_process import create_timeout_check_job
+            create_timeout_check_job = _load_workflow_timeout_job_factory()
+            if create_timeout_check_job is None:
+                return
             if create_timeout_check_job():
                 logger.info("工作流任务超时检查定时任务已创建")
         except Exception as e:

@@ -30,6 +30,8 @@ env:
   PYTHON_VERSION: '3.11'
   NODE_VERSION: '20'
   PYTHONUTF8: '1'
+  CLIENT_LICENSE_SERVER_URL: 'https://pro.zhenyangtang.com.cn'
+  LICENSE_LEASE_PUBLIC_KEY_B64: ${{ secrets.LICENSE_LEASE_PUBLIC_KEY_B64 }}
 
 jobs:
   build:

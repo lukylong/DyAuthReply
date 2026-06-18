@@ -19,6 +19,11 @@ const router = createRouter({
       component: () => import('../views/AccountsView.vue'),
     },
     {
+      path: '/license',
+      name: 'license',
+      component: () => import('../views/LicenseView.vue'),
+    },
+    {
       path: '/chat',
       name: 'chat',
       component: () => import('../views/ChatView.vue'),

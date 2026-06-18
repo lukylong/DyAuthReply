@@ -17,6 +17,7 @@ from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
 from django.http import HttpResponse
 from django.utils.deprecation import MiddlewareMixin
+from ninja.errors import HttpError
 
 from common.utils.request_util import (
     get_browser,
@@ -98,6 +99,68 @@ class CorsMiddleware(MiddlewareMixin):
         if origin:
             self._with_cors_headers(response, origin)
         return response
+
+
+class ClientLicenseGateMiddleware(MiddlewareMixin):
+    """
+    客户端本地服务端统一授权闸门。
+
+    仅在 client URLConf 下生效：
+    - 放行健康检查、启动信息、授权状态/激活/心跳/解绑、隐藏诊断接口、只读查询
+    - 拦截商业写接口
+    """
+
+    CLIENT_DOUYIN_PREFIX = '/api/client/v1/douyin/'
+
+    SAFE_PREFIXES = (
+        '/api/client/v1/health',
+        '/api/client/v1/bootstrap',
+        '/api/client/v1/license/status',
+        '/api/client/v1/license/activate',
+        '/api/client/v1/license/check-in',
+        '/api/client/v1/license/deactivate',
+        '/api/client/v1/admin/',
+        '/api/client/v1/runtime-logs/',
+        '/api/client/v1/lifecycle/',
+    )
+
+    SAFE_DOUYIN_WRITE_PREFIXES = (
+        '/api/client/v1/douyin/session/heartbeat',
+        '/api/client/v1/douyin/event/report',
+        '/api/client/v1/douyin/event/batch/read',
+        '/api/client/v1/douyin/event/read-all',
+    )
+
+    def _is_client_mode(self) -> bool:
+        return getattr(settings, 'ROOT_URLCONF', '') == 'application.client_urls'
+
+    def _is_protected_path(self, path: str) -> bool:
+        if any(path.startswith(prefix) for prefix in self.SAFE_PREFIXES):
+            return False
+        if not path.startswith(self.CLIENT_DOUYIN_PREFIX):
+            return False
+        if any(path.startswith(prefix) for prefix in self.SAFE_DOUYIN_WRITE_PREFIXES):
+            return False
+        return True
+
+    def process_view(self, request, view_func, view_args, view_kwargs):
+        if not self._is_client_mode():
+            return None
+
+        if request.method in ('GET', 'HEAD', 'OPTIONS'):
+            return None
+
+        path = request.path or ''
+        if not self._is_protected_path(path):
+            return None
+
+        from core.client.license_auth import require_client_business_access
+
+        try:
+            require_client_business_access('当前业务操作')
+        except HttpError as exc:
+            return HttpResponse(str(exc.message), status=exc.status_code, content_type='text/plain; charset=utf-8')
+        return None
 
 
 

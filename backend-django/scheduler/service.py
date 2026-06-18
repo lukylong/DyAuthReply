@@ -13,6 +13,7 @@ Scheduler Service - APScheduler 调度服务
 """
 import json
 import logging
+import inspect
 from datetime import datetime
 from typing import Optional, Dict, Any
 
@@ -29,6 +30,10 @@ from apscheduler.triggers.interval import IntervalTrigger
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
+
+HOSTED_ACCOUNT_TASK_PREFIXES = (
+    "scheduler.tasks.douyin_",
+)
 
 
 class SchedulerService:
@@ -138,6 +143,9 @@ class SchedulerService:
             jobs = SchedulerJob.objects.filter(status=1)
 
             for job in jobs:
+                if self._should_skip_job(job):
+                    logger.info(f"跳过受限任务: {job.code} ({job.task_func})")
+                    continue
                 try:
                     self.add_job(job)
                     logger.info(f"加载任务成功: {job.code}")
@@ -220,6 +228,9 @@ class SchedulerService:
 
             new_count = 0
             for job in query:
+                if self._should_skip_job(job):
+                    logger.info(f"跳过受限任务: {job.code} ({job.task_func})")
+                    continue
                 if job.code not in existing_job_ids:
                     try:
                         self.add_job(job)
@@ -233,9 +244,21 @@ class SchedulerService:
         except Exception as e:
             logger.error(f"同步任务失败: {str(e)}")
 
+    def _should_skip_job(self, job_obj) -> bool:
+        task_func = getattr(job_obj, 'task_func', '') or ''
+        if not task_func.startswith(HOSTED_ACCOUNT_TASK_PREFIXES):
+            return False
+        return not getattr(settings, 'ENABLE_HOSTED_ACCOUNT_SCHEDULER_JOBS', False)
+
     def add_job(self, job_obj):
         """添加任务到调度器"""
         try:
+            # 导入任务函数
+            task_func = self._import_task_func(job_obj.task_func)
+            if not task_func:
+                logger.error(f"无法导入任务函数: {job_obj.task_func}")
+                return False
+
             # 构建触发器
             trigger = self._build_trigger(job_obj)
             if not trigger:
@@ -245,16 +268,7 @@ class SchedulerService:
             # 解析任务参数
             args = json.loads(job_obj.task_args) if job_obj.task_args else []
             kwargs = json.loads(job_obj.task_kwargs) if job_obj.task_kwargs else {}
-
-            # ✅ 关键修复：添加 job_code 到 kwargs 中
-            # 这样任务执行器可以通过 kwargs.get('job_code') 获取任务编码
-            kwargs['job_code'] = job_obj.code
-
-            # 导入任务函数
-            task_func = self._import_task_func(job_obj.task_func)
-            if not task_func:
-                logger.error(f"无法导入任务函数: {job_obj.task_func}")
-                return False
+            kwargs = self._prepare_job_kwargs(task_func, job_obj, kwargs)
 
             # 添加任务
             self._scheduler.add_job(
@@ -277,6 +291,29 @@ class SchedulerService:
         except Exception as e:
             logger.error(f"添加任务失败 {job_obj.code}: {str(e)}")
             return False
+
+    def _prepare_job_kwargs(self, task_func, job_obj, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """根据任务函数签名准备运行参数。"""
+        prepared_kwargs = dict(kwargs)
+
+        try:
+            signature = inspect.signature(task_func)
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                f"读取任务函数签名失败，按原参数执行: {job_obj.code} ({job_obj.task_func}) - {exc}"
+            )
+            return prepared_kwargs
+
+        accepts_var_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        accepts_job_code = 'job_code' in signature.parameters
+
+        if accepts_var_kwargs or accepts_job_code:
+            prepared_kwargs.setdefault('job_code', job_obj.code)
+
+        return prepared_kwargs
 
     def remove_job(self, job_code: str):
         """从调度器移除任务"""

@@ -7,9 +7,11 @@ import {
   patchTemplate,
   type DouyinTemplate,
 } from '../api/client';
+import { useClientLicense } from '../composables/useClientLicense';
 
 const loading = ref(true);
 const error = ref('');
+const { licenseStatus: license, ensureStatus } = useClientLicense();
 const templates = ref<DouyinTemplate[]>([]);
 const showForm = ref(false);
 const editing = ref<DouyinTemplate | null>(null);
@@ -27,6 +29,7 @@ async function load() {
   loading.value = true;
   error.value = '';
   try {
+    await ensureStatus();
     const page = await listTemplates({ page: 1, pageSize: 200 });
     templates.value = page.items ?? [];
   } catch (e) {
@@ -62,6 +65,10 @@ function closeForm() {
 }
 
 async function submitForm() {
+  if (!license.value?.can_use_business) {
+    formError.value = `当前授权状态为「${license.value?.state_label || '未激活'}」，无法保存模板`;
+    return;
+  }
   if (!form.value.name.trim()) {
     formError.value = '请填写模板名称';
     return;
@@ -94,6 +101,10 @@ async function submitForm() {
 }
 
 async function toggleStatus(tpl: DouyinTemplate) {
+  if (!license.value?.can_use_business) {
+    error.value = `当前授权状态为「${license.value?.state_label || '未激活'}」，无法修改模板`;
+    return;
+  }
   try {
     await patchTemplate(tpl.id, { status: !tpl.status });
     tpl.status = !tpl.status;
@@ -103,6 +114,10 @@ async function toggleStatus(tpl: DouyinTemplate) {
 }
 
 async function removeTemplate(tpl: DouyinTemplate) {
+  if (!license.value?.can_use_business) {
+    error.value = `当前授权状态为「${license.value?.state_label || '未激活'}」，无法删除模板`;
+    return;
+  }
   if (!confirm(`删除模板「${tpl.name}」？`)) return;
   try {
     await deleteTemplate(tpl.id);
@@ -121,8 +136,11 @@ onMounted(load);
       <div>
         <h2>回复模板</h2>
         <p class="sub">可复用文案，规则里可引用模板；支持变量如 nickname</p>
+        <p v-if="license && !license.can_use_business" class="license-tip">
+          当前授权状态为「{{ license.state_label }}」，模板编辑已限制。
+        </p>
       </div>
-      <button type="button" class="btn primary" @click="openCreate">+ 新建模板</button>
+      <button type="button" class="btn primary" :disabled="license ? !license.can_use_business : false" @click="openCreate">+ 新建模板</button>
     </div>
 
     <section v-if="loading" class="card">加载中…</section>
@@ -199,6 +217,12 @@ onMounted(load);
   font-size: 0.9rem;
 }
 
+.license-tip {
+  margin: 8px 0 0;
+  color: #f59e0b;
+  font-size: 0.88rem;
+}
+
 .card {
   background: rgba(15, 23, 42, 0.72);
   border: 1px solid rgba(148, 163, 184, 0.12);
@@ -272,6 +296,11 @@ onMounted(load);
   padding: 10px 16px;
   cursor: pointer;
   font-size: 0.92rem;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .btn.sm {

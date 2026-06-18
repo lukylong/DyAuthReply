@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router';
 import { getHealth } from '../api/client';
+import { useClientLicense } from '../composables/useClientLicense';
 import { APP_VERSION, useHiddenAdminEntry } from '../composables/useHiddenAdminEntry';
 
 const route = useRoute();
@@ -10,6 +11,7 @@ const isWide = computed(() => Boolean(route.meta.wide));
 
 const isOnline = ref(false);
 const serviceName = ref('core-api');
+const { licenseStatus, ensureStatus } = useClientLicense();
 let healthTimer: ReturnType<typeof setInterval> | null = null;
 
 async function checkHealth() {
@@ -24,6 +26,7 @@ async function checkHealth() {
 
 onMounted(() => {
   checkHealth();
+  ensureStatus();
   healthTimer = setInterval(checkHealth, 5000);
 });
 
@@ -62,6 +65,9 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
         <RouterLink to="/accounts" class="nav-item">
           <span class="icon">📱</span>抖音账号
         </RouterLink>
+        <RouterLink to="/license" class="nav-item">
+          <span class="icon">🔐</span>客户端授权
+        </RouterLink>
         <RouterLink to="/chat" class="nav-item">
           <span class="icon">💬</span>私信工作台
         </RouterLink>
@@ -81,6 +87,10 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
             <span class="status-text">{{ isOnline ? '服务运行中' : '服务未连接' }}</span>
             <span class="service-name">{{ serviceName }}</span>
           </div>
+        </div>
+        <div v-if="licenseStatus" class="license-badge" :class="licenseStatus.state">
+          <span class="license-title">授权</span>
+          <span class="license-value">{{ licenseStatus.state_label }}</span>
         </div>
         <div class="version-tag">{{ APP_VERSION }}</div>
       </div>
@@ -253,6 +263,43 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
   opacity: 0.55;
   user-select: none;
   cursor: default;
+}
+
+.license-badge {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  background: rgba(0, 0, 0, 0.02);
+  border: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.license-title {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.license-value {
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.license-badge.active .license-value {
+  color: #15803d;
+}
+
+.license-badge.grace .license-value {
+  color: #b45309;
+}
+
+.license-badge.expired .license-value,
+.license-badge.revoked .license-value,
+.license-badge.invalid .license-value,
+.license-badge.unactivated .license-value {
+  color: #b91c1c;
 }
 
 @keyframes pulse {

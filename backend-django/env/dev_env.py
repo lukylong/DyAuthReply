@@ -51,6 +51,9 @@ JWT_REFRESH_SECRET_KEY = os.environ.get(
 IS_DEMO = False
 
 ENABLE_SCHEDULER = _env('ENABLE_SCHEDULER', 'True').lower() == 'true'
+ENABLE_HOSTED_ACCOUNT_SCHEDULER_JOBS = _env(
+    'ENABLE_HOSTED_ACCOUNT_SCHEDULER_JOBS', 'false'
+).lower() == 'true'
 
 # ================================================= #
 # ******** OAuth 配置 *********** #

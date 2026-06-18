@@ -90,6 +90,9 @@ ERROR_LOGS_FILE = str(_DATA_ROOT / 'logs' / 'error.log')
 # 客户端 API 默认端口（launcher 可覆盖 CLIENT_HTTP_PORT）
 CLIENT_HTTP_PORT = int(_env('CLIENT_HTTP_PORT', '8765'))
 
+# 客户端默认授权服务地址（开发态默认本地；打包产物由 launcher defaults / 外部环境覆盖）
+CLIENT_LICENSE_SERVER_URL = _env('CLIENT_LICENSE_SERVER_URL', 'http://127.0.0.1:8000')
+
 # 仅挂载客户端 URL（API + client-ui 静态资源）
 ROOT_URLCONF = 'application.client_urls'
 

@@ -14,6 +14,7 @@ from core.dict.dict_api import router as dict_router
 from core.dict_item.dict_item_api import router as dict_item_router
 from core.file_manager.file_manager_api import router as file_manager_router
 from core.login_log.login_log_api import router as login_log_router
+from core.license.license_api import router as license_router
 from core.menu.menu_api import router as menu_router
 from core.message.announcement_api import router as announcement_router
 from core.message.message_api import router as message_router
@@ -63,6 +64,7 @@ core_router.add_router("", menu_router, tags=["Core-Menu"])
 core_router.add_router("", dict_router, tags=["Core-Dict"])
 core_router.add_router("", dict_item_router, tags=["Core-DictItem"])
 core_router.add_router("", login_log_router, tags=["Core-LoginLog"])
+core_router.add_router("", license_router, tags=["Core-License"])
 core_router.add_router("", server_monitor_router, tags=["Core-ServerMonitor"])
 core_router.add_router("", redis_monitor_router, tags=["Core-RedisMonitor"])
 core_router.add_router("", redis_manager_router, tags=["Core-RedisManager"])

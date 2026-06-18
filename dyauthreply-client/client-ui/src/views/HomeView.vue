@@ -1,13 +1,21 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import { RouterLink } from 'vue-router';
-import { getBootstrap, getHealth, listAccounts, type BootstrapInfo, type DouyinAccount } from '../api/client';
+import {
+  getBootstrap,
+  getHealth,
+  listAccounts,
+  type BootstrapInfo,
+  type DouyinAccount,
+} from '../api/client';
+import { useClientLicense } from '../composables/useClientLicense';
 
 const loading = ref(true);
 const error = ref('');
 const health = ref<{ ok: boolean; env: string } | null>(null);
 const bootstrap = ref<BootstrapInfo | null>(null);
 const accounts = ref<DouyinAccount[]>([]);
+const { licenseStatus: license, ensureStatus } = useClientLicense();
 const currentStep = ref(1);
 
 async function initDashboard() {
@@ -16,6 +24,7 @@ async function initDashboard() {
   try {
     health.value = await getHealth();
     bootstrap.value = await getBootstrap();
+    await ensureStatus();
     accounts.value = await listAccounts();
     
     // Automatically set stepper progress based on system status
@@ -87,6 +96,17 @@ onMounted(() => {
             <span class="label">托管账号</span>
             <span class="value">{{ accounts.length }} 个</span>
             <span class="subtext">已启用自动回复: {{ accounts.filter(a => a.auto_reply_enabled).length }} 个</span>
+          </div>
+        </div>
+
+        <div class="stat-card glass-panel">
+          <div class="stat-icon">🔐</div>
+          <div class="stat-content">
+            <span class="label">客户端授权</span>
+            <span class="value" :class="{ 'success-text': license?.can_use_business, 'danger-text': license && !license.can_use_business }">
+              {{ license?.state_label || '未配置' }}
+            </span>
+            <span class="subtext">{{ license?.masked_code || '未绑定卡密' }}</span>
           </div>
         </div>
 
@@ -222,6 +242,17 @@ onMounted(() => {
 
       <!-- CTA Shortcuts -->
       <section class="cta-shortcuts">
+        <RouterLink to="/license" class="shortcut-btn glass-panel">
+          <div class="btn-inner">
+            <span class="icon">🔐</span>
+            <div class="text">
+              <h5>查看授权状态</h5>
+              <p>检查激活情况、离线宽限时间与当前设备绑定信息</p>
+            </div>
+          </div>
+          <span class="arrow">→</span>
+        </RouterLink>
+
         <RouterLink to="/chat" class="shortcut-btn glass-panel">
           <div class="btn-inner">
             <span class="icon">💬</span>

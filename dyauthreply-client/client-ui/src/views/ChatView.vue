@@ -10,6 +10,7 @@ import {
   type DouyinAccount,
   type MessageItem,
 } from '../api/client';
+import { useClientLicense } from '../composables/useClientLicense';
 
 const accounts = ref<DouyinAccount[]>([]);
 const activeAccountId = ref('');
@@ -29,6 +30,7 @@ const syncing = ref(false);
 const sending = ref(false);
 const error = ref('');
 const toast = ref('');
+const { licenseStatus: license, ensureStatus } = useClientLicense();
 
 const activeAccount = computed(() =>
   accounts.value.find((a) => a.id === activeAccountId.value),
@@ -139,6 +141,7 @@ async function loadAccounts() {
   loadingAccounts.value = true;
   error.value = '';
   try {
+    await ensureStatus();
     accounts.value = await listAccounts();
     if (!activeAccountId.value && accounts.value.length > 0) {
       activeAccountId.value = accounts.value[0].id;
@@ -289,6 +292,10 @@ async function waitManualReplyResult(commandId: string, sentText: string) {
 }
 
 async function onSend() {
+  if (!license.value?.can_use_business) {
+    toast.value = `当前授权状态为「${license.value?.state_label || '未激活'}」，无法发送消息`;
+    return;
+  }
   const text = replyText.value.trim();
   if (!text || !activeAccountId.value || !activeConversationId.value) return;
   sending.value = true;
@@ -484,6 +491,9 @@ onUnmounted(() => {
         </div>
 
         <footer class="composer">
+          <p v-if="license && !license.can_use_business" class="toast-tip error">
+            当前授权状态为「{{ license.state_label }}」，手动发送已限制。请先到“客户端授权”页处理。
+          </p>
           <transition name="fade">
             <p v-if="toast" class="toast-tip" :class="{ error: toast.includes('失败') || toast.includes('超时') }">
               {{ toast }}
@@ -494,9 +504,15 @@ onUnmounted(() => {
               v-model="replyText"
               rows="2"
               placeholder="输入消息以手动回复，按 Enter 发送，Shift + Enter 换行..."
+              :disabled="license ? !license.can_use_business : false"
               @keydown.enter.exact.prevent="onSend"
             />
-            <button type="button" class="btn-glass btn-primary-glass send-btn" :disabled="sending || !replyText.trim()" @click="onSend">
+            <button
+              type="button"
+              class="btn-glass btn-primary-glass send-btn"
+              :disabled="sending || !replyText.trim() || (license ? !license.can_use_business : false)"
+              @click="onSend"
+            >
               {{ sending ? '投递中' : '发送' }}
             </button>
           </div>

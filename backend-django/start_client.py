@@ -11,8 +11,9 @@ def _ensure_django() -> None:
     os.environ.setdefault('ZQ_ENV', 'client')
     os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'application.settings')
     import django
+    from django.apps import apps
 
-    if not django.apps.apps.ready:
+    if not apps.ready:
         django.setup()
 
 
@@ -73,8 +74,10 @@ def prepare_database() -> None:
         sys.exit(1)
 
     from core.client.bootstrap import get_or_create_local_user
+    from core.client.license_auth import ensure_license_renewer_started
 
     get_or_create_local_user()
+    ensure_license_renewer_started()
 
 
 def serve() -> None:

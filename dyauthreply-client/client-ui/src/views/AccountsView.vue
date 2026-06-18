@@ -11,10 +11,12 @@ import {
   statusLabel,
   type DouyinAccount,
 } from '../api/client';
+import { useClientLicense } from '../composables/useClientLicense';
 
 const loading = ref(true);
 const error = ref('');
 const accounts = ref<DouyinAccount[]>([]);
+const { licenseStatus: license, ensureStatus } = useClientLicense();
 const showImport = ref(false);
 const bundle = ref('');
 const submitting = ref(false);
@@ -27,6 +29,7 @@ async function load() {
   loading.value = true;
   error.value = '';
   try {
+    await ensureStatus();
     accounts.value = await listAccounts();
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
@@ -69,6 +72,10 @@ onUnmounted(() => {
 });
 
 async function submitImport() {
+  if (!license.value?.can_use_business) {
+    importError.value = `当前授权状态为「${license.value?.state_label || '未激活'}」，无法导入账号`;
+    return;
+  }
   const text = bundle.value.trim();
   if (!text) {
     importError.value = '请粘贴 DYCRED1 开头的一键导入串';
@@ -138,6 +145,9 @@ onMounted(load);
       <div>
         <h2>我的抖音号</h2>
         <p class="sub">通过浏览器凭证提取插件获取一键导入串，在此粘贴并托管抖音私信消息。</p>
+        <p v-if="license && !license.can_use_business" class="license-tip">
+          当前授权状态为「{{ license.state_label }}」，账号导入与凭证更新已限制。
+        </p>
       </div>
       <button type="button" class="btn-glass btn-primary-glass" @click="openImport()">
         <span>+</span> 导入抖音号
@@ -286,6 +296,12 @@ onMounted(load);
   margin: 0;
   color: var(--text-secondary);
   font-size: 0.9rem;
+}
+
+.license-tip {
+  margin: 8px 0 0;
+  color: #b45309;
+  font-size: 0.88rem;
 }
 
 .loading-state, .empty-state {

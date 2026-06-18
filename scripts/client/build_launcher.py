@@ -89,6 +89,11 @@ def ensure_sign_js_deps() -> None:
 def build_launcher(rust_target: str | None = None) -> None:
     ensure_node_available()
     ensure_sign_js_deps()
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "client" / "write_launcher_defaults.py")],
+        cwd=ROOT,
+        check=True,
+    )
     node_path = shutil.which("node")
     print(f"Node: {subprocess.check_output(['node', '--version'], text=True).strip()} @ {node_path}")
     if rust_target:

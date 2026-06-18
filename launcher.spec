@@ -11,6 +11,7 @@ hidden_modules.extend(collect_submodules('application'))
 hidden_modules.extend(collect_submodules('core'))
 hidden_modules.extend(collect_submodules('scheduler'))
 hidden_modules.extend(collect_submodules('common'))
+hidden_modules.extend(['launcher_logging'])
 
 # 打包时内嵌 Node.js（抖音 JS 签名必需；Tauri sidecar 无 shell PATH）
 node_binaries = []
@@ -45,7 +46,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=True,

@@ -9,7 +9,7 @@ const router = useRouter();
 const showAdminModal = ref(false);
 const status = ref<'starting' | 'connecting' | 'ready' | 'failed'>('starting');
 const retryCount = ref(0);
-const maxRetries = 30; // 最多重试30次（约30秒）
+const maxRetries = 90; // 首次安装迁移可能较慢，最多约 90 秒
 const errorMessage = ref('');
 
 const statusText = computed(() => {
@@ -67,7 +67,8 @@ async function startConnectionLoop() {
 
   // 超时失败
   status.value = 'failed';
-  errorMessage.value = '服务启动超时，请检查后台服务是否正常运行';
+  errorMessage.value =
+    '服务启动超时。请确认未重复打开多个 DyAuthReply 窗口，并查看日志：%APPDATA%\\DyAuthReply\\logs\\launcher.log（Windows）或 ~/Library/Application Support/DyAuthReply/logs/launcher.log（macOS）';
 }
 
 async function retry() {
@@ -119,7 +120,7 @@ function onAdminSuccess() {
         <div v-if="status === 'starting' || status === 'connecting'" class="loading-indicator">
           <div class="spinner-ring"></div>
           <div class="status-text">{{ statusText }}</div>
-          <div class="status-hint">首次启动可能需要几秒钟...</div>
+          <div class="status-hint">首次启动可能需要 30–60 秒（数据库初始化）...</div>
         </div>
 
         <div v-else-if="status === 'ready'" class="success-indicator">

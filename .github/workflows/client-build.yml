@@ -45,12 +45,7 @@ jobs:
             artifact_name: dyauthreply-macos-aarch64
             bundle: dmg
             launcher_rosetta: false
-          - os: macos-latest
-            platform_label: macOS Intel
-            rust_target: x86_64-apple-darwin
-            artifact_name: dyauthreply-macos-x64
-            bundle: dmg
-            launcher_rosetta: true
+          # macOS Intel 暂跳过：ARM runner 无法可靠交叉打包 x86_64 PyInstaller sidecar
           - os: windows-latest
             platform_label: Windows x64
             rust_target: x86_64-pc-windows-msvc

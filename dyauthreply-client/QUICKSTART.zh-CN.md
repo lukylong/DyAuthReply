@@ -48,6 +48,20 @@ cd ../desktop && npm run tauri build
 
 正式版会在安装包内嵌 **Python + Node** 运行时，用户只需双击 DyAuthReply，无需单独装任何数据库或 Redis。
 
+## macOS 正式安装（Release 包）
+
+CI 构建包未 Apple 公证，首次打开可能提示无法验证开发者。安装 `.dmg` 并拖入「应用程序」后，在终端执行：
+
+```bash
+/usr/bin/xattr -cr "/Applications/DyAuthReply.app"
+/usr/bin/codesign -fs - "/Applications/DyAuthReply.app"
+```
+
+- `xattr -cr`：清除下载隔离，解决「已损坏，无法打开」
+- `codesign -fs -`：本地 ad-hoc 重签名，解决「无法验证开发者」
+
+若仍被拦截：「系统设置 → 隐私与安全性 → 仍要打开」。
+
 ## 数据目录
 
 - 开发默认：`DyAuthReply/data/client/`

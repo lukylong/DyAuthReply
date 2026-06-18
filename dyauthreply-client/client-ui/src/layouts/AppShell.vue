@@ -2,12 +2,10 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router';
 import { getHealth } from '../api/client';
-import { APP_VERSION, useVersionEasterEgg } from '../composables/useVersionEasterEgg';
-import AdminPasswordModal from '../components/AdminPasswordModal.vue';
+import { APP_VERSION, useHiddenAdminEntry } from '../composables/useHiddenAdminEntry';
 
 const route = useRoute();
 const router = useRouter();
-const showAdminModal = ref(false);
 const isWide = computed(() => Boolean(route.meta.wide));
 
 const isOnline = ref(false);
@@ -33,22 +31,12 @@ onUnmounted(() => {
   if (healthTimer) clearInterval(healthTimer);
 });
 
-const { onVersionClick } = useVersionEasterEgg(() => {
-  showAdminModal.value = true;
-});
-
-function onAdminSuccess() {
-  showAdminModal.value = false;
+const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
   router.push('/admin');
-}
+});
 </script>
 
 <template>
-  <AdminPasswordModal
-    :open="showAdminModal"
-    @close="showAdminModal = false"
-    @success="onAdminSuccess"
-  />
   <!-- Liquid glow animated background -->
   <div class="liquid-bg-wrapper">
     <div class="liquid-blob blob-1"></div>
@@ -60,7 +48,7 @@ function onAdminSuccess() {
     <!-- Sleek glassmorphic sidebar -->
     <aside class="sidebar glass-panel">
       <div class="brand">
-        <span class="logo-grad">Dy</span>
+        <span class="logo-grad" @click="onHiddenAdminClick">Dy</span>
         <div class="brand-text">
           <h1>DyAuthReply</h1>
           <p>智能多号自动回复</p>
@@ -94,7 +82,7 @@ function onAdminSuccess() {
             <span class="service-name">{{ serviceName }}</span>
           </div>
         </div>
-        <div class="version-tag" @click="onVersionClick">{{ APP_VERSION }}</div>
+        <div class="version-tag">{{ APP_VERSION }}</div>
       </div>
     </aside>
 

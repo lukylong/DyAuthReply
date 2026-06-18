@@ -60,6 +60,14 @@ def ensure_node_available() -> None:
         raise SystemExit("ERROR: Node.js not found; launcher build requires Node for signing runtime")
 
 
+def npm_executable() -> str:
+    for name in ("npm.cmd", "npm.exe", "npm") if sys.platform == "win32" else ("npm",):
+        found = shutil.which(name)
+        if found:
+            return found
+    raise SystemExit("ERROR: npm not found; launcher build requires npm for signing runtime deps")
+
+
 def ensure_sign_js_deps() -> None:
     """Install jsrsasign into sign/js/node_modules before PyInstaller bundles datas."""
     jsrsasign = SIGN_JS_DIR / "node_modules" / "jsrsasign"
@@ -70,7 +78,7 @@ def ensure_sign_js_deps() -> None:
         raise SystemExit(f"ERROR: missing sign/js package-lock.json under {SIGN_JS_DIR}")
     print(f"Installing sign/js npm deps under {SIGN_JS_DIR} ...")
     subprocess.run(
-        ["npm", "ci", "--no-audit", "--no-fund"],
+        [npm_executable(), "ci", "--no-audit", "--no-fund"],
         cwd=SIGN_JS_DIR,
         check=True,
     )

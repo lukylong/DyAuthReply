@@ -2,11 +2,9 @@
 import { onMounted, ref, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import { getHealth } from '../api/client';
-import { APP_VERSION, useVersionEasterEgg } from '../composables/useVersionEasterEgg';
-import AdminPasswordModal from '../components/AdminPasswordModal.vue';
+import { APP_VERSION, useHiddenAdminEntry } from '../composables/useHiddenAdminEntry';
 
 const router = useRouter();
-const showAdminModal = ref(false);
 const status = ref<'starting' | 'connecting' | 'ready' | 'failed'>('starting');
 const retryCount = ref(0);
 const maxRetries = 90; // 首次安装迁移可能较慢，最多约 90 秒
@@ -81,22 +79,12 @@ onMounted(() => {
   startConnectionLoop();
 });
 
-const { onVersionClick } = useVersionEasterEgg(() => {
-  showAdminModal.value = true;
-});
-
-function onAdminSuccess() {
-  showAdminModal.value = false;
+const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
   router.push('/admin');
-}
+});
 </script>
 
 <template>
-  <AdminPasswordModal
-    :open="showAdminModal"
-    @close="showAdminModal = false"
-    @success="onAdminSuccess"
-  />
   <div class="splash-container">
     <!-- 背景动画 -->
     <div class="liquid-bg-wrapper">
@@ -109,7 +97,7 @@ function onAdminSuccess() {
       <!-- Logo区域 -->
       <div class="logo-section">
         <div class="logo-circle">
-          <span class="logo-text">Dy</span>
+          <span class="logo-text" @click="onHiddenAdminClick">Dy</span>
         </div>
         <h1 class="app-title">DyAuthReply</h1>
         <p class="app-subtitle">智能多号自动回复</p>
@@ -138,8 +126,7 @@ function onAdminSuccess() {
         </div>
       </div>
 
-      <!-- 版本信息（连点 10 次 → 运行日志） -->
-      <div class="version-info" @click="onVersionClick">
+      <div class="version-info">
         <span>{{ APP_VERSION }}</span>
       </div>
     </div>

@@ -69,6 +69,14 @@ def issue_admin_token() -> dict:
     }
 
 
+def issue_local_admin_token(request) -> dict:
+    from common.local_desktop_auth import _is_loopback
+
+    if not _is_loopback(request):
+        raise HttpError(403, '客户端 API 仅允许本机访问')
+    return issue_admin_token()
+
+
 def _purge_expired_tokens() -> None:
     now = time.time()
     expired = [k for k, exp in _tokens.items() if exp <= now]

@@ -101,6 +101,11 @@ jobs:
         shell: pwsh
         run: python scripts/client/build_launcher.py --rust-target "${{ matrix.rust_target }}"
 
+      - name: Smoke test launcher sidecar (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python scripts/client/smoke_test_launcher.py "dyauthreply-client/desktop/src-tauri/binaries/launcher-${{ matrix.rust_target }}.exe"
+
       - name: Install npm dependencies
         shell: bash
         run: |

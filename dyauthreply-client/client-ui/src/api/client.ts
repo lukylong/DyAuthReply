@@ -212,6 +212,10 @@ export function adminLogin(password: string) {
   );
 }
 
+export function createLocalAdminSession() {
+  return request<AdminLoginResult>('/admin/local-session', { method: 'POST' });
+}
+
 export function adminLogout() {
   return request<{ ok: boolean }>('/admin/logout', { method: 'POST' }, true);
 }

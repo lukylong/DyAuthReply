@@ -117,6 +117,13 @@ def admin_login(request, payload: AdminLoginIn):
     return issue_admin_token()
 
 
+@client_router.post('/admin/local-session', auth=None, summary='本机管理员会话（隐藏入口）')
+def admin_local_session(request):
+    from core.client.admin_auth import issue_local_admin_token
+
+    return issue_local_admin_token(request)
+
+
 @client_router.post('/admin/logout', summary='管理员退出')
 def admin_logout(request):
     from core.client.admin_auth import require_admin, revoke_admin_token

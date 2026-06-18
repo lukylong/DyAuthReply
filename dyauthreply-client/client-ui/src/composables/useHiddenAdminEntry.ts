@@ -2,7 +2,7 @@ import { ref } from 'vue';
 
 import { createLocalAdminSession, setAdminToken } from '../api/client';
 
-export const APP_VERSION = 'v0.1.0';
+export const APP_VERSION = __APP_VERSION__;
 
 export function useHiddenAdminEntry(onUnlock: () => void) {
   const unlocking = ref(false);

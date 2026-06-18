@@ -42,7 +42,7 @@ class _ClientJsonRenderer(JSONRenderer):
 
 client_api = NinjaAPI(
     title='DyAuthReply Client API',
-    version='0.1.0',
+    version='0.1.5',
     auth=LocalDesktopAuth(),
     renderer=_ClientJsonRenderer(),
 )

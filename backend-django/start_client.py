@@ -87,9 +87,11 @@ def serve() -> None:
     ensure_runtime_log_files()
     logger = logging.getLogger('start_client')
 
-    from core.client.ui_updater import check_for_ui_updates_async
-    manifest_url = os.environ.get('CLIENT_UI_MANIFEST_URL') or 'https://releases.dyauthreply.com/ui/manifest.json'
-    check_for_ui_updates_async(manifest_url)
+    if os.environ.get('CLIENT_UI_UPDATES_ENABLED', '').lower() in ('1', 'true', 'yes'):
+        from core.client.ui_updater import check_for_ui_updates_async
+
+        manifest_url = os.environ.get('CLIENT_UI_MANIFEST_URL') or 'https://releases.dyauthreply.com/ui/manifest.json'
+        check_for_ui_updates_async(manifest_url)
 
     port = int(os.environ.get('CLIENT_HTTP_PORT', '8765'))
     host = os.environ.get('CLIENT_HTTP_HOST', '127.0.0.1')

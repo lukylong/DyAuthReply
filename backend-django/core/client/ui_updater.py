@@ -27,6 +27,8 @@ def get_ui_updates_dir() -> Path:
 
 def get_active_ui_dist() -> str | None:
     """获取当前已解压的、有效的热更新 UI 目录。如果没有，返回 None。"""
+    if os.environ.get('CLIENT_UI_UPDATES_ENABLED', '').lower() not in ('1', 'true', 'yes'):
+        return None
     active_dir = get_ui_updates_dir() / 'active'
     index_html = active_dir / 'index.html'
     if active_dir.is_dir() and index_html.is_file():

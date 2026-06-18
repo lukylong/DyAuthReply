@@ -237,12 +237,13 @@ class _NodeSignPool:
 
 _pool: Optional[_NodeSignPool] = None
 _pool_lock = threading.Lock()
-_pool_failed = False  # 进程池初始化失败后不再反复重试，直接回退 execjs
+_pool_failed = False
+_pool_error = ''
 
 
 def _get_pool() -> Optional[_NodeSignPool]:
-    """取（必要时启动）签名进程池；不可用则返回 None（调用方回退 execjs）。"""
-    global _pool, _pool_failed
+    """取（必要时启动）签名进程池；不可用则返回 None。"""
+    global _pool, _pool_failed, _pool_error
     if not _pool_enabled() or _pool_failed:
         return None
     if _pool is not None:
@@ -252,22 +253,27 @@ def _get_pool() -> Optional[_NodeSignPool]:
             return _pool
         if not _POOL_RUNNER.exists() or not _DY_AB_JS.exists():
             _pool_failed = True
+            _pool_error = f"签名脚本缺失: runner={_POOL_RUNNER} dy_ab={_DY_AB_JS}"
             return None
         try:
             _pool = _NodeSignPool(_pool_size())
             logger.info(f"[sign.js] 常驻签名进程池启动成功 size={_pool_size()}")
         except Exception as e:  # noqa: BLE001
             _pool_failed = True
-            logger.warning(f"[sign.js] 常驻签名进程池启动失败，回退 PyExecJS: {e}")
+            _pool_error = f"{type(e).__name__}: {e}"
+            logger.warning(f"[sign.js] 常驻签名进程池启动失败: {_pool_error}")
             return None
     return _pool
 
 
 def _pool_or_ctx_call(method: str, *args: Any) -> str:
-    """优先走常驻进程池；池不可用时回退到 PyExecJS（每次起子进程）。"""
+    """优先走常驻进程池；客户端不回退 PyExecJS，避免误调用系统 Java runtime。"""
     pool = _get_pool()
     if pool is not None:
         return pool.call(method, list(args))
+    if os.environ.get('ZQ_ENV') == 'client':
+        detail = _pool_error or '签名进程池未启动'
+        raise JsSignerUnavailable(f"Node 签名进程不可用: {detail}")
     return _get_ctx().call(method, *args)
 
 
@@ -334,11 +340,13 @@ def shutdown_pool() -> None:
 def is_available() -> bool:
     """探测 JS 签名引擎是否可用（不抛异常，用于健康检查/灰度判断）。
 
-    优先探测常驻进程池；池不可用（禁用/启动失败）时回退探测 PyExecJS 编译。
+    优先探测常驻进程池；服务端开发环境可回退 PyExecJS 编译。
     """
     pool = _get_pool()
     if pool is not None:
         return True
+    if os.environ.get('ZQ_ENV') == 'client':
+        return False
     try:
         _get_ctx()
         return True

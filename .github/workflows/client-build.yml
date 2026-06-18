@@ -40,11 +40,29 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            platform_label: macOS
-            artifact_name: dyauthreply-macos
+            platform_label: macOS Apple Silicon
+            rust_target: aarch64-apple-darwin
+            artifact_name: dyauthreply-macos-aarch64
+            bundle: dmg
+            launcher_rosetta: false
+          - os: macos-latest
+            platform_label: macOS Intel
+            rust_target: x86_64-apple-darwin
+            artifact_name: dyauthreply-macos-x64
+            bundle: dmg
+            launcher_rosetta: true
           - os: windows-latest
-            platform_label: Windows
-            artifact_name: dyauthreply-windows
+            platform_label: Windows x64
+            rust_target: x86_64-pc-windows-msvc
+            artifact_name: dyauthreply-windows-x64
+            bundle: nsis
+            python_arch: x64
+          - os: windows-latest
+            platform_label: Windows x86
+            rust_target: i686-pc-windows-msvc
+            artifact_name: dyauthreply-windows-x86
+            bundle: nsis
+            python_arch: x86
 
     steps:
       - name: Checkout
@@ -54,6 +72,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          architecture: ${{ matrix.python_arch || 'x64' }}
           cache: pip
           cache-dependency-path: backend-django/requirements.txt
 
@@ -69,6 +88,9 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Add Rust cross-compilation target
+        run: rustup target add ${{ matrix.rust_target }}
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
@@ -81,8 +103,20 @@ jobs:
           pip install pyinstaller
           pip install -r backend-django/requirements.txt
 
-      - name: Build launcher sidecar
-        run: python scripts/client/build_launcher.py
+      - name: Build launcher sidecar (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          if [ "${{ matrix.launcher_rosetta }}" = "true" ]; then
+            arch -x86_64 python3 scripts/client/build_launcher.py --rust-target "${{ matrix.rust_target }}"
+          else
+            python3 scripts/client/build_launcher.py --rust-target "${{ matrix.rust_target }}"
+          fi
+
+      - name: Build launcher sidecar (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python scripts/client/build_launcher.py --rust-target "${{ matrix.rust_target }}"
 
       - name: Install npm dependencies
         shell: bash
@@ -92,7 +126,7 @@ jobs:
 
       - name: Build Tauri desktop app
         working-directory: dyauthreply-client/desktop
-        run: npm run tauri build
+        run: npm run tauri build -- --target ${{ matrix.rust_target }} --bundles ${{ matrix.bundle }}
 
       - name: Collect installer files only
         shell: bash
@@ -100,10 +134,13 @@ jobs:
           mkdir -p dist-installers
           shopt -s nullglob
           found=0
-          for pattern in \
-            "dyauthreply-client/desktop/src-tauri/target/release/bundle/dmg/*.dmg" \
-            "dyauthreply-client/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe" \
-            "dyauthreply-client/desktop/src-tauri/target/release/bundle/msi/*.msi"; do
+          bundle_root="dyauthreply-client/desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle"
+          if [ "${{ matrix.bundle }}" = "dmg" ]; then
+            patterns=("$bundle_root/dmg/*.dmg")
+          else
+            patterns=("$bundle_root/nsis/*-setup.exe")
+          fi
+          for pattern in "${patterns[@]}"; do
             for f in $pattern; do
               cp "$f" dist-installers/
               found=1
@@ -111,7 +148,7 @@ jobs:
             done
           done
           if [ "$found" -eq 0 ]; then
-            echo "No installer (.dmg / .exe / .msi) found under bundle/"
+            echo "No installer found under $bundle_root"
             exit 1
           fi
           ls -la dist-installers/
@@ -134,17 +171,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download macOS artifact
+      - name: Download all installer artifacts
         uses: actions/download-artifact@v4
         with:
-          name: dyauthreply-macos
-          path: release/macos
-
-      - name: Download Windows artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: dyauthreply-windows
-          path: release/windows
+          pattern: dyauthreply-*
+          merge-multiple: true
+          path: release/installers
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -155,6 +187,4 @@ jobs:
           prerelease: false
           generate_release_notes: true
           body_path: .github/client-release-notes.md
-          files: |
-            release/macos/*
-            release/windows/*
+          files: release/installers/*

@@ -50,7 +50,11 @@ cd ../desktop && npm run tauri build
 
 ## macOS 正式安装（Release 包）
 
-CI 构建包未 Apple 公证，首次打开可能提示无法验证开发者。安装 `.dmg` 并拖入「应用程序」后，在终端执行：
+根据 Mac 芯片选择对应 `.dmg`：
+- **Apple Silicon (M 系列)**：`DyAuthReply_*_aarch64.dmg`
+- **Intel 芯片**：`DyAuthReply_*_x64.dmg`
+
+CI 构建包未 Apple 公证，首次打开可能提示无法验证开发者。安装后拖入「应用程序」，在终端执行：
 
 ```bash
 /usr/bin/xattr -cr "/Applications/DyAuthReply.app"

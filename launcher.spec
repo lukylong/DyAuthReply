@@ -11,7 +11,7 @@ hidden_modules.extend(collect_submodules('application'))
 hidden_modules.extend(collect_submodules('core'))
 hidden_modules.extend(collect_submodules('scheduler'))
 hidden_modules.extend(collect_submodules('common'))
-hidden_modules.extend(['launcher_logging'])
+hidden_modules.extend(['launcher_logging', 'core.client.sign_probe'])
 
 # 打包时内嵌 Node.js（抖音 JS 签名必需；Tauri sidecar 无 shell PATH）
 node_binaries = []

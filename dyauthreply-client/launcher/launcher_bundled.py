@@ -179,11 +179,28 @@ def fix_worker_command_migration():
 
 fix_worker_command_migration()
 
+from core.client.runtime_logs import ensure_runtime_log_files
+
+ensure_runtime_log_files()
+
 import start_client
 
 print("[launcher_bundled] Preparing database on main thread...", flush=True)
 start_client.prepare_database()
 print("[launcher_bundled] Database ready.", flush=True)
+
+from core.client.sign_probe import probe_sign_engine
+
+sign_status = probe_sign_engine(force=True)
+if sign_status.get('sign_js_ready'):
+    print(f"[launcher_bundled] JS sign engine ready (node={sign_status.get('node_bin')})", flush=True)
+else:
+    print(
+        "[launcher_bundled] 警告: JS 签名引擎不可用，扫描收件箱/自动回复/手动发送将失败。"
+        f" 原因: {sign_status.get('sign_js_detail')}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def run_api():

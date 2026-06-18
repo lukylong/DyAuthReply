@@ -44,20 +44,12 @@ jobs:
             rust_target: aarch64-apple-darwin
             artifact_name: dyauthreply-macos-aarch64
             bundle: dmg
-            launcher_rosetta: false
-          # macOS Intel 暂跳过：ARM runner 无法可靠交叉打包 x86_64 PyInstaller sidecar
           - os: windows-latest
             platform_label: Windows x64
             rust_target: x86_64-pc-windows-msvc
             artifact_name: dyauthreply-windows-x64
             bundle: nsis
             python_arch: x64
-          - os: windows-latest
-            platform_label: Windows x86
-            rust_target: i686-pc-windows-msvc
-            artifact_name: dyauthreply-windows-x86
-            bundle: nsis
-            python_arch: x86
 
     steps:
       - name: Checkout
@@ -79,6 +71,7 @@ jobs:
           cache-dependency-path: |
             dyauthreply-client/client-ui/package-lock.json
             dyauthreply-client/desktop/package-lock.json
+            backend-django/core/douyin/runtime/transport/sign/js/package-lock.json
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -101,12 +94,7 @@ jobs:
       - name: Build launcher sidecar (macOS)
         if: runner.os == 'macOS'
         shell: bash
-        run: |
-          if [ "${{ matrix.launcher_rosetta }}" = "true" ]; then
-            arch -x86_64 python3 scripts/client/build_launcher.py --rust-target "${{ matrix.rust_target }}"
-          else
-            python3 scripts/client/build_launcher.py --rust-target "${{ matrix.rust_target }}"
-          fi
+        run: python3 scripts/client/build_launcher.py --rust-target "${{ matrix.rust_target }}"
 
       - name: Build launcher sidecar (Windows)
         if: runner.os == 'Windows'

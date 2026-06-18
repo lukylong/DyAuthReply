@@ -93,6 +93,8 @@ export interface HealthInfo {
   ok: boolean;
   env: string;
   service: string;
+  sign_js_ready?: boolean;
+  sign_js_detail?: string;
 }
 
 export interface BootstrapInfo {
@@ -150,10 +152,11 @@ export interface RuntimeLogTail {
   files: string[];
   content: string;
   message: string;
+  log_dir?: string;
 }
 
 export function listRuntimeLogFiles() {
-  return request<{ items: RuntimeLogFile[] }>('/runtime-logs/files', undefined, true);
+  return request<{ items: RuntimeLogFile[]; log_dir?: string }>('/runtime-logs/files', undefined, true);
 }
 
 export function tailRuntimeLogs(params?: { lines?: number; file?: string }) {

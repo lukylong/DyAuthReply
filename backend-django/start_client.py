@@ -81,12 +81,19 @@ def serve() -> None:
     """Run Uvicorn only (database must already be prepared)."""
     _ensure_django()
 
+    from core.client.runtime_logs import ensure_runtime_log_files
+    import logging
+
+    ensure_runtime_log_files()
+    logger = logging.getLogger('start_client')
+
     from core.client.ui_updater import check_for_ui_updates_async
     manifest_url = os.environ.get('CLIENT_UI_MANIFEST_URL') or 'https://releases.dyauthreply.com/ui/manifest.json'
     check_for_ui_updates_async(manifest_url)
 
     port = int(os.environ.get('CLIENT_HTTP_PORT', '8765'))
     host = os.environ.get('CLIENT_HTTP_HOST', '127.0.0.1')
+    logger.info('[start_client] DyAuthReply client API starting on %s:%s', host, port)
 
     import uvicorn
 

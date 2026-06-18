@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = ROOT / "launcher.spec"
 DIST_DIR = ROOT / "dist"
 BINARIES_DIR = ROOT / "dyauthreply-client" / "desktop" / "src-tauri" / "binaries"
+SIGN_JS_DIR = ROOT / "backend-django" / "core" / "douyin" / "runtime" / "transport" / "sign" / "js"
 
 RUST_TARGET_NAMES: dict[str, str] = {
     "aarch64-apple-darwin": "launcher-aarch64-apple-darwin",
@@ -59,8 +60,27 @@ def ensure_node_available() -> None:
         raise SystemExit("ERROR: Node.js not found; launcher build requires Node for signing runtime")
 
 
+def ensure_sign_js_deps() -> None:
+    """Install jsrsasign into sign/js/node_modules before PyInstaller bundles datas."""
+    jsrsasign = SIGN_JS_DIR / "node_modules" / "jsrsasign"
+    if jsrsasign.is_dir():
+        print(f"sign/js deps ready: {jsrsasign}")
+        return
+    if not (SIGN_JS_DIR / "package-lock.json").is_file():
+        raise SystemExit(f"ERROR: missing sign/js package-lock.json under {SIGN_JS_DIR}")
+    print(f"Installing sign/js npm deps under {SIGN_JS_DIR} ...")
+    subprocess.run(
+        ["npm", "ci", "--no-audit", "--no-fund"],
+        cwd=SIGN_JS_DIR,
+        check=True,
+    )
+    if not jsrsasign.is_dir():
+        raise SystemExit("ERROR: jsrsasign still missing after npm ci in sign/js")
+
+
 def build_launcher(rust_target: str | None = None) -> None:
     ensure_node_available()
+    ensure_sign_js_deps()
     node_path = shutil.which("node")
     print(f"Node: {subprocess.check_output(['node', '--version'], text=True).strip()} @ {node_path}")
     if rust_target:

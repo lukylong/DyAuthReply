@@ -265,6 +265,10 @@ LOGGING = {
     },
 }
 
+if ENV == 'client':
+    LOGGING['handlers']['file']['filename'] = SERVER_LOGS_FILE
+    LOGGING['handlers']['error']['filename'] = ERROR_LOGS_FILE
+
 # Password validation
 # https://docs.djangoproject.com/en/5.0/ref/settings/#auth-password-validators
 

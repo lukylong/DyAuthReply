@@ -54,6 +54,8 @@ async function loadDashboard() {
   }
 }
 
+const logDir = ref('');
+
 async function loadLogs() {
   logLoading.value = true;
   try {
@@ -61,8 +63,10 @@ async function loadLogs() {
       lines: 500,
       file: selectedLogFile.value || undefined,
     });
-    logContent.value = res.content || res.message || '（空）';
-    logHint.value = res.message || '';
+    const text = (res.content || '').trim();
+    logContent.value = text || res.message || '（空）';
+    if (res.log_dir) logDir.value = res.log_dir;
+    logHint.value = text && res.message ? res.message : '';
   } catch (e) {
     logContent.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -74,6 +78,7 @@ async function loadLogFiles() {
   try {
     const res = await listRuntimeLogFiles();
     logFiles.value = res.items ?? [];
+    if (res.log_dir) logDir.value = res.log_dir;
   } catch {
     logFiles.value = [];
   }
@@ -239,6 +244,7 @@ onUnmounted(() => {
         </select>
         <button type="button" class="btn ghost" :disabled="logLoading" @click="loadLogs">刷新日志</button>
       </div>
+      <p v-if="logDir" class="hint">日志目录：{{ logDir }}</p>
       <p v-if="logHint" class="hint">{{ logHint }}</p>
       <pre class="log-box">{{ logContent || '暂无日志' }}</pre>
     </section>

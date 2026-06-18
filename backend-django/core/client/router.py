@@ -50,12 +50,16 @@ client_api = NinjaAPI(
 
 @client_router.get('/health', auth=None, summary='健康检查')
 def health(request):
+    from core.client.sign_probe import probe_sign_engine
     from env import ENV
 
+    sign = probe_sign_engine()
     return {
         'ok': True,
         'env': ENV,
         'service': 'dyauthreply-client',
+        'sign_js_ready': sign.get('sign_js_ready', False),
+        'sign_js_detail': sign.get('sign_js_detail', ''),
     }
 
 
@@ -81,18 +85,20 @@ def bootstrap_info(request):
 @client_router.get('/runtime-logs/files', summary='运行日志文件列表（隐藏入口）')
 def runtime_log_files(request):
     from core.client.admin_auth import require_admin
-    from core.client.runtime_logs import list_runtime_log_files
+    from core.client.runtime_logs import ensure_runtime_log_files, list_runtime_log_files
 
     require_admin(request)
-    return {'items': list_runtime_log_files()}
+    log_dir = ensure_runtime_log_files()
+    return {'items': list_runtime_log_files(), 'log_dir': str(log_dir)}
 
 
 @client_router.get('/runtime-logs/tail', summary='运行日志 tail（隐藏入口）')
 def runtime_log_tail(request, lines: int = 400, file: str = ''):
     from core.client.admin_auth import require_admin
-    from core.client.runtime_logs import tail_runtime_logs
+    from core.client.runtime_logs import ensure_runtime_log_files, tail_runtime_logs
 
     require_admin(request)
+    ensure_runtime_log_files()
     safe_lines = max(50, min(int(lines or 400), 2000))
     return tail_runtime_logs(max_lines=safe_lines, file_name=file or None)
 

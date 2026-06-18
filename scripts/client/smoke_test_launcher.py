@@ -14,15 +14,20 @@ import urllib.request
 from pathlib import Path
 
 
-def _health_ready(port: int) -> bool:
+def _health_ready(port: int) -> tuple[bool, str]:
     health_url = f"http://127.0.0.1:{port}/api/client/v1/health"
     try:
         with urllib.request.urlopen(health_url, timeout=2) as resp:
             body = resp.read().decode("utf-8", errors="replace")
             payload = json.loads(body)
-            return resp.status == 200 and payload.get("ok") is True
-    except Exception:
-        return False
+            if resp.status != 200 or payload.get("ok") is not True:
+                return False, f"unexpected health payload: {payload!r}"
+            if payload.get("sign_js_ready") is not True:
+                detail = payload.get("sign_js_detail") or "unknown sign engine error"
+                return False, f"sign engine not ready: {detail}"
+            return True, ""
+    except Exception as exc:
+        return False, str(exc)
 
 
 def _terminate_tree(proc: subprocess.Popen[bytes | str], *, is_windows: bool) -> None:
@@ -145,11 +150,15 @@ def main() -> None:
 
         try:
             deadline = time.time() + max(1, args.timeout_seconds)
+            last_error = "health endpoint not ready"
             while time.time() < deadline:
-                if _health_ready(args.port):
+                ready, detail = _health_ready(args.port)
+                if ready:
                     print("[smoke] launcher health check passed")
                     _request_shutdown(args.port)
                     return
+                if detail:
+                    last_error = detail
                 if proc.poll() is not None:
                     break
                 time.sleep(1)
@@ -158,8 +167,11 @@ def main() -> None:
             _print_log_excerpt(data_dir)
             exit_code = proc.poll()
             if exit_code is None:
-                raise SystemExit("ERROR: launcher health check timed out")
-            raise SystemExit(f"ERROR: launcher exited before health check succeeded (code={exit_code})")
+                raise SystemExit(f"ERROR: launcher health/sign check timed out ({last_error})")
+            raise SystemExit(
+                f"ERROR: launcher exited before health/sign check succeeded "
+                f"(code={exit_code}, detail={last_error})"
+            )
         finally:
             _terminate_tree(proc, is_windows=sys.platform == "win32")
             shutil.rmtree(data_dir, ignore_errors=True)

@@ -478,3 +478,27 @@ FEISHU_APP_SECRET = ""  # 应用App Secret
 # ********************* 前端地址配置 ******************* #
 # ================================================= #
 FRONTEND_URL = "http://localhost:5555"  # 前端地址，用于消息跳转链接
+
+# ================================================= #
+# **************** 对外下载落地页配置 **************** #
+# ================================================= #
+# 根路径 / 的公开下载页所用链接。安装包/插件托管在独立的「公开」下载仓库，
+# 主仓库私有不影响外部下载。可被环境变量覆盖（换仓库/换资源名时无需改代码）。
+DOWNLOAD_DIST_REPO = os.environ.get('DOWNLOAD_DIST_REPO', 'lukylong/DyAuthReply-dist')
+DOWNLOAD_RELEASE_PAGE = os.environ.get(
+    'DOWNLOAD_RELEASE_PAGE', f'https://github.com/{DOWNLOAD_DIST_REPO}/releases/latest'
+)
+_dl_base = os.environ.get(
+    'DOWNLOAD_BASE_URL', f'https://github.com/{DOWNLOAD_DIST_REPO}/releases/latest/download'
+)
+DOWNLOAD_MACOS_URL = os.environ.get(
+    'DOWNLOAD_MACOS_URL', f"{_dl_base}/DyAuthReply-macos-aarch64.dmg"
+)
+DOWNLOAD_WINDOWS_URL = os.environ.get(
+    'DOWNLOAD_WINDOWS_URL', f"{_dl_base}/DyAuthReply-windows-x64-setup.exe"
+)
+DOWNLOAD_EXTENSION_URL = os.environ.get(
+    'DOWNLOAD_EXTENSION_URL', f"{_dl_base}/douyin-cred-extractor.zip"
+)
+# 管理后台入口（落地页提供跳转）
+DOWNLOAD_CONSOLE_URL = os.environ.get('DOWNLOAD_CONSOLE_URL', '/manage/')

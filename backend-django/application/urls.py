@@ -28,8 +28,21 @@ from django.views.static import serve
 import os
 from django.conf import settings
 from django.http import HttpResponse, Http404
+from django.shortcuts import render
 
 from application.main import api
+
+
+def download_landing(request):
+    """根路径 / 的公开下载落地页：安装包/插件下载 + 使用文档。无需登录。"""
+    return render(request, 'landing.html', {
+        'macos_url': settings.DOWNLOAD_MACOS_URL,
+        'windows_url': settings.DOWNLOAD_WINDOWS_URL,
+        'extension_url': settings.DOWNLOAD_EXTENSION_URL,
+        'release_page': settings.DOWNLOAD_RELEASE_PAGE,
+        'console_url': settings.DOWNLOAD_CONSOLE_URL,
+    })
+
 
 def serve_spa(request, path=''):
     # 忽略 API 和 WS（WebSocket）请求，由 Django 各自专门路由处理
@@ -58,6 +71,7 @@ def serve_spa(request, path=''):
     raise Http404("前端构建产物未找到，请构建前端并将 dist 目录复制到 backend-django 目录下。")
 
 urlpatterns = [
+    path('', download_landing),
     path('api/', api.urls),
     re_path(r'^manage(?:/(?P<path>.*))?$', serve_spa),
 ]

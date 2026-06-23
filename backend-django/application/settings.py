@@ -500,6 +500,10 @@ DOWNLOAD_EXTENSION_FILE = os.environ.get('DOWNLOAD_EXTENSION_FILE', 'douyin-cred
 DOWNLOAD_PUBLIC_BASE_URL = os.environ.get('DOWNLOAD_PUBLIC_BASE_URL', '').rstrip('/')
 # 安装包在服务器上的物理目录（建议挂载为持久化卷；nginx 也可直接 alias 此目录加速）
 DOWNLOAD_LOCAL_DIR = os.environ.get('DOWNLOAD_LOCAL_DIR', '/var/lib/zq-platform/downloads')
+# 可选：nginx X-Accel 直出加速。设为 nginx 内部 location（如 /_dl_internal）后，
+# /downloads/ 的字节流由 nginx sendfile 直出（支持断点续传），Django 仅发头并保留
+# 带版本号的下载文件名；留空则 Django 自己读盘返回。需在 nginx 配 internal location。
+DOWNLOAD_XACCEL_LOCATION = os.environ.get('DOWNLOAD_XACCEL_LOCATION', '').strip()
 
 if DOWNLOAD_PUBLIC_BASE_URL:
     _dl_base = f'{DOWNLOAD_PUBLIC_BASE_URL}/downloads'

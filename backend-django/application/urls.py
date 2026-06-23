@@ -26,9 +26,13 @@ Including another URLconf
 from django.urls import path, re_path
 from django.views.static import serve
 import os
+import re
 from django.conf import settings
 from django.http import HttpResponse, Http404
 from django.shortcuts import render
+
+# 下载文件名安全白名单：仅允许扁平的安全文件名，杜绝路径穿越与响应头注入
+_SAFE_DOWNLOAD_NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
 
 from application.main import api
 
@@ -65,11 +69,33 @@ def _versioned_download_name(name):
 def serve_download(request, name):
     """自托管安装包/插件下载：从 DOWNLOAD_LOCAL_DIR 提供文件（国内直连，规避 GitHub 慢）。
 
-    生产建议在 nginx 用 `location /downloads/ { alias <目录>/; }` 直出以支持断点续传；
-    此 Django 路由作为可移植兜底（无需改 nginx 即可工作）。
+    三种部署形态：
+    - 默认：Django 直接读盘返回（可移植兜底，无需改 nginx）。
+    - 设置 DOWNLOAD_XACCEL_LOCATION（如 /_dl_internal）：返回 X-Accel-Redirect，
+      由 nginx 的 internal location 直出（sendfile/断点续传），同时仍由 Django
+      控制带版本号的下载文件名——既快又能显示版本，且发版不用改 nginx。
+    - 也可在 nginx 用 `location /downloads/ { alias <目录>/; }` 完全绕过 Django
+      静态直出（最快，但下载文件名不含版本号）。
     """
-    response = serve(request, name, document_root=settings.DOWNLOAD_LOCAL_DIR)
-    versioned = _versioned_download_name(name)
+    # 仅允许扁平安全文件名，杜绝 ../ 路径穿越与 CRLF 响应头注入
+    base = os.path.basename(name)
+    if base != name or not _SAFE_DOWNLOAD_NAME.match(base):
+        raise Http404("Not Found")
+
+    versioned = _versioned_download_name(base)
+    xaccel = (getattr(settings, 'DOWNLOAD_XACCEL_LOCATION', '') or '').strip()
+
+    if xaccel:
+        file_path = os.path.join(settings.DOWNLOAD_LOCAL_DIR, base)
+        if not os.path.isfile(file_path):
+            raise Http404("Not Found")
+        response = HttpResponse()
+        # 交给 nginx：Content-Type/Length 由 nginx 直出阶段补齐
+        del response['Content-Type']
+        response['X-Accel-Redirect'] = xaccel.rstrip('/') + '/' + base
+    else:
+        response = serve(request, base, document_root=settings.DOWNLOAD_LOCAL_DIR)
+
     if versioned:
         response['Content-Disposition'] = f'attachment; filename="{versioned}"'
     return response

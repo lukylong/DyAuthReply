@@ -16,9 +16,11 @@ services:
       - backend-logs:/app/logs
       - douyin-data:/var/lib/zq-platform/douyin
       - backend-media:/app/media/file_manager
-      - downloads-data:/var/lib/zq-platform/downloads
+      # 默认命名卷；设 DOWNLOAD_HOST_DIR=/www/wwwroot/xxx 改为宿主机目录，便于 nginx 直出
+      - ${DOWNLOAD_HOST_DIR:-downloads-data}:/var/lib/zq-platform/downloads
     environment:
       UVICORN_RELOAD: ""
+      DOWNLOAD_XACCEL_LOCATION: ${DOWNLOAD_XACCEL_LOCATION:-}
 
   scheduler:
     image: ${DEPLOY_BACKEND_IMAGE}

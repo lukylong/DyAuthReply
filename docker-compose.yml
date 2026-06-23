@@ -80,6 +80,9 @@ x-backend-env: &backend-env
   # 落地页与客户端升级通道的下载链接走自己服务器，规避 GitHub 国内慢。
   DOWNLOAD_PUBLIC_BASE_URL: ${DOWNLOAD_PUBLIC_BASE_URL:-}
   DOWNLOAD_LOCAL_DIR: /var/lib/zq-platform/downloads
+  # 可选：nginx X-Accel 直出加速。设为 nginx 内部 location（如 /_dl_internal）后，
+  # /downloads/ 字节流由 nginx sendfile 直出，Django 仅发头并保留版本化下载文件名。
+  DOWNLOAD_XACCEL_LOCATION: ${DOWNLOAD_XACCEL_LOCATION:-}
   # 客户端最新版本（升级通道通告）；留空用代码默认值
   DOWNLOAD_LATEST_VERSION: ${DOWNLOAD_LATEST_VERSION:-}
 
@@ -190,7 +193,8 @@ services:
       - ./backend-django:/app
       - backend-logs:/app/logs
       - douyin-data:/var/lib/zq-platform/douyin
-      - downloads-data:/var/lib/zq-platform/downloads
+      # 默认命名卷；设 DOWNLOAD_HOST_DIR=/www/wwwroot/xxx 改为宿主机目录，便于 nginx 直出
+      - ${DOWNLOAD_HOST_DIR:-downloads-data}:/var/lib/zq-platform/downloads
     depends_on:
       postgres:
         condition: service_healthy

@@ -492,10 +492,10 @@ _dl_base = os.environ.get(
     'DOWNLOAD_BASE_URL', f'https://github.com/{DOWNLOAD_DIST_REPO}/releases/latest/download'
 )
 DOWNLOAD_MACOS_URL = os.environ.get(
-    'DOWNLOAD_MACOS_URL', f"{_dl_base}/DyAuthReply-macos-aarch64.dmg"
+    'DOWNLOAD_MACOS_URL', f"{_dl_base}/DAssistant-macos-aarch64.dmg"
 )
 DOWNLOAD_WINDOWS_URL = os.environ.get(
-    'DOWNLOAD_WINDOWS_URL', f"{_dl_base}/DyAuthReply-windows-x64-setup.exe"
+    'DOWNLOAD_WINDOWS_URL', f"{_dl_base}/DAssistant-windows-x64-setup.exe"
 )
 DOWNLOAD_EXTENSION_URL = os.environ.get(
     'DOWNLOAD_EXTENSION_URL', f"{_dl_base}/douyin-cred-extractor.zip"

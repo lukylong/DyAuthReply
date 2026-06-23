@@ -51,9 +51,9 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
     <!-- Sleek glassmorphic sidebar -->
     <aside class="sidebar glass-panel">
       <div class="brand">
-        <span class="logo-grad" @click="onHiddenAdminClick">Dy</span>
+        <span class="logo-grad" @click="onHiddenAdminClick">D</span>
         <div class="brand-text">
-          <h1>DyAuthReply</h1>
+          <h1>D助手</h1>
           <p>智能多号自动回复</p>
         </div>
       </div>

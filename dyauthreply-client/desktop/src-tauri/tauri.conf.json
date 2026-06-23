@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "DyAuthReply",
+  "productName": "D助手",
   "version": "0.1.9",
   "identifier": "com.dyauthreply.client",
   "build": {
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "DyAuthReply",
+        "title": "D助手",
         "width": 1180,
         "height": 760,
         "minWidth": 960,

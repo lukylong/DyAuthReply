@@ -66,7 +66,7 @@ async function startConnectionLoop() {
   // 超时失败
   status.value = 'failed';
   errorMessage.value =
-    '服务启动超时。请确认未重复打开多个 DyAuthReply 窗口，并查看日志：%APPDATA%\\DyAuthReply\\logs\\launcher.log（Windows）或 ~/Library/Application Support/DyAuthReply/logs/launcher.log（macOS）';
+    '服务启动超时。请确认未重复打开多个 D助手 窗口，并查看日志：%APPDATA%\\DyAuthReply\\logs\\launcher.log（Windows）或 ~/Library/Application Support/DyAuthReply/logs/launcher.log（macOS）';
 }
 
 async function retry() {
@@ -97,9 +97,9 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
       <!-- Logo区域 -->
       <div class="logo-section">
         <div class="logo-circle">
-          <span class="logo-text" @click="onHiddenAdminClick">Dy</span>
+          <span class="logo-text" @click="onHiddenAdminClick">D</span>
         </div>
-        <h1 class="app-title">DyAuthReply</h1>
+        <h1 class="app-title">D助手</h1>
         <p class="app-subtitle">智能多号自动回复</p>
       </div>
 

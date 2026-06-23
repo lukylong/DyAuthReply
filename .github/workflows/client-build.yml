@@ -159,6 +159,39 @@ jobs:
           fail_on_unmatched_files: true
           make_latest: false
 
+      # 同步到公开下载仓（主仓私有，外部无法直接下载其 Release）。
+      # 用 DIST_REPO_TOKEN（对 DyAuthReply-dist 有写权限的 PAT）把安装包以稳定文件名
+      # 上传到公开仓的滚动 client-latest Release，落地页 latest/download 链接始终有效。
+      - name: Sync installer to public download repo
+        if: startsWith(github.ref, 'refs/tags/client-v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
+          DIST_REPO_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
+          DIST_REPO: lukylong/DyAuthReply-dist
+        run: |
+          set -euo pipefail
+          if [ -z "${DIST_REPO_TOKEN:-}" ]; then
+            echo "DIST_REPO_TOKEN 未配置，跳过公开仓同步"
+            exit 0
+          fi
+          if [ "${{ matrix.bundle }}" = "dmg" ]; then
+            src=$(ls dist-installers/*.dmg | head -n1)
+            asset="DAssistant-macos-aarch64.dmg"
+          else
+            src=$(ls dist-installers/*-setup.exe | head -n1)
+            asset="DAssistant-windows-x64-setup.exe"
+          fi
+          cp "$src" "$asset"
+          # 确保滚动 release 存在（首次或被删除时自动创建并标记为 latest）
+          if ! gh release view client-latest --repo "$DIST_REPO" >/dev/null 2>&1; then
+            gh release create client-latest --repo "$DIST_REPO" --latest \
+              --title "D助手 客户端与插件下载" \
+              --notes "安装包随新版本滚动更新，本 Release 始终为最新版。"
+          fi
+          gh release upload client-latest "$asset" --repo "$DIST_REPO" --clobber
+          echo "已同步 $asset 到 $DIST_REPO (client-latest)"
+
       # PR / manual runs: keep a short-lived artifact for debugging only.
       - name: Upload installer artifacts
         if: "!startsWith(github.ref, 'refs/tags/client-v')"

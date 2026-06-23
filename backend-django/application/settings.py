@@ -488,18 +488,29 @@ DOWNLOAD_DIST_REPO = os.environ.get('DOWNLOAD_DIST_REPO', 'lukylong/DyAuthReply-
 DOWNLOAD_RELEASE_PAGE = os.environ.get(
     'DOWNLOAD_RELEASE_PAGE', f'https://github.com/{DOWNLOAD_DIST_REPO}/releases/latest'
 )
-_dl_base = os.environ.get(
-    'DOWNLOAD_BASE_URL', f'https://github.com/{DOWNLOAD_DIST_REPO}/releases/latest/download'
-)
-DOWNLOAD_MACOS_URL = os.environ.get(
-    'DOWNLOAD_MACOS_URL', f"{_dl_base}/DAssistant-macos-aarch64.dmg"
-)
-DOWNLOAD_WINDOWS_URL = os.environ.get(
-    'DOWNLOAD_WINDOWS_URL', f"{_dl_base}/DAssistant-windows-x64-setup.exe"
-)
-DOWNLOAD_EXTENSION_URL = os.environ.get(
-    'DOWNLOAD_EXTENSION_URL', f"{_dl_base}/douyin-cred-extractor.zip"
-)
+
+# 安装包/插件文件名（自托管与 GitHub 公开仓保持同名，换源只改前缀）
+DOWNLOAD_MACOS_FILE = os.environ.get('DOWNLOAD_MACOS_FILE', 'DAssistant-macos-aarch64.dmg')
+DOWNLOAD_WINDOWS_FILE = os.environ.get('DOWNLOAD_WINDOWS_FILE', 'DAssistant-windows-x64-setup.exe')
+DOWNLOAD_EXTENSION_FILE = os.environ.get('DOWNLOAD_EXTENSION_FILE', 'douyin-cred-extractor.zip')
+
+# 自建服务器托管（国内直连，规避 GitHub 慢）：
+# 设置 DOWNLOAD_PUBLIC_BASE_URL（如 https://pro.zhenyangtang.com.cn）后，下载链接走
+# 自己的 /downloads/ 目录；留空则回退到 GitHub 公开仓 releases/latest/download。
+DOWNLOAD_PUBLIC_BASE_URL = os.environ.get('DOWNLOAD_PUBLIC_BASE_URL', '').rstrip('/')
+# 安装包在服务器上的物理目录（建议挂载为持久化卷；nginx 也可直接 alias 此目录加速）
+DOWNLOAD_LOCAL_DIR = os.environ.get('DOWNLOAD_LOCAL_DIR', '/var/lib/zq-platform/downloads')
+
+if DOWNLOAD_PUBLIC_BASE_URL:
+    _dl_base = f'{DOWNLOAD_PUBLIC_BASE_URL}/downloads'
+else:
+    _dl_base = os.environ.get(
+        'DOWNLOAD_BASE_URL', f'https://github.com/{DOWNLOAD_DIST_REPO}/releases/latest/download'
+    )
+
+DOWNLOAD_MACOS_URL = os.environ.get('DOWNLOAD_MACOS_URL', f"{_dl_base}/{DOWNLOAD_MACOS_FILE}")
+DOWNLOAD_WINDOWS_URL = os.environ.get('DOWNLOAD_WINDOWS_URL', f"{_dl_base}/{DOWNLOAD_WINDOWS_FILE}")
+DOWNLOAD_EXTENSION_URL = os.environ.get('DOWNLOAD_EXTENSION_URL', f"{_dl_base}/{DOWNLOAD_EXTENSION_FILE}")
 # 管理后台入口（落地页提供跳转）
 DOWNLOAD_CONSOLE_URL = os.environ.get('DOWNLOAD_CONSOLE_URL', '/manage/')
 
@@ -508,7 +519,7 @@ DOWNLOAD_CONSOLE_URL = os.environ.get('DOWNLOAD_CONSOLE_URL', '/manage/')
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION', '0.1.10')
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.10'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）

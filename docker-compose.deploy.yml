@@ -16,6 +16,7 @@ services:
       - backend-logs:/app/logs
       - douyin-data:/var/lib/zq-platform/douyin
       - backend-media:/app/media/file_manager
+      - downloads-data:/var/lib/zq-platform/downloads
     environment:
       UVICORN_RELOAD: ""
 

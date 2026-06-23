@@ -75,6 +75,13 @@ x-backend-env: &backend-env
   DOUYIN_SESSION_STALE_SECONDS: "${DOUYIN_SESSION_STALE_SECONDS:-120}"
   # 文件存储：Docker 部署默认本地磁盘（未部署 MinIO 时勿用 minio）
   FILE_STORAGE_TYPE: ${FILE_STORAGE_TYPE:-local}
+  # --- 对外下载/升级通道 ---
+  # 设置 DOWNLOAD_PUBLIC_BASE_URL（如 https://pro.zhenyangtang.com.cn）后，
+  # 落地页与客户端升级通道的下载链接走自己服务器，规避 GitHub 国内慢。
+  DOWNLOAD_PUBLIC_BASE_URL: ${DOWNLOAD_PUBLIC_BASE_URL:-}
+  DOWNLOAD_LOCAL_DIR: /var/lib/zq-platform/downloads
+  # 客户端最新版本（升级通道通告）；留空用代码默认值
+  DOWNLOAD_LATEST_VERSION: ${DOWNLOAD_LATEST_VERSION:-}
 
 # 抖音 worker 公共环境（3 分片 + Redis 租约，防止多实例重复托管同一账号）
 x-douyin-worker-env: &douyin-worker-env
@@ -183,6 +190,7 @@ services:
       - ./backend-django:/app
       - backend-logs:/app/logs
       - douyin-data:/var/lib/zq-platform/douyin
+      - downloads-data:/var/lib/zq-platform/downloads
     depends_on:
       postgres:
         condition: service_healthy
@@ -269,6 +277,7 @@ volumes:
   backend-logs:
   backend-media:
   douyin-data:
+  downloads-data:
   web-node-modules:
   web-apps-node-modules:
 

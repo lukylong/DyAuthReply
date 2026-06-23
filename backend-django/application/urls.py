@@ -44,6 +44,15 @@ def download_landing(request):
     })
 
 
+def serve_download(request, name):
+    """自托管安装包/插件下载：从 DOWNLOAD_LOCAL_DIR 提供文件（国内直连，规避 GitHub 慢）。
+
+    生产建议在 nginx 用 `location /downloads/ { alias <目录>/; }` 直出以支持断点续传；
+    此 Django 路由作为可移植兜底（无需改 nginx 即可工作）。
+    """
+    return serve(request, name, document_root=settings.DOWNLOAD_LOCAL_DIR)
+
+
 def serve_spa(request, path=''):
     # 忽略 API 和 WS（WebSocket）请求，由 Django 各自专门路由处理
     if path.startswith('api/') or path.startswith('ws/'):
@@ -72,6 +81,7 @@ def serve_spa(request, path=''):
 
 urlpatterns = [
     path('', download_landing),
+    re_path(r'^downloads/(?P<name>.+)$', serve_download),
     path('api/', api.urls),
     re_path(r'^manage(?:/(?P<path>.*))?$', serve_spa),
 ]

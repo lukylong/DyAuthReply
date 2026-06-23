@@ -7,9 +7,23 @@ import os
 import sys
 
 
+def _force_utf8_stdio() -> None:
+    """Windows 控制台/管道默认 GBK，迁移或命令打印非 GBK 字符（如 ✓）会抛
+    UnicodeEncodeError 导致启动失败。统一把 stdio 重配为 UTF-8 并对无法编码的
+    字符做替换，根治这类崩溃。"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding='utf-8', errors='replace')  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
 def _ensure_django() -> None:
+    _force_utf8_stdio()
     os.environ.setdefault('ZQ_ENV', 'client')
     os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'application.settings')
+    os.environ.setdefault('PYTHONUTF8', '1')
+    os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
     import django
     from django.apps import apps
 

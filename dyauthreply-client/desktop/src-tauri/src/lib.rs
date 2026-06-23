@@ -169,7 +169,24 @@ fn backend_status() -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+
+    // 单实例守卫（仅桌面）：再次启动时唤回已运行的窗口，避免第二个进程
+    // 重复拉起后端导致 8765 端口占用 (WSAEADDRINUSE / Errno 10048)。
+    // 必须在其它插件之前注册。
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }));
+    }
+
+    let app = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .on_window_event(|window, event| match event {

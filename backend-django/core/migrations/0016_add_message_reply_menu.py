@@ -26,7 +26,7 @@ def add_message_reply_menu_and_permission(apps, schema_editor):
     ).first()
 
     if existing_menu:
-        print(f"✓ 菜单已存在: 消息回复 (ID: {existing_menu.id})")
+        print(f"[OK] 菜单已存在: 消息回复 (ID: {existing_menu.id})")
         created_menu = existing_menu
     else:
         # 创建消息回复菜单
@@ -44,7 +44,7 @@ def add_message_reply_menu_and_permission(apps, schema_editor):
             hideInMenu=False,
             is_deleted=False,
         )
-        print(f"✓ 已创建菜单: 消息回复 (ID: {menu_id})")
+        print(f"[OK] 已创建菜单: 消息回复 (ID: {menu_id})")
 
     # 检查权限是否已存在
     existing_perm = Permission.objects.filter(
@@ -53,7 +53,7 @@ def add_message_reply_menu_and_permission(apps, schema_editor):
     ).first()
 
     if existing_perm:
-        print(f"✓ 权限已存在: 抖音消息回复 (ID: {existing_perm.id})")
+        print(f"[OK] 权限已存在: 抖音消息回复 (ID: {existing_perm.id})")
     else:
         # 创建消息回复权限，关联到菜单
         permission_id = str(uuid.uuid4())
@@ -66,7 +66,7 @@ def add_message_reply_menu_and_permission(apps, schema_editor):
             is_active=True,
             is_deleted=False,
         )
-        print(f"✓ 已创建权限: 抖音消息回复 (ID: {permission_id}, code: douyin:message-reply:view)")
+        print(f"[OK] 已创建权限: 抖音消息回复 (ID: {permission_id}, code: douyin:message-reply:view)")
 
 
 def reverse_message_reply_menu_and_permission(apps, schema_editor):
@@ -79,14 +79,14 @@ def reverse_message_reply_menu_and_permission(apps, schema_editor):
         path='/douyin/message-reply',
         is_deleted=False
     ).update(is_deleted=True)
-    print(f"✓ 已删除 {deleted_menus} 个菜单")
+    print(f"[OK] 已删除 {deleted_menus} 个菜单")
 
     # 删除权限
     deleted_perms = Permission.objects.filter(
         code='douyin:message-reply:view',
         is_deleted=False
     ).update(is_deleted=True)
-    print(f"✓ 已删除 {deleted_perms} 个权限")
+    print(f"[OK] 已删除 {deleted_perms} 个权限")
 
 
 class Migration(migrations.Migration):

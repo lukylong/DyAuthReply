@@ -73,10 +73,29 @@ export async function batchStopSession(ids: string[]) {
   return requestClient.post('/api/core/douyin/session/batch/stop', { ids });
 }
 
-export async function getSessionConversations(sessionId: string) {
-  return requestClient.get<DouyinConversationItem[]>(
+export interface DouyinConversationListResponse {
+  items: DouyinConversationItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  has_more: boolean;
+}
+
+export async function getSessionConversations(
+  sessionId: string,
+  params?: { page?: number; page_size?: number; keyword?: string },
+) {
+  const res = await requestClient.get<DouyinConversationListResponse>(
     `/api/core/douyin/session/${sessionId}/conversations`,
+    {
+      params: {
+        page: params?.page ?? 1,
+        page_size: params?.page_size ?? 100,
+        keyword: params?.keyword || undefined,
+      },
+    },
   );
+  return res.items;
 }
 
 export async function getSessionMessages(sessionId: string, conversationId: string) {

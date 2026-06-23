@@ -21,7 +21,7 @@ from core.douyin.douyin_session_model import DouyinSession
 from core.douyin.runtime import command_publisher
 from core.douyin.douyin_session_schema import (
     DouyinAutoReplyTestIn,
-    DouyinConversationItemOut,
+    DouyinConversationListOut,
     DouyinManualReplyIn,
     DouyinMessageItemOut,
     DouyinSessionBatchIdsIn,
@@ -60,28 +60,34 @@ def get_session(request, session_id: str):
 
 @router.get(
     "/session/{session_id}/conversations",
-    response=List[DouyinConversationItemOut],
+    response=DouyinConversationListOut,
     summary="获取该账号最近会话列表",
 )
-def list_session_conversations(request, session_id: str):
+def list_session_conversations(
+    request,
+    session_id: str,
+    page: int = 1,
+    page_size: int = 50,
+    keyword: str = '',
+):
+    from core.douyin.douyin_conversation_utils import paginate_account_conversations
+
     session = get_object_or_404(DouyinSession, id=session_id)
-    rows = list(
-        DouyinConversation.objects
-        .filter(account_id=session.account_id)
-        .order_by('-last_message_at', '-sys_create_datetime')[:100]
+    items, total, has_more = paginate_account_conversations(
+        session.account_id,
+        page=page,
+        page_size=page_size,
+        keyword=keyword,
     )
-    deduped: list[DouyinConversation] = []
-    seen: set[str] = set()
-    for row in rows:
-        if row.peer_sec_uid.startswith('fallback_') and row.peer_nickname:
-            key = f"nick:{row.peer_nickname}"
-        else:
-            key = f"uid:{row.peer_sec_uid}"
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(row)
-    return deduped[:50]
+    page = max(1, int(page or 1))
+    page_size = min(max(1, int(page_size or 50)), 100)
+    return {
+        'items': items,
+        'total': total,
+        'page': page,
+        'page_size': page_size,
+        'has_more': has_more,
+    }
 
 
 @router.get(

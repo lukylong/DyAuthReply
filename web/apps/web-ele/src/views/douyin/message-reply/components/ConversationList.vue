@@ -1,7 +1,7 @@
 <script lang="ts" setup>
 import type { DouyinConversationItem } from '#/api/core/douyin';
 
-import { computed, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 
 import {
   ElAvatar,
@@ -19,23 +19,40 @@ const props = defineProps<{
   conversations: DouyinConversationItem[];
   activeConversationId?: string;
   loading?: boolean;
+  loadingMore?: boolean;
+  hasMore?: boolean;
+  total?: number;
 }>();
 
 const emit = defineEmits<{
   selectConversation: [conversationId: string];
+  search: [];
+  loadMore: [];
 }>();
 
 const searchKeyword = defineModel<string>('searchKeyword', { default: '' });
+const listBodyRef = ref<HTMLElement | null>(null);
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
-const filteredConversations = computed(() => {
-  if (!searchKeyword.value) return props.conversations;
-  const keyword = searchKeyword.value.toLowerCase();
-  return props.conversations.filter(
-    (conv) =>
-      conv.peer_nickname?.toLowerCase().includes(keyword) ||
-      conv.peer_sec_uid.toLowerCase().includes(keyword),
-  );
+const countLabel = computed(() => {
+  const loaded = props.conversations.length;
+  const total = props.total ?? loaded;
+  if (total <= 0) return '';
+  if (loaded >= total) return String(total);
+  return `${loaded}/${total}`;
 });
+
+function onSearchInput() {
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => emit('search'), 300);
+}
+
+function onListScroll() {
+  const el = listBodyRef.value;
+  if (!el || !props.hasMore || props.loadingMore) return;
+  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 80;
+  if (nearBottom) emit('loadMore');
+}
 
 // 生成显示名称
 function getDisplayName(conv: DouyinConversationItem): string {
@@ -106,26 +123,29 @@ watch(
     <div class="list-header">
       <div class="header-title">
         <span>消息列表</span>
-        <ElTag v-if="conversations.length > 0" size="small" type="info">
-          {{ filteredConversations.length }}
+        <ElTag v-if="countLabel" size="small" type="info">
+          {{ countLabel }}
         </ElTag>
       </div>
 
-      <!-- 搜索框 -->
+      <!-- 搜索框（服务端搜索） -->
       <ElInput
         v-model="searchKeyword"
-        placeholder="搜索会话"
+        placeholder="搜索昵称 / 抖音号"
         :prefix-icon="Search"
         clearable
         size="small"
         class="search-input"
+        @input="onSearchInput"
       />
     </div>
 
     <!-- 会话列表 -->
     <div
+      ref="listBodyRef"
       v-loading="loading"
       class="list-body"
+      @scroll="onListScroll"
     >
       <div v-if="!accountId" class="empty-state">
         <ElEmpty
@@ -134,21 +154,21 @@ watch(
         />
       </div>
 
-      <div v-else-if="filteredConversations.length === 0" class="empty-state">
+      <div v-else-if="conversations.length === 0 && !loading" class="empty-state">
         <ElEmpty
           :description="searchKeyword ? '未找到匹配的会话' : '暂无会话'"
           :image-size="100"
         />
       </div>
 
-      <div
-        v-for="conv in filteredConversations"
-        v-else
-        :key="conv.id"
-        class="conversation-item"
-        :class="{ active: activeConversationId === conv.id }"
-        @click="onSelectConversation(conv)"
-      >
+      <template v-else>
+        <div
+          v-for="conv in conversations"
+          :key="conv.id"
+          class="conversation-item"
+          :class="{ active: activeConversationId === conv.id }"
+          @click="onSelectConversation(conv)"
+        >
         <ElBadge
           v-if="conv.unread_count && conv.unread_count > 0"
           :value="conv.unread_count"
@@ -189,7 +209,10 @@ watch(
             </span>
           </div>
         </div>
-      </div>
+        </div>
+        <div v-if="loadingMore" class="load-more-tip">加载更多…</div>
+        <div v-else-if="hasMore" class="load-more-tip muted">向下滚动加载更多</div>
+      </template>
     </div>
   </div>
 </template>
@@ -230,6 +253,17 @@ watch(
   flex: 1;
   overflow-y: auto;
   padding: 8px;
+}
+
+.load-more-tip {
+  text-align: center;
+  padding: 10px 8px 14px;
+  font-size: 12px;
+  color: #8c8c8c;
+}
+
+.load-more-tip.muted {
+  opacity: 0.85;
 }
 
 .empty-state {

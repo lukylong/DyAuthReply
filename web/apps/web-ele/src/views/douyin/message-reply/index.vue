@@ -35,6 +35,12 @@ const messagesLoading = ref(false);
 // 会话列表和消息列表
 const conversations = ref<DouyinConversationItem[]>([]);
 const messages = ref<DouyinMessageItem[]>([]);
+const convKeyword = ref('');
+const convPage = ref(1);
+const convTotal = ref(0);
+const convHasMore = ref(false);
+const loadingMoreConversations = ref(false);
+const CONV_PAGE_SIZE = 50;
 
 // 当前选中的会话对象
 const activeConversation = computed(
@@ -52,26 +58,80 @@ async function onAccountSelect(accountId: string) {
   activeAccountId.value = accountId;
   activeConversationId.value = '';
   messages.value = [];
+  convKeyword.value = '';
+  convPage.value = 1;
+  convTotal.value = 0;
+  convHasMore.value = false;
 
-  // 加载该账号的会话列表
   await loadConversations();
 }
 
 /**
- * 加载会话列表
+ * 加载会话列表（支持分页、搜索、静默刷新）
  */
-async function loadConversations() {
+async function loadConversations(options?: { silent?: boolean; append?: boolean }) {
   if (!activeAccountId.value) return;
 
-  conversationsLoading.value = true;
-  try {
-    conversations.value = await getAccountConversations(activeAccountId.value);
-  } catch (error: any) {
-    ElMessage.error(error.message || '加载会话列表失败');
-    conversations.value = [];
-  } finally {
-    conversationsLoading.value = false;
+  const silent = options?.silent ?? false;
+  const append = options?.append ?? false;
+
+  if (append) {
+    if (!convHasMore.value || loadingMoreConversations.value || conversationsLoading.value) return;
+    loadingMoreConversations.value = true;
+    try {
+      const nextPage = convPage.value + 1;
+      const res = await getAccountConversations(activeAccountId.value, {
+        page: nextPage,
+        page_size: CONV_PAGE_SIZE,
+        keyword: convKeyword.value.trim() || undefined,
+      });
+      const existing = new Set(conversations.value.map((c) => c.id));
+      for (const item of res.items) {
+        if (!existing.has(item.id)) conversations.value.push(item);
+      }
+      convPage.value = nextPage;
+      convTotal.value = res.total;
+      convHasMore.value = res.has_more;
+    } catch (error: any) {
+      if (!silent) ElMessage.error(error.message || '加载更多会话失败');
+    } finally {
+      loadingMoreConversations.value = false;
+    }
+    return;
   }
+
+  if (!silent) conversationsLoading.value = true;
+  try {
+    const refreshSize =
+      silent && conversations.value.length > CONV_PAGE_SIZE
+        ? conversations.value.length
+        : CONV_PAGE_SIZE;
+    const res = await getAccountConversations(activeAccountId.value, {
+      page: 1,
+      page_size: refreshSize,
+      keyword: convKeyword.value.trim() || undefined,
+    });
+    conversations.value = res.items;
+    convTotal.value = res.total;
+    convHasMore.value = res.has_more;
+    if (!silent) {
+      convPage.value = Math.max(1, Math.ceil(res.items.length / CONV_PAGE_SIZE));
+    }
+  } catch (error: any) {
+    if (!silent) ElMessage.error(error.message || '加载会话列表失败');
+    if (!silent) conversations.value = [];
+  } finally {
+    if (!silent) conversationsLoading.value = false;
+  }
+}
+
+function onConversationSearch() {
+  convPage.value = 1;
+  void loadConversations();
+}
+
+function onLoadMoreConversations() {
+  void loadConversations({ silent: true, append: true });
 }
 
 /**
@@ -220,7 +280,7 @@ let replyTimer: null | ReturnType<typeof setInterval> = null;
 async function pollReplyData() {
   if (!activeAccountId.value) return;
   try {
-    conversations.value = await getAccountConversations(activeAccountId.value);
+    await loadConversations({ silent: true });
     if (activeConversationId.value) {
       messages.value = await getAccountMessages(
         activeAccountId.value,
@@ -259,11 +319,17 @@ onUnmounted(() => {
       />
 
       <ConversationList
+        v-model:search-keyword="convKeyword"
         :account-id="activeAccountId"
         :conversations="conversations"
         :active-conversation-id="activeConversationId"
         :loading="conversationsLoading"
+        :loading-more="loadingMoreConversations"
+        :has-more="convHasMore"
+        :total="convTotal"
         @select-conversation="onConversationSelect"
+        @search="onConversationSearch"
+        @load-more="onLoadMoreConversations"
       />
 
       <ChatPanel

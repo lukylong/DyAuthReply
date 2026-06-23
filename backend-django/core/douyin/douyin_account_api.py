@@ -34,7 +34,7 @@ from core.douyin.douyin_account_schema import (
 )
 # 导入消息回复模块需要的 schema
 from core.douyin.douyin_session_schema import (
-    DouyinConversationItemOut,
+    DouyinConversationListOut,
     DouyinManualReplyIn,
     DouyinMessageItemOut,
     DouyinSessionControlOut,
@@ -810,37 +810,38 @@ def trigger_logout(request, account_id: str):
 
 @router.get(
     "/account/{account_id}/conversations",
-    response=List[DouyinConversationItemOut],
+    response=DouyinConversationListOut,
     summary="获取账号的会话列表（消息回复模块）",
 )
-def list_account_conversations(request, account_id: str):
+def list_account_conversations(
+    request,
+    account_id: str,
+    page: int = 1,
+    page_size: int = 50,
+    keyword: str = '',
+):
     """
-    获取指定账号的所有会话列表（用于消息回复界面）
-    不依赖 session，直接通过 account_id 查询
+    获取指定账号的会话列表（用于消息回复界面），支持分页与关键词搜索。
+    不依赖 session，直接通过 account_id 查询。
     """
-    from core.douyin.douyin_conversation_model import DouyinConversation
+    from core.douyin.douyin_conversation_utils import paginate_account_conversations
 
     account = get_object_or_404(DouyinAccount, id=account_id)
-    rows = list(
-        DouyinConversation.objects
-        .filter(account_id=account.id)
-        .order_by('-last_message_at', '-sys_create_datetime')[:100]
+    items, total, has_more = paginate_account_conversations(
+        account.id,
+        page=page,
+        page_size=page_size,
+        keyword=keyword,
     )
-
-    # 去重逻辑（与 session API 保持一致）
-    deduped: list = []
-    seen: set[str] = set()
-    for row in rows:
-        if row.peer_sec_uid.startswith('fallback_') and row.peer_nickname:
-            key = f"nick:{row.peer_nickname}"
-        else:
-            key = f"uid:{row.peer_sec_uid}"
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(row)
-
-    return deduped[:50]
+    page = max(1, int(page or 1))
+    page_size = min(max(1, int(page_size or 50)), 100)
+    return {
+        'items': items,
+        'total': total,
+        'page': page,
+        'page_size': page_size,
+        'has_more': has_more,
+    }
 
 
 @router.get(

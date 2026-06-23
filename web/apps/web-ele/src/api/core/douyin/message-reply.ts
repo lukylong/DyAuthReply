@@ -2,12 +2,30 @@ import type { DouyinConversationItem, DouyinMessageItem } from './session';
 
 import { requestClient } from '#/api/request';
 
+export interface DouyinConversationListResponse {
+  items: DouyinConversationItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  has_more: boolean;
+}
+
 /**
- * 获取账号的会话列表（消息回复模块专用）
+ * 获取账号的会话列表（消息回复模块专用，支持分页与搜索）
  */
-export async function getAccountConversations(accountId: string) {
-  return requestClient.get<DouyinConversationItem[]>(
+export async function getAccountConversations(
+  accountId: string,
+  params?: { page?: number; page_size?: number; keyword?: string },
+) {
+  return requestClient.get<DouyinConversationListResponse>(
     `/api/core/douyin/account/${accountId}/conversations`,
+    {
+      params: {
+        page: params?.page ?? 1,
+        page_size: params?.page_size ?? 50,
+        keyword: params?.keyword || undefined,
+      },
+    },
   );
 }
 
@@ -65,4 +83,3 @@ export async function refreshConversationUserApi(
     `/api/core/douyin/account/${accountId}/conversation/${conversationId}/refresh-user`,
   );
 }
-

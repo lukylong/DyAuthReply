@@ -21,16 +21,22 @@ const messages = ref<MessageItem[]>([]);
 const replyText = ref('');
 const messagesEl = ref<HTMLElement | null>(null);
 const messagesEndRef = ref<HTMLElement | null>(null);
-const convsColEl = ref<HTMLElement | null>(null);
+const convsScrollEl = ref<HTMLElement | null>(null);
 const stickToBottom = ref(true);
 
 const loadingAccounts = ref(true);
 const loadingConversations = ref(false);
+const loadingMoreConvs = ref(false);
 const loadingMessages = ref(false);
 const syncing = ref(false);
 const sending = ref(false);
 const error = ref('');
 const toast = ref('');
+const convKeyword = ref('');
+const convPage = ref(1);
+const convTotal = ref(0);
+const convHasMore = ref(false);
+const CONV_PAGE_SIZE = 50;
 const { licenseStatus: license, ensureStatus } = useClientLicense();
 
 const activeAccount = computed(() =>
@@ -39,8 +45,14 @@ const activeAccount = computed(() =>
 const activeConversation = computed(() =>
   conversations.value.find((c) => c.id === activeConversationId.value),
 );
+const convCountLabel = computed(() => {
+  if (convTotal.value <= 0) return '';
+  if (conversations.value.length >= convTotal.value) return `${convTotal.value}`;
+  return `${conversations.value.length}/${convTotal.value}`;
+});
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+let convSearchTimer: ReturnType<typeof setTimeout> | null = null;
 let convSig = '';
 let msgSig = '';
 
@@ -134,41 +146,70 @@ function onMessagesScroll() {
 }
 
 function resetConversationsScroll() {
-  const el = convsColEl.value;
+  const el = convsScrollEl.value;
   if (el) el.scrollTop = 0;
 }
 
-async function loadAccounts() {
-  loadingAccounts.value = true;
-  error.value = '';
-  try {
-    await ensureStatus();
-    accounts.value = await listAccounts();
-    if (!activeAccountId.value && accounts.value.length > 0) {
-      activeAccountId.value = accounts.value[0].id;
-    }
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e);
-  } finally {
-    loadingAccounts.value = false;
-  }
-}
-
-async function loadConversations(silent = false) {
+async function loadConversations(silent = false, append = false) {
   if (!activeAccountId.value) {
     conversations.value = [];
+    convTotal.value = 0;
+    convHasMore.value = false;
     return;
   }
+
+  if (append) {
+    if (!convHasMore.value || loadingMoreConvs.value || loadingConversations.value) return;
+    loadingMoreConvs.value = true;
+    try {
+      const nextPage = convPage.value + 1;
+      const res = await listConversations(activeAccountId.value, {
+        page: nextPage,
+        page_size: CONV_PAGE_SIZE,
+        keyword: convKeyword.value.trim() || undefined,
+      });
+      const existing = new Set(conversations.value.map((c) => c.id));
+      for (const item of res.items) {
+        if (!existing.has(item.id)) conversations.value.push(item);
+      }
+      conversations.value = sortConversations(conversations.value);
+      convPage.value = nextPage;
+      convTotal.value = res.total;
+      convHasMore.value = res.has_more;
+    } catch (e) {
+      if (!silent) toast.value = e instanceof Error ? e.message : String(e);
+    } finally {
+      loadingMoreConvs.value = false;
+    }
+    return;
+  }
+
   if (!silent) loadingConversations.value = true;
   else syncing.value = true;
   try {
-    const items = sortConversations(await listConversations(activeAccountId.value));
+    const refreshSize =
+      silent && conversations.value.length > CONV_PAGE_SIZE
+        ? conversations.value.length
+        : CONV_PAGE_SIZE;
+    const res = await listConversations(activeAccountId.value, {
+      page: 1,
+      page_size: refreshSize,
+      keyword: convKeyword.value.trim() || undefined,
+    });
+    const items = sortConversations(res.items);
     const sig = conversationsSignature(items);
     if (sig !== convSig) {
       convSig = sig;
       conversations.value = items;
-      await nextTick();
-      resetConversationsScroll();
+      if (!silent) {
+        await nextTick();
+        resetConversationsScroll();
+      }
+    }
+    convTotal.value = res.total;
+    convHasMore.value = res.has_more;
+    if (!silent) {
+      convPage.value = Math.max(1, Math.ceil(items.length / CONV_PAGE_SIZE));
     }
     if (
       activeConversationId.value &&
@@ -188,6 +229,37 @@ async function loadConversations(silent = false) {
   } finally {
     if (!silent) loadingConversations.value = false;
     syncing.value = false;
+  }
+}
+
+function onConvsScroll() {
+  const el = convsScrollEl.value;
+  if (!el || !convHasMore.value || loadingMoreConvs.value) return;
+  if (isNearBottom(el, 80)) void loadConversations(true, true);
+}
+
+function onConvSearchInput() {
+  if (convSearchTimer) clearTimeout(convSearchTimer);
+  convSearchTimer = setTimeout(() => {
+    convPage.value = 1;
+    convSig = '';
+    void loadConversations();
+  }, 300);
+}
+
+async function loadAccounts() {
+  loadingAccounts.value = true;
+  error.value = '';
+  try {
+    await ensureStatus();
+    accounts.value = await listAccounts();
+    if (!activeAccountId.value && accounts.value.length > 0) {
+      activeAccountId.value = accounts.value[0].id;
+    }
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    loadingAccounts.value = false;
   }
 }
 
@@ -253,6 +325,10 @@ function selectAccount(id: string) {
   messages.value = [];
   convSig = '';
   msgSig = '';
+  convPage.value = 1;
+  convTotal.value = 0;
+  convHasMore.value = false;
+  convKeyword.value = '';
   peerResolveAttempted.clear();
 }
 
@@ -386,6 +462,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopPolling();
+  if (convSearchTimer) clearTimeout(convSearchTimer);
   document.removeEventListener('visibilitychange', onVisibilityChange);
 });
 </script>
@@ -425,19 +502,33 @@ onUnmounted(() => {
     </aside>
 
     <!-- Middle Column: Conversations -->
-    <aside ref="convsColEl" class="col convs">
+    <aside class="col convs">
       <div class="col-head">
-        <span>会话列表</span>
+        <span>会话列表<span v-if="convCountLabel" class="conv-count"> · {{ convCountLabel }}</span></span>
         <div class="status-wrap">
           <span v-if="loadingConversations" class="loading-indicator">同步中</span>
           <span v-else-if="syncing" class="sync-dot" title="正在与抖音云端同步" />
         </div>
       </div>
+      <div v-if="activeAccountId" class="conv-search-wrap">
+        <input
+          v-model="convKeyword"
+          class="conv-search"
+          type="search"
+          placeholder="搜索昵称 / 抖音号"
+          @input="onConvSearchInput"
+        />
+      </div>
       <div v-if="!activeAccountId" class="col-empty">请先选择托管账号</div>
-      <div v-else-if="conversations.length === 0" class="col-empty">
+      <div v-else-if="conversations.length === 0 && !loadingConversations" class="col-empty">
         当前暂无新会话<br/><span class="sub-hint">当客户发送私信且自动 Worker 运行时会在此显示。</span>
       </div>
-      <div v-else class="convs-list-scroll">
+      <div
+        v-else
+        ref="convsScrollEl"
+        class="convs-list-scroll"
+        @scroll="onConvsScroll"
+      >
         <button
           v-for="conv in conversations"
           :key="conv.id"
@@ -461,6 +552,8 @@ onUnmounted(() => {
             <span v-if="conv.unread_count > 0" class="unread-badge">{{ conv.unread_count }}</span>
           </div>
         </button>
+        <div v-if="loadingMoreConvs" class="conv-load-more">加载更多…</div>
+        <div v-else-if="convHasMore" class="conv-load-more hint">向下滚动加载更多</div>
       </div>
     </aside>
 
@@ -677,6 +770,44 @@ onUnmounted(() => {
 }
 
 /* Conversations List */
+.conv-count {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.conv-search-wrap {
+  padding: 8px 10px 0;
+}
+
+.conv-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  background: rgba(255, 255, 255, 0.35);
+  color: var(--text-primary);
+  font-size: 0.78rem;
+  outline: none;
+}
+
+.conv-search:focus {
+  border-color: rgba(0, 0, 0, 0.18);
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.conv-load-more {
+  text-align: center;
+  padding: 10px 8px 14px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.conv-load-more.hint {
+  opacity: 0.85;
+}
+
 .conv-item {
   width: 100%;
   display: block;

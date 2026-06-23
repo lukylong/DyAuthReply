@@ -102,6 +102,15 @@ class DouyinConversationItemOut(Schema):
         return dt
 
 
+class DouyinConversationListOut(Schema):
+    """私信工作台会话列表（分页）。"""
+    items: List[DouyinConversationItemOut]
+    total: int
+    page: int
+    page_size: int
+    has_more: bool
+
+
 class DouyinMessageItemOut(Schema):
     id: str
     direction: str

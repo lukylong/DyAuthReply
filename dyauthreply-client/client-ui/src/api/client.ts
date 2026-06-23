@@ -365,8 +365,25 @@ export interface MessageItem {
   sender_avatar?: string | null;
 }
 
-export function listConversations(accountId: string) {
-  return request<ConversationItem[]>(`/douyin/account/${accountId}/conversations`);
+export interface ConversationListResponse {
+  items: ConversationItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  has_more: boolean;
+}
+
+export function listConversations(
+  accountId: string,
+  params?: { page?: number; page_size?: number; keyword?: string },
+) {
+  return request<ConversationListResponse>(
+    withQuery(`/douyin/account/${accountId}/conversations`, {
+      page: params?.page ?? 1,
+      page_size: params?.page_size ?? 50,
+      keyword: params?.keyword,
+    }),
+  );
 }
 
 export function listMessages(accountId: string, conversationId: string) {

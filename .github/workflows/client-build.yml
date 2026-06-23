@@ -2,17 +2,8 @@ name: Build Client
 
 on:
   push:
-    branches:
-      - main
-      - master
     tags:
       - 'client-v*'
-    paths:
-      - 'dyauthreply-client/**'
-      - 'backend-django/**'
-      - 'launcher.spec'
-      - 'scripts/client/**'
-      - '.github/workflows/client-build.yml'
   pull_request:
     paths:
       - 'dyauthreply-client/**'
@@ -37,6 +28,8 @@ jobs:
   build:
     name: Build (${{ matrix.platform_label }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -143,32 +136,9 @@ jobs:
           fi
           ls -la dist-installers/
 
-      - name: Upload installer artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact_name }}
-          if-no-files-found: error
-          path: dist-installers/*
-
-  release:
-    name: Publish Release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/client-v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download all installer artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: dyauthreply-*
-          merge-multiple: true
-          path: release/installers
-
-      - name: Create GitHub Release
+      # Release tag: upload installers directly to GitHub Release (avoid Actions artifact quota).
+      - name: Create GitHub Release and upload (macOS)
+        if: startsWith(github.ref, 'refs/tags/client-v') && matrix.platform_label == 'macOS Apple Silicon'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
@@ -177,4 +147,24 @@ jobs:
           prerelease: false
           generate_release_notes: true
           body_path: .github/client-release-notes.md
-          files: release/installers/*
+          files: dist-installers/*
+          fail_on_unmatched_files: true
+
+      - name: Append installer to GitHub Release (Windows)
+        if: startsWith(github.ref, 'refs/tags/client-v') && matrix.platform_label == 'Windows x64'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: dist-installers/*
+          fail_on_unmatched_files: true
+          make_latest: false
+
+      # PR / manual runs: keep a short-lived artifact for debugging only.
+      - name: Upload installer artifacts
+        if: "!startsWith(github.ref, 'refs/tags/client-v')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          if-no-files-found: error
+          retention-days: 3
+          path: dist-installers/*

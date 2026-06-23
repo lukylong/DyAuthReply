@@ -36,6 +36,7 @@ from application.main import api
 def download_landing(request):
     """根路径 / 的公开下载落地页：安装包/插件下载 + 使用文档。无需登录。"""
     return render(request, 'landing.html', {
+        'version': settings.DOWNLOAD_LATEST_VERSION,
         'macos_url': settings.DOWNLOAD_MACOS_URL,
         'windows_url': settings.DOWNLOAD_WINDOWS_URL,
         'extension_url': settings.DOWNLOAD_EXTENSION_URL,
@@ -44,13 +45,34 @@ def download_landing(request):
     })
 
 
+def _versioned_download_name(name):
+    """客户端安装包按当前版本号生成下载文件名，方便用户辨认版本。
+
+    物理文件名保持稳定（维持滚动 latest 链接不变），仅在响应头里改下载名。
+    插件 zip 版本独立于客户端，不加版本号。
+    """
+    version = (getattr(settings, 'DOWNLOAD_LATEST_VERSION', '') or '').strip()
+    if not version:
+        return None
+    client_files = {settings.DOWNLOAD_MACOS_FILE, settings.DOWNLOAD_WINDOWS_FILE}
+    base = os.path.basename(name)
+    if base not in client_files:
+        return None
+    stem, ext = os.path.splitext(base)
+    return f"{stem}-v{version}{ext}"
+
+
 def serve_download(request, name):
     """自托管安装包/插件下载：从 DOWNLOAD_LOCAL_DIR 提供文件（国内直连，规避 GitHub 慢）。
 
     生产建议在 nginx 用 `location /downloads/ { alias <目录>/; }` 直出以支持断点续传；
     此 Django 路由作为可移植兜底（无需改 nginx 即可工作）。
     """
-    return serve(request, name, document_root=settings.DOWNLOAD_LOCAL_DIR)
+    response = serve(request, name, document_root=settings.DOWNLOAD_LOCAL_DIR)
+    versioned = _versioned_download_name(name)
+    if versioned:
+        response['Content-Disposition'] = f'attachment; filename="{versioned}"'
+    return response
 
 
 def serve_spa(request, path=''):

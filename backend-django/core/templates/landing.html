@@ -65,6 +65,11 @@
     section { padding: 30px 0; }
     .section-title { font-size: 24px; margin: 0 0 6px; }
     .section-sub { color: var(--text-dim); margin: 0 0 26px; }
+    .ver-pill {
+      display: inline-block; vertical-align: middle; margin-left: 8px;
+      padding: 3px 10px; border-radius: 999px; font-size: 13px; font-weight: 600;
+      color: #fff; background: linear-gradient(120deg, var(--accent), var(--accent-2));
+    }
 
     .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
     @media (max-width: 820px) { .cards { grid-template-columns: 1fr; } }
@@ -111,7 +116,7 @@
 <body>
   <header class="hero">
     <div class="wrap">
-      <span class="badge"><span class="dot"></span> 抖音私信自动回复 · 桌面客户端</span>
+      <span class="badge"><span class="dot"></span> 抖音私信自动回复 · 桌面客户端{% if version %} · v{{ version }}{% endif %}</span>
       <h1>D助手</h1>
       <p class="subtitle">智能多号自动回复。纯协议直连、无需浏览器后台挂机的抖音私信托管客户端，下载安装包与浏览器插件，几步即可开始。</p>
       <div class="hero-actions">
@@ -124,21 +129,21 @@
 
   <section id="download">
     <div class="wrap">
-      <h2 class="section-title">下载</h2>
-      <p class="section-sub">安装包随版本滚动更新，链接始终指向最新版。</p>
+      <h2 class="section-title">下载{% if version %} <span class="ver-pill">最新 v{{ version }}</span>{% endif %}</h2>
+      <p class="section-sub">安装包随版本滚动更新，链接始终指向最新版{% if version %}（当前 <strong>v{{ version }}</strong>，下载后文件名会带版本号，如 <code>…-v{{ version }}.exe</code>）{% endif %}。</p>
       <div class="cards">
         <div class="card">
           <div class="ico">🍎</div>
           <h3>macOS 客户端</h3>
           <p>适用于 Apple Silicon（M1/M2/M3/M4）的 <code>.dmg</code> 安装包。</p>
-          <div class="dl"><a class="btn primary" href="{{ macos_url }}">下载 .dmg</a></div>
+          <div class="dl"><a class="btn primary" href="{{ macos_url }}">下载 .dmg{% if version %} · v{{ version }}{% endif %}</a></div>
           <div class="hint">未签名应用，安装后需执行解除隔离命令（见下方指南）。</div>
         </div>
         <div class="card">
           <div class="ico">🪟</div>
           <h3>Windows 客户端</h3>
           <p>适用于 64 位 Windows 10/11 的 <code>.exe</code> 安装程序。</p>
-          <div class="dl"><a class="btn primary" href="{{ windows_url }}">下载 .exe</a></div>
+          <div class="dl"><a class="btn primary" href="{{ windows_url }}">下载 .exe{% if version %} · v{{ version }}{% endif %}</a></div>
           <div class="hint">若 SmartScreen 拦截，点「更多信息 → 仍要运行」。</div>
         </div>
         <div class="card">

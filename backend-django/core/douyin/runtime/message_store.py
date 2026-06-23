@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone as dt_timezone
+from datetime import datetime, timedelta
 from typing import Optional
 
 from asgiref.sync import sync_to_async
@@ -21,7 +21,14 @@ from django.utils import timezone
 
 
 def _to_db_datetime(dt: datetime | None) -> datetime | None:
-    """SQLite + USE_TZ=False 时须用 naive datetime，避免落库失败。"""
+    """SQLite + USE_TZ=False 时须用 naive datetime，避免落库失败。
+
+    USE_TZ=False 时全库约定为「naive 本地时间」（与 timezone.now() / auto_now 一致）。
+    入向消息的 create_time_us 是 UTC aware，必须先换算到本地时区再去掉 tzinfo，
+    否则会比本地慢 TIME_ZONE 偏移（如东八区 8 小时），导致：
+      1) 前端按本地解析 ISO 时显示时间偏移；
+      2) 入向(UTC) 与 出向/手动回复(timezone.now()=本地) 混排时排序错乱。
+    """
     if dt is None:
         return None
     if settings.USE_TZ:
@@ -29,7 +36,7 @@ def _to_db_datetime(dt: datetime | None) -> datetime | None:
             return timezone.make_aware(dt, timezone.get_current_timezone())
         return dt
     if timezone.is_aware(dt):
-        return timezone.make_naive(dt, dt_timezone.utc)
+        return timezone.make_naive(dt, timezone.get_current_timezone())
     return dt
 
 

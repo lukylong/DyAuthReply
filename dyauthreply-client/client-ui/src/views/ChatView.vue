@@ -5,6 +5,7 @@ import {
   listAccounts,
   listConversations,
   listMessages,
+  refreshConversationUser,
   sendManualReply,
   type ConversationItem,
   type DouyinAccount,
@@ -43,6 +44,11 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 let convSig = '';
 let msgSig = '';
 
+// 缺失真实昵称的会话：自动调 refresh-user 拉取抖音真实昵称/头像后重渲染。
+// 每个会话只尝试一次（成功或失败都记录），避免对未公开资料的用户反复打接口。
+const peerResolveAttempted = new Set<string>();
+let resolvingPeer = false;
+
 function displayPeerName(conv?: ConversationItem | null) {
   if (!conv) return '未知用户';
   const nick = conv.peer_nickname?.trim();
@@ -56,14 +62,9 @@ function displayPeerName(conv?: ConversationItem | null) {
 
 function displayPeerSubtitle(conv?: ConversationItem | null) {
   if (!conv) return '';
-  const parts: string[] = [];
   const uid = conv.peer_unique_id?.trim();
-  if (uid && uid !== conv.peer_nickname?.trim()) parts.push(`@${uid}`);
-  const sec = conv.peer_sec_uid?.trim();
-  if (sec && !sec.startsWith('fallback_') && sec.length > 16) {
-    parts.push(sec.slice(0, 18) + '…');
-  }
-  return parts.join(' · ');
+  if (uid && uid !== conv.peer_nickname?.trim()) return `@${uid}`;
+  return '';
 }
 
 function avatarInitial(name: string) {
@@ -180,12 +181,41 @@ async function loadConversations(silent = false) {
     if (!activeConversationId.value && conversations.value.length > 0) {
       activeConversationId.value = conversations.value[0].id;
     }
+    void resolveMissingPeerInfo();
   } catch (e) {
     if (!silent) toast.value = e instanceof Error ? e.message : String(e);
     if (!silent) conversations.value = [];
   } finally {
     if (!silent) loadingConversations.value = false;
     syncing.value = false;
+  }
+}
+
+async function resolveMissingPeerInfo() {
+  if (resolvingPeer || !activeAccountId.value) return;
+  const accountId = activeAccountId.value;
+  const targets = conversations.value
+    .filter((c) => !c.peer_nickname?.trim() && !peerResolveAttempted.has(c.id))
+    .slice(0, 3);
+  if (targets.length === 0) return;
+  resolvingPeer = true;
+  try {
+    let changed = false;
+    for (const c of targets) {
+      peerResolveAttempted.add(c.id);
+      try {
+        const res = await refreshConversationUser(accountId, c.id);
+        if (res.success) changed = true;
+      } catch {
+        // 单个会话拉取失败不影响其它会话，下次启动前不再重试该会话
+      }
+    }
+    if (changed && accountId === activeAccountId.value) {
+      convSig = '';
+      await loadConversations(true);
+    }
+  } finally {
+    resolvingPeer = false;
   }
 }
 
@@ -223,6 +253,7 @@ function selectAccount(id: string) {
   messages.value = [];
   convSig = '';
   msgSig = '';
+  peerResolveAttempted.clear();
 }
 
 function selectConversation(id: string) {

@@ -43,6 +43,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import suppress
 from functools import partial
 from pathlib import Path
 from shutil import which
@@ -103,11 +104,54 @@ def _pool_enabled() -> bool:
         return True
 
 
-def _pool_size() -> int:
+# 账号数提示：worker 在 refresh 时写入当前托管账号数，供 auto 模式计算池大小。
+_account_hint: int = 0
+
+
+def set_account_hint(n: int) -> None:
+    """worker 上报当前托管账号数；auto 模式据此自适应签名池大小（仅增不减）。
+
+    若池已创建且当前规模不足，立即按需扩容（新增常驻 node 进程），避免账号
+    增多后签名排队。缩容不做：避免误杀正在处理请求的进程，多余空闲进程留到
+    worker 重启回收。
+    """
+    global _account_hint
+    try:
+        _account_hint = max(0, int(n))
+    except Exception:  # noqa: BLE001
+        return
+    pool = _pool
+    if pool is not None:
+        with suppress(Exception):
+            pool.grow(_pool_size())
+
+
+def _pool_cap() -> int:
     try:
         from django.conf import settings
-        return max(1, int(getattr(settings, "DOUYIN_SIGN_POOL_SIZE", 2) or 2))
+        return max(1, int(getattr(settings, "DOUYIN_SIGN_POOL_MAX", 6) or 6))
     except Exception:  # noqa: BLE001
+        return 6
+
+
+def _pool_size() -> int:
+    """签名进程池目标大小。
+
+    DOUYIN_SIGN_POOL_SIZE='auto'（默认）时随托管账号数自适应：约等于账号数，
+    下限 2（保证扫描/发送不互相饿死），上限 DOUYIN_SIGN_POOL_MAX（默认 6，
+    每个 node 进程约数十 MB 内存）。也可设为具体数字固定大小。
+    """
+    try:
+        from django.conf import settings
+        raw = getattr(settings, "DOUYIN_SIGN_POOL_SIZE", "auto")
+    except Exception:  # noqa: BLE001
+        raw = "auto"
+    if isinstance(raw, str) and raw.strip().lower() in ("auto", ""):
+        cap = _pool_cap()
+        return max(1, min(max(2, _account_hint), cap))
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
         return 2
 
 
@@ -218,10 +262,23 @@ class _NodeSignPool:
     """常驻签名进程池：N 个 _NodeWorker，按空闲队列取用，调用串行不会交叉。"""
 
     def __init__(self, size: int) -> None:
-        self._workers: list[_NodeWorker] = [_NodeWorker() for _ in range(size)]
+        self._grow_lock = threading.Lock()
+        self._workers: list[_NodeWorker] = [_NodeWorker() for _ in range(max(1, size))]
         self._idle: "queue.Queue[_NodeWorker]" = queue.Queue()
         for w in self._workers:
             self._idle.put(w)
+
+    def grow(self, target: int) -> None:
+        """扩容到 target（仅增不减）。新增 node 进程加入空闲队列即可被取用。"""
+        with self._grow_lock:
+            added = 0
+            while len(self._workers) < target:
+                w = _NodeWorker()
+                self._workers.append(w)
+                self._idle.put(w)
+                added += 1
+            if added:
+                logger.info(f"[sign.js] 签名进程池扩容 +{added} -> size={len(self._workers)}")
 
     def call(self, method: str, args: list) -> str:
         worker = self._idle.get()

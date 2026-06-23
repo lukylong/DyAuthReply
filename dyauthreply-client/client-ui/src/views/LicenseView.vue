@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue';
 
 import { useClientLicense } from '../composables/useClientLicense';
+import { formatDateTime } from '../utils/formatDateTime';
 
 const submitting = ref(false);
 const error = ref('');
@@ -131,7 +132,7 @@ onMounted(() => {
             </div>
             <div class="meta-item">
               <span>离线截止</span>
-              <strong>{{ status?.last_valid_until || '-' }}</strong>
+              <strong>{{ formatDateTime(status?.last_valid_until) }}</strong>
             </div>
           </div>
           <div class="action-row">
@@ -180,19 +181,19 @@ onMounted(() => {
         <div class="detail-grid">
           <div class="detail-item">
             <span>激活时间</span>
-            <strong>{{ status?.activated_at || '-' }}</strong>
+            <strong>{{ formatDateTime(status?.activated_at) }}</strong>
           </div>
           <div class="detail-item">
             <span>最后校验</span>
-            <strong>{{ status?.last_check_in_at || '-' }}</strong>
+            <strong>{{ formatDateTime(status?.last_check_in_at) }}</strong>
           </div>
           <div class="detail-item">
             <span>下次校验</span>
-            <strong>{{ status?.next_check_in_at || '-' }}</strong>
+            <strong>{{ formatDateTime(status?.next_check_in_at) }}</strong>
           </div>
           <div class="detail-item">
             <span>到期时间</span>
-            <strong>{{ status?.expires_at || '-' }}</strong>
+            <strong>{{ formatDateTime(status?.expires_at) }}</strong>
           </div>
           <div class="detail-item">
             <span>心跳间隔</span>

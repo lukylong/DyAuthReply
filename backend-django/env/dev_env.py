@@ -176,13 +176,18 @@ DOUYIN_TRANSPORT_DUAL_RUN = _env('DOUYIN_TRANSPORT_DUAL_RUN', 'false').lower() =
 # 常驻签名进程池：消除 PyExecJS「每次 call 起 Node 子进程」的子进程风暴。
 # ENABLED=false 时回退每次起子进程的旧路径；SIZE 为常驻 node 进程数。
 DOUYIN_SIGN_POOL_ENABLED = _env('DOUYIN_SIGN_POOL_ENABLED', 'true').lower() == 'true'
-DOUYIN_SIGN_POOL_SIZE = int(_env('DOUYIN_SIGN_POOL_SIZE', '2'))
+# 'auto'：随托管账号数自适应（下限 2，上限 DOUYIN_SIGN_POOL_MAX）；也可填具体数字固定。
+DOUYIN_SIGN_POOL_SIZE = _env('DOUYIN_SIGN_POOL_SIZE', 'auto')
+DOUYIN_SIGN_POOL_MAX = int(_env('DOUYIN_SIGN_POOL_MAX', '6'))
 DOUYIN_SIGN_POOL_TIMEOUT = float(_env('DOUYIN_SIGN_POOL_TIMEOUT', '20'))
 DOUYIN_NODE_BIN = _env('DOUYIN_NODE_BIN', 'node')
 
 # 全局并发治理：同一时刻并发 scan/send 的账号数上限（<=0 不限制）；启动错峰最大抖动秒数。
 DOUYIN_MAX_CONCURRENT_IO = int(_env('DOUYIN_MAX_CONCURRENT_IO', '16'))
 DOUYIN_STARTUP_JITTER_S = float(_env('DOUYIN_STARTUP_JITTER_S', '8'))
+# 启动错峰随账号数自适应：窗口 = min(MAX_S, max(JITTER_S, 账号数*PER_ACCOUNT_S))。
+DOUYIN_STARTUP_JITTER_PER_ACCOUNT_S = float(_env('DOUYIN_STARTUP_JITTER_PER_ACCOUNT_S', '1.0'))
+DOUYIN_STARTUP_JITTER_MAX_S = float(_env('DOUYIN_STARTUP_JITTER_MAX_S', '30'))
 
 # 统一 httpx 连接/超时（每账号独立 client）。
 DOUYIN_HTTP_TIMEOUT_S = float(_env('DOUYIN_HTTP_TIMEOUT_S', '15'))
@@ -192,6 +197,8 @@ DOUYIN_HTTP_KEEPALIVE_EXPIRY_S = float(_env('DOUYIN_HTTP_KEEPALIVE_EXPIRY_S', '3
 
 # 资源阈值告警：worker 进程 RSS/CPU 超阈值发 risk_alert（<=0 关闭对应维度）。
 DOUYIN_MEM_ALERT_MB = float(_env('DOUYIN_MEM_ALERT_MB', '1500'))
+# 内存告警按物理内存比例自适应（与绝对 MB 取较小者，0 关闭比例维度）。
+DOUYIN_MEM_ALERT_PCT = float(_env('DOUYIN_MEM_ALERT_PCT', '75'))
 DOUYIN_CPU_ALERT_PCT = float(_env('DOUYIN_CPU_ALERT_PCT', '85'))
 
 # 僵尸 session 判定：心跳超过该秒数视为失联，由清理任务置 stopped。

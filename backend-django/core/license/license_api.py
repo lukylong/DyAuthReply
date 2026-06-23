@@ -33,6 +33,8 @@ from core.license.license_schema import (
 from core.license.license_service import (
     generate_license_keys,
     revoke_license_key,
+    delete_license_key,
+    delete_license_plan,
     unbind_device,
     get_license_stats,
     get_license_key_detail_queryset,
@@ -69,6 +71,13 @@ def patch_license_plan(request, plan_id: str, data: LicensePlanPatch):
     plan.sys_modifier = request.auth
     plan.save()
     return plan
+
+
+@router.delete("/license/plan/{plan_id}", summary="删除授权套餐（级联软删卡密）")
+def delete_license_plan_api(request, plan_id: str):
+    plan = get_object_or_404(LicensePlan, id=plan_id, is_deleted=False)
+    result = delete_license_plan(plan=plan, ip=request.META.get("REMOTE_ADDR") or "")
+    return {"success": True, **result}
 
 
 @router.post("/license/key/generate", response=LicenseKeyGenerateOut, summary="批量生成卡密")
@@ -108,6 +117,13 @@ def patch_license_key(request, license_key_id: str, data: LicenseKeyPatch):
     license_key.sys_modifier = request.auth
     license_key.save()
     return license_key
+
+
+@router.delete("/license/key/{license_key_id}", summary="删除卡密（软删）")
+def delete_license_key_api(request, license_key_id: str):
+    license_key = get_object_or_404(LicenseKey, id=license_key_id, is_deleted=False)
+    delete_license_key(license_key=license_key, ip=request.META.get("REMOTE_ADDR") or "")
+    return {"success": True}
 
 
 @router.post("/license/key/{license_key_id}/revoke", response=LicenseKeyOut, summary="撤销卡密")

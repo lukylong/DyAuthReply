@@ -431,6 +431,15 @@ def get_public_license_status() -> dict[str, Any]:
     return _build_public_status(load_license_state())
 
 
+def client_can_use_business() -> bool:
+    """客户端模式下是否允许执行业务（托管/自动回复/写操作）。"""
+    from env import ENV
+
+    if ENV != "client":
+        return True
+    return bool(get_public_license_status().get("can_use_business"))
+
+
 def activate_remote_license(*, server_url: str = "", license_code: str) -> dict[str, Any]:
     code = (license_code or "").strip()
     if not code:

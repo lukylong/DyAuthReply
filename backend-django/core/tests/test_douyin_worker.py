@@ -1,7 +1,9 @@
 from django.test import SimpleTestCase, override_settings
+from unittest.mock import patch
 
 from core.douyin.runtime.worker import (
     _can_process_reply,
+    _client_business_allowed,
     _should_enforce_daily_peer_limit,
 )
 
@@ -22,6 +24,14 @@ class DouyinWorkerRuntimeTests(SimpleTestCase):
     @override_settings(DOUYIN_ENFORCE_DAILY_PEER_REPLY_LIMIT=True)
     def test_daily_peer_limit_can_be_enabled_by_setting(self):
         self.assertTrue(_should_enforce_daily_peer_limit())
+
+    @patch('core.client.license_auth.client_can_use_business', return_value=True)
+    def test_client_business_allowed_when_license_ok(self, _mock):
+        self.assertTrue(_client_business_allowed())
+
+    @patch('core.client.license_auth.client_can_use_business', return_value=False)
+    def test_client_business_blocked_when_license_invalid(self, _mock):
+        self.assertFalse(_client_business_allowed())
 
 
 class DouyinSelfUidInferenceTests(SimpleTestCase):

@@ -488,6 +488,67 @@ def revoke_license_key(*, license_key: LicenseKey, reason: str = "", ip: str = "
 
 
 @transaction.atomic
+def delete_license_key(*, license_key: LicenseKey, ip: str = "") -> None:
+    """软删除单张卡密，同时撤销其活跃激活。"""
+    now = timezone.now()
+    LicenseActivation.objects.filter(
+        license_key=license_key,
+        status=LicenseActivation.STATUS_ACTIVE,
+        is_deleted=False,
+    ).update(
+        status=LicenseActivation.STATUS_REVOKED,
+        revoked_at=now,
+        revoked_reason="卡密删除",
+        sys_update_datetime=now,
+    )
+    license_key.is_deleted = True
+    license_key.save(update_fields=["is_deleted", "sys_update_datetime"])
+    log_license_event(
+        "license_key_deleted",
+        license_key=license_key,
+        ip=ip,
+        payload={"masked_code": license_key.masked_code},
+    )
+
+
+@transaction.atomic
+def delete_license_plan(*, plan: LicensePlan, ip: str = "") -> dict[str, int]:
+    """软删除套餐，并级联软删除该套餐下的卡密、撤销其活跃激活。"""
+    now = timezone.now()
+    keys = LicenseKey.objects.filter(plan=plan, is_deleted=False)
+    key_ids = list(keys.values_list("id", flat=True))
+
+    revoked_activations = 0
+    if key_ids:
+        revoked_activations = LicenseActivation.objects.filter(
+            license_key_id__in=key_ids,
+            status=LicenseActivation.STATUS_ACTIVE,
+            is_deleted=False,
+        ).update(
+            status=LicenseActivation.STATUS_REVOKED,
+            revoked_at=now,
+            revoked_reason="套餐删除",
+            sys_update_datetime=now,
+        )
+
+    deleted_keys = keys.update(is_deleted=True, sys_update_datetime=now)
+
+    plan.is_deleted = True
+    plan.save(update_fields=["is_deleted", "sys_update_datetime"])
+    log_license_event(
+        "license_plan_deleted",
+        ip=ip,
+        payload={
+            "plan_id": str(plan.id),
+            "plan_code": plan.code,
+            "deleted_keys": deleted_keys,
+            "revoked_activations": revoked_activations,
+        },
+    )
+    return {"deleted_keys": deleted_keys, "revoked_activations": revoked_activations}
+
+
+@transaction.atomic
 def unbind_device(*, license_key: LicenseKey, client_device_id: str, reason: str = "", ip: str = "") -> LicenseActivation:
     activation = LicenseActivation.objects.select_related("client_device").filter(
         license_key=license_key,

@@ -562,6 +562,20 @@ def _should_enforce_daily_peer_limit() -> bool:
     return bool(getattr(settings, 'DOUYIN_ENFORCE_DAILY_PEER_REPLY_LIMIT', False))
 
 
+def _client_business_allowed() -> bool:
+    """客户端未激活或授权失效时，禁止托管与自动回复。"""
+    try:
+        from core.client.license_auth import client_can_use_business
+
+        return client_can_use_business()
+    except Exception:  # noqa: BLE001
+        logger.warning("[worker] 授权状态检查失败，暂停业务托管", exc_info=True)
+        return False
+
+
+_client_business_allowed_async = sync_to_async(_client_business_allowed, thread_sensitive=True)
+
+
 def _login_expire_confirm_times() -> int:
     """登录失效「二次确认」阈值：连续命中失效信号多少次才真正打回账号。
 
@@ -625,9 +639,17 @@ class DouyinWorker:
         self._max_concurrent_io = int(getattr(settings, 'DOUYIN_MAX_CONCURRENT_IO', 16) or 0)
         self._io_sem: Optional[asyncio.Semaphore] = None
         # 账号启动错峰最大抖动秒数：避免所有协程在同一刻进入首轮扫描造成尖峰。
+        # 账号越多窗口越大（每账号 *_PER_ACCOUNT_S），但不超过 *_MAX_S，把首轮扫描铺开。
         self._startup_jitter_max = float(getattr(settings, 'DOUYIN_STARTUP_JITTER_S', 8) or 0)
+        self._startup_jitter_per_account = float(
+            getattr(settings, 'DOUYIN_STARTUP_JITTER_PER_ACCOUNT_S', 1.0) or 0
+        )
+        self._startup_jitter_cap = float(
+            getattr(settings, 'DOUYIN_STARTUP_JITTER_MAX_S', 30) or 0
+        )
         # 资源阈值告警（去重用）：上次告警时间戳。
         self._last_resource_alert_ts = 0.0
+        self._license_block_logged = False
 
         # transport 层：每账号一份实例。
         #   Phase 1: BrowserTransport（DOM 扫描 + 文本框输入）
@@ -689,8 +711,25 @@ class DouyinWorker:
     async def _loop_refresh_accounts(self) -> None:
         while not self._stop.is_set():
             try:
+                if not await _client_business_allowed_async():
+                    if self._tasks:
+                        logger.warning("[worker] 当前授权不可用，停止所有账号托管")
+                        for aid in list(self._tasks.keys()):
+                            await self._stop_account(aid)
+                    elif not self._license_block_logged:
+                        logger.info("[worker] 当前授权不可用，跳过账号托管")
+                        self._license_block_logged = True
+                    await self._sleep_or_stop(self.refresh_interval)
+                    continue
+                self._license_block_logged = False
+
                 accounts = await _load_managed_accounts()
                 wanted_ids = {a['id'] for a in accounts}
+
+                # 上报当前托管账号数：签名池 auto 模式据此自适应扩容，避免账号增多签名排队。
+                with suppress(Exception):
+                    from core.douyin.runtime.transport.sign import js_signer
+                    js_signer.set_account_hint(len(wanted_ids))
 
                 # 清理已结束的协程（如登录失效后 _account_loop return / 被取消）：
                 # 通过 _stop_account 摘除 task + 停掉并丢弃缓存的 transport/signer + 释放租约。
@@ -758,6 +797,15 @@ class DouyinWorker:
         DOUYIN_CPU_ALERT_PCT（默认 85%）。同一进程至少间隔 5 分钟才再次告警。
         """
         mem_limit = float(getattr(settings, 'DOUYIN_MEM_ALERT_MB', 1500) or 0)
+        # 自适应：按物理内存比例再算一个阈值，与绝对值取较小者，低配机器更早提示。
+        mem_pct = float(getattr(settings, 'DOUYIN_MEM_ALERT_PCT', 75) or 0)
+        if mem_pct > 0:
+            with suppress(Exception):
+                total_phys_mb = psutil.virtual_memory().total / 1024 / 1024
+                pct_limit = total_phys_mb * mem_pct / 100.0
+                candidates = [x for x in (mem_limit, pct_limit) if x > 0]
+                if candidates:
+                    mem_limit = min(candidates)
         cpu_limit = float(getattr(settings, 'DOUYIN_CPU_ALERT_PCT', 85) or 0)
         over_mem = mem_limit > 0 and total_mem_mb >= mem_limit
         over_cpu = cpu_limit > 0 and cpu_pct >= cpu_limit
@@ -1008,6 +1056,8 @@ class DouyinWorker:
         return transport
 
     async def _send_manual_reply(self, account_id: str, *, conversation_id: str, text: str) -> dict:
+        if not await _client_business_allowed_async():
+            return {'status': 'failed', 'error': '当前授权不可用，无法手动发送'}
         if not conversation_id or not text.strip():
             logger.warning(f"[worker] manual_reply 参数不完整 account={account_id}")
             return {'status': 'failed', 'error': '参数不完整'}
@@ -1074,6 +1124,9 @@ class DouyinWorker:
             return {'status': 'failed', 'error': err}
 
     async def _run_manual_auto_reply_test(self, account_id: str, *, conversation_id: str, text: str) -> None:
+        if not await _client_business_allowed_async():
+            logger.warning(f"[reply] manual_auto_reply 拒绝：当前授权不可用 account={account_id}")
+            return
         if not conversation_id or not text.strip():
             logger.warning(f"[reply] manual_auto_reply 参数不完整 account={account_id}")
             return
@@ -1102,6 +1155,18 @@ class DouyinWorker:
             self._io_sem = asyncio.Semaphore(self._max_concurrent_io)
         return self._io_sem
 
+    def _effective_startup_jitter(self) -> float:
+        """按当前托管账号数计算启动抖动窗口：min(cap, max(base, n*per))。"""
+        base = self._startup_jitter_max
+        if base <= 0:
+            return 0.0
+        n = max(1, len(self._tasks))
+        scaled = max(base, n * self._startup_jitter_per_account)
+        cap = self._startup_jitter_cap
+        if cap > 0:
+            scaled = min(scaled, cap)
+        return scaled
+
     # ---------------- 单账号循环 ----------------
     async def _account_loop(self, a: dict) -> None:
         account_id = a['id']
@@ -1124,9 +1189,10 @@ class DouyinWorker:
         )
 
         # 启动错峰：N 个账号协程同时被 gather 起来，若不抖动会在同一刻齐发首轮扫描，
-        # 形成签名/网络尖峰。随机延迟 [0, jitter) 秒后再进入循环。
-        if self._startup_jitter_max > 0:
-            await asyncio.sleep(random.uniform(0, self._startup_jitter_max))
+        # 形成签名/网络尖峰。随机延迟 [0, jitter) 秒后再进入循环。窗口随账号数自适应放大。
+        jitter_max = self._effective_startup_jitter()
+        if jitter_max > 0:
+            await asyncio.sleep(random.uniform(0, jitter_max))
 
         # 未登录/失效账号不再在 worker 启动时自动弹登录，避免用户还未点击登录就打开浏览器。
         # 登录流程仅由前端显式点击“扫码登录”后通过 Redis 命令触发。
@@ -1165,6 +1231,10 @@ class DouyinWorker:
         while not self._stop.is_set():
             loop_count += 1
             try:
+                if not await _client_business_allowed_async():
+                    logger.info(f"[worker] 当前授权不可用，账号协程退出 account={account_id}")
+                    return
+
                 # 暂停：被 pause 命令置入暂停集合时，停止扫描/回复，但保持协程存活，
                 # 等 resume 即时恢复（无需重启协程）。
                 if account_id in self._paused_accounts:

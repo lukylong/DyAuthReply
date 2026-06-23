@@ -24,6 +24,7 @@ import {
 } from 'element-plus';
 
 import {
+  deleteLicenseKeyApi,
   generateLicenseKeysApi,
   getLicenseKeyListApi,
   getLicensePlanListApi,
@@ -52,6 +53,8 @@ const searchForm = reactive({
   masked_code: '',
 });
 
+const showAdvanced = ref(false);
+
 const generateForm = reactive({
   plan_id: '',
   count: 10,
@@ -61,6 +64,10 @@ const generateForm = reactive({
   valid_days_override: undefined as number | undefined,
   notes: '',
 });
+
+const selectedPlan = computed(() =>
+  plans.value.find((plan) => plan.id === generateForm.plan_id),
+);
 
 const statusTagType = computed<Record<string, 'danger' | 'info' | 'success' | 'warning'>>(() => ({
   pending: 'info',
@@ -72,10 +79,19 @@ const statusTagType = computed<Record<string, 'danger' | 'info' | 'success' | 'w
 async function loadPlans() {
   const res = await getLicensePlanListApi({ page: 1, pageSize: 200 });
   plans.value = res.items || [];
-  const firstPlan = plans.value[0];
-  if (!generateForm.plan_id && firstPlan) {
-    generateForm.plan_id = firstPlan.id;
+  const defaultPlan = plans.value.find((plan) => plan.is_active) || plans.value[0];
+  if (!generateForm.plan_id && defaultPlan) {
+    generateForm.plan_id = defaultPlan.id;
   }
+}
+
+function openGenerateDialog() {
+  showAdvanced.value = false;
+  if (!generateForm.plan_id) {
+    const defaultPlan = plans.value.find((plan) => plan.is_active) || plans.value[0];
+    if (defaultPlan) generateForm.plan_id = defaultPlan.id;
+  }
+  generateDialogVisible.value = true;
 }
 
 async function loadData() {
@@ -140,6 +156,24 @@ async function onRevoke(row: LicenseKey) {
   }
 }
 
+async function onDelete(row: LicenseKey) {
+  try {
+    await ElMessageBox.confirm(`确定删除卡密 ${row.masked_code} 吗？删除后将从列表移除。`, '删除卡密', {
+      type: 'warning',
+    });
+  } catch {
+    return;
+  }
+
+  try {
+    await deleteLicenseKeyApi(row.id);
+    ElMessage.success('卡密已删除');
+    loadData();
+  } catch (error: any) {
+    ElMessage.error(error?.response?.data?.detail || '删除失败');
+  }
+}
+
 onMounted(async () => {
   await loadPlans();
   await loadData();
@@ -163,7 +197,7 @@ onMounted(async () => {
           <ElInput v-model="searchForm.masked_code" placeholder="脱敏卡密" clearable style="width: 180px" />
           <ElButton type="primary" @click="onSearch">查询</ElButton>
         </div>
-        <ElButton type="primary" @click="generateDialogVisible = true">批量发卡</ElButton>
+        <ElButton type="primary" @click="openGenerateDialog">批量发卡</ElButton>
       </div>
 
       <ElTable :data="keys" v-loading="loading" border>
@@ -180,9 +214,10 @@ onMounted(async () => {
         <ElTableColumn prop="effective_valid_days" label="有效天数" width="100" />
         <ElTableColumn prop="expires_at" label="到期时间" min-width="180" />
         <ElTableColumn prop="last_check_in_at" label="最后心跳" min-width="180" />
-        <ElTableColumn label="操作" width="100" fixed="right">
+        <ElTableColumn label="操作" width="130" fixed="right">
           <template #default="{ row }">
             <ElButton link type="danger" :disabled="row.status === 'revoked'" @click="onRevoke(row)">撤销</ElButton>
+            <ElButton link type="danger" @click="onDelete(row)">删除</ElButton>
           </template>
         </ElTableColumn>
       </ElTable>
@@ -201,30 +236,44 @@ onMounted(async () => {
     </ElCard>
 
     <ElDialog v-model="generateDialogVisible" title="批量生成卡密" width="560px">
-      <ElForm :model="generateForm" label-width="110px">
+      <ElForm :model="generateForm" label-width="90px">
         <ElFormItem label="授权套餐">
-          <ElSelect v-model="generateForm.plan_id" placeholder="请选择套餐">
+          <ElSelect v-model="generateForm.plan_id" placeholder="请选择套餐" style="width: 100%">
             <ElOption v-for="plan in plans" :key="plan.id" :label="plan.name" :value="plan.id" />
           </ElSelect>
         </ElFormItem>
         <ElFormItem label="生成数量">
           <ElInputNumber v-model="generateForm.count" :min="1" :max="200" />
+          <span v-if="selectedPlan" class="ml-3 text-xs text-gray-400">
+            将套用：{{ selectedPlan.max_devices }} 台设备 / {{ selectedPlan.valid_days }} 天有效
+          </span>
         </ElFormItem>
-        <ElFormItem label="发放对象">
-          <ElInput v-model="generateForm.issued_to" />
-        </ElFormItem>
-        <ElFormItem label="批次号">
-          <ElInput v-model="generateForm.batch_no" />
-        </ElFormItem>
-        <ElFormItem label="设备数覆盖">
-          <ElInputNumber v-model="generateForm.max_devices_override" :min="1" />
-        </ElFormItem>
-        <ElFormItem label="有效期覆盖">
-          <ElInputNumber v-model="generateForm.valid_days_override" :min="0" />
-        </ElFormItem>
-        <ElFormItem label="备注">
-          <ElInput v-model="generateForm.notes" type="textarea" :rows="3" />
-        </ElFormItem>
+
+        <div class="mb-2">
+          <ElButton link type="primary" @click="showAdvanced = !showAdvanced">
+            {{ showAdvanced ? '收起高级选项' : '高级选项（发放对象 / 批次号 / 覆盖项 / 备注）' }}
+          </ElButton>
+        </div>
+
+        <template v-if="showAdvanced">
+          <ElFormItem label="发放对象">
+            <ElInput v-model="generateForm.issued_to" placeholder="选填，用于备注客户/渠道" />
+          </ElFormItem>
+          <ElFormItem label="批次号">
+            <ElInput v-model="generateForm.batch_no" placeholder="选填，留空自动按时间生成" />
+          </ElFormItem>
+          <ElFormItem label="设备数覆盖">
+            <ElInputNumber v-model="generateForm.max_devices_override" :min="1" />
+            <span class="ml-3 text-xs text-gray-400">留空则用套餐默认值</span>
+          </ElFormItem>
+          <ElFormItem label="有效期覆盖">
+            <ElInputNumber v-model="generateForm.valid_days_override" :min="0" />
+            <span class="ml-3 text-xs text-gray-400">留空则用套餐默认值</span>
+          </ElFormItem>
+          <ElFormItem label="备注">
+            <ElInput v-model="generateForm.notes" type="textarea" :rows="3" />
+          </ElFormItem>
+        </template>
       </ElForm>
       <template #footer>
         <ElButton @click="generateDialogVisible = false">取消</ElButton>

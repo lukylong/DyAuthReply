@@ -14,6 +14,7 @@ import {
   ElInput,
   ElInputNumber,
   ElMessage,
+  ElMessageBox,
   ElPagination,
   ElSwitch,
   ElTable,
@@ -22,6 +23,7 @@ import {
 
 import {
   createLicensePlanApi,
+  deleteLicensePlanApi,
   getLicensePlanListApi,
   getLicenseStatsApi,
   updateLicensePlanApi,
@@ -167,6 +169,31 @@ async function onSubmit() {
   }
 }
 
+async function onDelete(row: LicensePlan) {
+  try {
+    await ElMessageBox.confirm(
+      `删除套餐「${row.name}」会同时软删除该套餐下的所有卡密并撤销其激活，确定继续吗？`,
+      '删除套餐',
+      { type: 'warning' },
+    );
+  } catch {
+    return;
+  }
+
+  try {
+    const res = await deleteLicensePlanApi(row.id);
+    ElMessage.success(
+      res.deleted_keys
+        ? `套餐已删除，连带删除 ${res.deleted_keys} 张卡密`
+        : '套餐已删除',
+    );
+    await Promise.all([loadData(), loadStats()]);
+  } catch (error: any) {
+    console.error(error);
+    ElMessage.error(error?.response?.data?.detail || '删除套餐失败');
+  }
+}
+
 onMounted(async () => {
   await Promise.all([loadData(), loadStats()]);
 });
@@ -212,9 +239,10 @@ onMounted(async () => {
               <span>{{ row.is_active ? '启用' : '停用' }}</span>
             </template>
           </ElTableColumn>
-          <ElTableColumn label="操作" width="120" fixed="right">
+          <ElTableColumn label="操作" width="150" fixed="right">
             <template #default="{ row }">
               <ElButton link type="primary" @click="openEdit(row)">编辑</ElButton>
+              <ElButton link type="danger" @click="onDelete(row)">删除</ElButton>
             </template>
           </ElTableColumn>
         </ElTable>

@@ -16,6 +16,7 @@ from core.license import license_api
 from core.license.license_model import LicensePlan, LicenseKey, LicenseActivation, ClientDevice
 from core.license.license_schema import (
     LicensePlanIn,
+    LicensePlanOut,
     LicensePlanPatch,
     LicenseKeyGenerateIn,
     LicenseRevokeIn,
@@ -47,6 +48,8 @@ class LicenseAdminApiTests(TestCase):
             ),
         )
         self.assertEqual(created.code, "pro")
+        out = LicensePlanOut.model_validate(created)
+        self.assertIsInstance(out.id, str)
 
         updated = license_api.patch_license_plan(
             self.request,

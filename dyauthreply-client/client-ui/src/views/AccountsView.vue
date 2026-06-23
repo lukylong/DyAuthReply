@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeRouteLeave } from 'vue-router';
-import { onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import AppModal from '../components/AppModal.vue';
 import {
   credentialLabel,
@@ -24,6 +24,11 @@ const importError = ref('');
 const importSuccess = ref('');
 const reimportTarget = ref<DouyinAccount | null>(null);
 const savingId = ref('');
+
+const RECOMMENDED_MAX_ACCOUNTS = 10;
+const overAccountLimit = computed(
+  () => accounts.value.length > RECOMMENDED_MAX_ACCOUNTS,
+);
 
 async function load() {
   loading.value = true;
@@ -103,6 +108,11 @@ async function submitImport() {
 
 async function toggleAutoReply(acc: DouyinAccount, event: Event) {
   const checked = (event.target as HTMLInputElement).checked;
+  if (!license.value?.can_use_business) {
+    error.value = `当前授权状态为「${license.value?.state_label || '未激活'}」，无法切换自动回复`;
+    await load();
+    return;
+  }
   savingId.value = acc.id;
   try {
     const updated = await patchAccount(acc.id, { auto_reply_enabled: checked });
@@ -119,6 +129,10 @@ async function saveQuota(acc: DouyinAccount, event: Event) {
   const input = event.target as HTMLInputElement;
   const quota = Number(input.value);
   if (!Number.isFinite(quota) || quota < 0) return;
+  if (!license.value?.can_use_business) {
+    error.value = `当前授权状态为「${license.value?.state_label || '未激活'}」，无法修改配额`;
+    return;
+  }
   savingId.value = acc.id;
   try {
     const updated = await patchAccount(acc.id, { daily_reply_quota: quota });
@@ -146,7 +160,10 @@ onMounted(load);
         <h2>我的抖音号</h2>
         <p class="sub">通过浏览器凭证提取插件获取一键导入串，在此粘贴并托管抖音私信消息。</p>
         <p v-if="license && !license.can_use_business" class="license-tip">
-          当前授权状态为「{{ license.state_label }}」，账号导入与凭证更新已限制。
+          当前授权状态为「{{ license.state_label }}」，账号导入、凭证更新与自动回复托管已限制。
+        </p>
+        <p v-if="overAccountLimit" class="license-tip warn-limit">
+          已托管 {{ accounts.length }} 个账号，超过单机建议上限（{{ RECOMMENDED_MAX_ACCOUNTS }} 个）。账号过多会增加内存占用、回复延迟与风控关联风险，建议分散到多台设备托管。
         </p>
       </div>
       <button type="button" class="btn-glass btn-primary-glass" @click="openImport()">
@@ -210,7 +227,7 @@ onMounted(load);
               type="number"
               min="0"
               :value="acc.daily_reply_quota ?? 200"
-              :disabled="savingId === acc.id"
+              :disabled="savingId === acc.id || !!(license && !license.can_use_business)"
               @change="saveQuota(acc, $event)"
             />
           </div>
@@ -221,7 +238,7 @@ onMounted(load);
             <input
               type="checkbox"
               :checked="acc.auto_reply_enabled"
-              :disabled="savingId === acc.id"
+              :disabled="savingId === acc.id || !!(license && !license.can_use_business)"
               @change="toggleAutoReply(acc, $event)"
             />
             <span class="slider"></span>
@@ -302,6 +319,10 @@ onMounted(load);
   margin: 8px 0 0;
   color: #b45309;
   font-size: 0.88rem;
+}
+
+.license-tip.warn-limit {
+  color: #c2410c;
 }
 
 .loading-state, .empty-state {

@@ -83,9 +83,15 @@ class LicensePlanPatch(Schema):
 
 
 class LicensePlanOut(ModelSchema):
+    id: str
+
     class Config:
         model = LicensePlan
         model_fields = "__all__"
+
+    @staticmethod
+    def resolve_id(obj):
+        return str(obj.id) if obj.id else None
 
 
 class LicenseKeyGenerateIn(Schema):
@@ -131,6 +137,7 @@ class LicenseKeyPatch(Schema):
 
 
 class LicenseKeyOut(ModelSchema):
+    id: str
     plan_id: Optional[str] = Field(None, alias="plan_id")
     plan_name: Optional[str] = None
     effective_max_devices: Optional[int] = None
@@ -139,6 +146,14 @@ class LicenseKeyOut(ModelSchema):
     class Config:
         model = LicenseKey
         model_fields = "__all__"
+
+    @staticmethod
+    def resolve_id(obj):
+        return str(obj.id) if obj.id else None
+
+    @staticmethod
+    def resolve_plan_id(obj):
+        return str(obj.plan_id) if obj.plan_id else None
 
     @staticmethod
     def resolve_plan_name(obj):
@@ -168,12 +183,19 @@ class LicenseKeyGenerateOut(Schema):
 
 
 class ClientDeviceOut(ModelSchema):
+    id: str
+
     class Config:
         model = ClientDevice
         model_fields = "__all__"
 
+    @staticmethod
+    def resolve_id(obj):
+        return str(obj.id) if obj.id else None
+
 
 class LicenseActivationOut(ModelSchema):
+    id: str
     license_key_id: Optional[str] = Field(None, alias="license_key_id")
     client_device_id: Optional[str] = Field(None, alias="client_device_id")
     masked_code: Optional[str] = None
@@ -182,6 +204,18 @@ class LicenseActivationOut(ModelSchema):
     class Config:
         model = LicenseActivation
         model_fields = "__all__"
+
+    @staticmethod
+    def resolve_id(obj):
+        return str(obj.id) if obj.id else None
+
+    @staticmethod
+    def resolve_license_key_id(obj):
+        return str(obj.license_key_id) if obj.license_key_id else None
+
+    @staticmethod
+    def resolve_client_device_id(obj):
+        return str(obj.client_device_id) if obj.client_device_id else None
 
     @staticmethod
     def resolve_masked_code(obj):
@@ -193,6 +227,7 @@ class LicenseActivationOut(ModelSchema):
 
 
 class LicenseEventOut(ModelSchema):
+    id: str
     license_key_id: Optional[str] = Field(None, alias="license_key_id")
     client_device_id: Optional[str] = Field(None, alias="client_device_id")
     activation_id: Optional[str] = Field(None, alias="activation_id")
@@ -200,6 +235,22 @@ class LicenseEventOut(ModelSchema):
     class Config:
         model = LicenseEvent
         model_fields = "__all__"
+
+    @staticmethod
+    def resolve_id(obj):
+        return str(obj.id) if obj.id else None
+
+    @staticmethod
+    def resolve_license_key_id(obj):
+        return str(obj.license_key_id) if obj.license_key_id else None
+
+    @staticmethod
+    def resolve_client_device_id(obj):
+        return str(obj.client_device_id) if obj.client_device_id else None
+
+    @staticmethod
+    def resolve_activation_id(obj):
+        return str(obj.activation_id) if obj.activation_id else None
 
 
 class LicenseRevokeIn(Schema):

@@ -155,7 +155,19 @@ else:
             'ENGINE': 'django.db.backends.sqlite3',
             'NAME': _sqlite_path,
             'OPTIONS': {
+                # timeout 映射到 sqlite busy_timeout（被锁时最多等 20s 再报错）
                 'timeout': 20,
+                # 多账号托管：API 进程与 Worker 进程并发读写同一库文件。
+                # WAL 让读不阻塞写、写不阻塞读，大幅减少 database is locked；
+                # synchronous=NORMAL 在 WAL 下兼顾安全与吞吐；foreign_keys 与默认一致。
+                'init_command': (
+                    'PRAGMA journal_mode=WAL;'
+                    'PRAGMA synchronous=NORMAL;'
+                    'PRAGMA foreign_keys=ON;'
+                    'PRAGMA busy_timeout=20000;'
+                ),
+                # 写事务开启即取写锁（BEGIN IMMEDIATE），避免延迟升级锁导致的死锁/locked。
+                'transaction_mode': 'IMMEDIATE',
             },
         }
     }

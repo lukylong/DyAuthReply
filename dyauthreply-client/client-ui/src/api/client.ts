@@ -347,6 +347,13 @@ export function listMessages(accountId: string, conversationId: string) {
   );
 }
 
+export function refreshConversationUser(accountId: string, conversationId: string) {
+  return request<{ success: boolean; message?: string }>(
+    `/douyin/account/${accountId}/conversation/${conversationId}/refresh-user`,
+    { method: 'POST' },
+  );
+}
+
 export function sendManualReply(accountId: string, conversationId: string, text: string) {
   return request<{ success: boolean; message?: string; command_id?: string | null }>(
     `/douyin/account/${accountId}/manual-reply`,

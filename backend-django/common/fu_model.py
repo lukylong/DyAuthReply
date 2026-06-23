@@ -27,7 +27,7 @@ class RootModel(models.Model):
     id = models.CharField(
         primary_key=True,
         max_length=36,
-        default=uuid.uuid4,
+        default=lambda: str(uuid.uuid4()),
         help_text="主键ID",
         editable=False,
     )

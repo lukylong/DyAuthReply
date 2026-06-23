@@ -174,6 +174,12 @@ export function updateLicensePlanApi(planId: string, data: Partial<LicensePlanIn
   return requestClient.patch<LicensePlan>(`/api/core/license/plan/${planId}`, data);
 }
 
+export function deleteLicensePlanApi(planId: string) {
+  return requestClient.delete<{ deleted_keys: number; revoked_activations: number; success: boolean }>(
+    `/api/core/license/plan/${planId}`,
+  );
+}
+
 export function getLicenseKeyListApi(params?: LicenseKeyListParams) {
   return requestClient.get<PaginatedResponse<LicenseKey>>('/api/core/license/key', { params });
 }
@@ -184,6 +190,10 @@ export function generateLicenseKeysApi(data: LicenseKeyGenerateInput) {
 
 export function revokeLicenseKeyApi(licenseKeyId: string, reason: string) {
   return requestClient.post<LicenseKey>(`/api/core/license/key/${licenseKeyId}/revoke`, { reason });
+}
+
+export function deleteLicenseKeyApi(licenseKeyId: string) {
+  return requestClient.delete<{ success: boolean }>(`/api/core/license/key/${licenseKeyId}`);
 }
 
 export function getClientDeviceListApi(params?: ClientDeviceListParams) {

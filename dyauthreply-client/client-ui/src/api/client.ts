@@ -203,6 +203,34 @@ export function deactivateLicense(reason = '客户端主动解绑') {
   });
 }
 
+export interface AppUpdateInfo {
+  current_version: string;
+  latest_version: string;
+  has_update: boolean;
+  mandatory: boolean;
+  notes: string;
+  download_url: string;
+  release_page: string;
+}
+
+export function checkAppUpdate(current = '') {
+  return request<AppUpdateInfo>(withQuery('/app-update/check', { current }));
+}
+
+export async function openExternalUrl(url: string): Promise<void> {
+  if (!url) return;
+  const tauri = (window as unknown as { __TAURI__?: { opener?: { openUrl?: (u: string) => Promise<void> } } }).__TAURI__;
+  try {
+    if (tauri?.opener?.openUrl) {
+      await tauri.opener.openUrl(url);
+      return;
+    }
+  } catch {
+    // fall back to window.open below
+  }
+  window.open(url, '_blank');
+}
+
 export interface RuntimeLogFile {
   name: string;
   path: string;

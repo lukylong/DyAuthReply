@@ -502,3 +502,20 @@ DOWNLOAD_EXTENSION_URL = os.environ.get(
 )
 # 管理后台入口（落地页提供跳转）
 DOWNLOAD_CONSOLE_URL = os.environ.get('DOWNLOAD_CONSOLE_URL', '/manage/')
+
+# ================================================= #
+# **************** 客户端升级通道配置 **************** #
+# ================================================= #
+# 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
+# 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION', '0.1.10')
+# 是否强制更新（true 时客户端弹窗不提供「稍后」）
+DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
+# 更新说明（支持用 \n 分隔多行）
+DOWNLOAD_RELEASE_NOTES = os.environ.get(
+    'DOWNLOAD_RELEASE_NOTES',
+    '新增客户端在线检查更新通道\n'
+    '修复私信工作台消息时间显示与排序问题\n'
+    '自动获取并渲染会话对方昵称/头像\n'
+    '优化多账号托管性能与稳定性',
+)

@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router';
-import { getHealth } from '../api/client';
+import { checkAppUpdate, getHealth, openExternalUrl, type AppUpdateInfo } from '../api/client';
 import { useClientLicense } from '../composables/useClientLicense';
 import { APP_VERSION, useHiddenAdminEntry } from '../composables/useHiddenAdminEntry';
+import AppModal from '../components/AppModal.vue';
 
 const route = useRoute();
 const router = useRouter();
@@ -13,6 +14,15 @@ const isOnline = ref(false);
 const serviceName = ref('core-api');
 const { licenseStatus, ensureStatus } = useClientLicense();
 let healthTimer: ReturnType<typeof setInterval> | null = null;
+
+const updateInfo = ref<AppUpdateInfo | null>(null);
+const updateModalOpen = ref(false);
+const checkingUpdate = ref(false);
+const updateHint = ref('');
+const openingDownload = ref(false);
+const updateNoteLines = computed(() =>
+  (updateInfo.value?.notes || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
+);
 
 async function checkHealth() {
   try {
@@ -24,10 +34,55 @@ async function checkHealth() {
   }
 }
 
+async function runUpdateCheck(manual: boolean) {
+  if (checkingUpdate.value) return;
+  checkingUpdate.value = true;
+  if (manual) updateHint.value = '正在检查更新…';
+  try {
+    const info = await checkAppUpdate(APP_VERSION);
+    updateInfo.value = info;
+    if (info.has_update) {
+      updateModalOpen.value = true;
+      updateHint.value = '';
+    } else if (manual) {
+      updateHint.value = '已是最新版本';
+      window.setTimeout(() => {
+        updateHint.value = '';
+      }, 2500);
+    }
+  } catch (e) {
+    if (manual) {
+      updateHint.value = '检查更新失败';
+      window.setTimeout(() => {
+        updateHint.value = '';
+      }, 2500);
+    }
+  } finally {
+    checkingUpdate.value = false;
+  }
+}
+
+async function goDownloadUpdate() {
+  const url = updateInfo.value?.download_url || updateInfo.value?.release_page || '';
+  if (!url) return;
+  openingDownload.value = true;
+  try {
+    await openExternalUrl(url);
+  } finally {
+    openingDownload.value = false;
+  }
+}
+
+function dismissUpdate() {
+  if (updateInfo.value?.mandatory) return;
+  updateModalOpen.value = false;
+}
+
 onMounted(() => {
   checkHealth();
   ensureStatus();
   healthTimer = setInterval(checkHealth, 5000);
+  window.setTimeout(() => runUpdateCheck(false), 3000);
 });
 
 onUnmounted(() => {
@@ -92,9 +147,41 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
           <span class="license-title">授权</span>
           <span class="license-value">{{ licenseStatus.state_label }}</span>
         </div>
-        <div class="version-tag">{{ APP_VERSION }}</div>
+        <div
+          class="version-tag"
+          :class="{ checking: checkingUpdate }"
+          :title="'点击检查更新'"
+          @click="runUpdateCheck(true)"
+        >
+          {{ updateHint || APP_VERSION }}
+        </div>
       </div>
     </aside>
+
+    <AppModal :open="updateModalOpen" title="发现新版本" dialog-role="alertdialog" @close="dismissUpdate">
+      <div class="update-body">
+        <div class="update-version">
+          <span class="from">{{ updateInfo?.current_version }}</span>
+          <span class="arrow">→</span>
+          <span class="to">{{ updateInfo?.latest_version }}</span>
+        </div>
+        <ul v-if="updateNoteLines.length" class="update-notes">
+          <li v-for="(line, i) in updateNoteLines" :key="i">{{ line }}</li>
+        </ul>
+        <p class="update-tip">
+          点击「前往下载」将在浏览器中打开安装包，下载完成后直接安装即可覆盖更新（数据不会丢失）。
+        </p>
+        <p v-if="updateInfo?.mandatory" class="update-mandatory">本次为强制更新，请更新后继续使用。</p>
+        <div class="update-actions">
+          <button v-if="!updateInfo?.mandatory" type="button" class="btn-ghost" @click="dismissUpdate">
+            稍后
+          </button>
+          <button type="button" class="btn-primary" :disabled="openingDownload" @click="goDownloadUpdate">
+            {{ openingDownload ? '正在打开…' : '前往下载' }}
+          </button>
+        </div>
+      </div>
+    </AppModal>
 
     <!-- Main Workspace with Rounded Corner Card Style -->
     <main class="main-workspace" :class="{ wide: isWide }">
@@ -262,7 +349,109 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
   color: var(--text-muted);
   opacity: 0.55;
   user-select: none;
-  cursor: default;
+  cursor: pointer;
+  transition: var(--transition-quick);
+}
+
+.version-tag:hover {
+  opacity: 0.9;
+}
+
+.version-tag.checking {
+  opacity: 0.9;
+}
+
+.update-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.update-version {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.update-version .from {
+  color: var(--text-muted);
+}
+
+.update-version .arrow {
+  color: var(--text-muted);
+}
+
+.update-version .to {
+  color: #15803d;
+}
+
+.update-notes {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.update-tip {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.update-mandatory {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #b45309;
+}
+
+.update-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.update-actions .btn-ghost {
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  background: rgba(0, 0, 0, 0.02);
+  color: var(--text-secondary);
+  padding: 9px 18px;
+  border-radius: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition-quick);
+}
+
+.update-actions .btn-ghost:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--text-primary);
+}
+
+.update-actions .btn-primary {
+  border: none;
+  background: linear-gradient(135deg, #1f2937, #111827);
+  color: #fff;
+  padding: 9px 20px;
+  border-radius: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: var(--transition-quick);
+}
+
+.update-actions .btn-primary:hover {
+  filter: brightness(1.15);
+}
+
+.update-actions .btn-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .license-badge {

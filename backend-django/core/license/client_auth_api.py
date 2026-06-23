@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """Hosted client authorization APIs."""
+from django.conf import settings
 from ninja import Router
 
 from core.license.license_schema import (
@@ -9,6 +10,7 @@ from core.license.license_schema import (
     ClientAuthCheckInIn,
     ClientAuthDeactivateIn,
     ClientAuthDeactivateOut,
+    AppVersionOut,
 )
 from core.license.license_service import (
     activate_license,
@@ -18,6 +20,19 @@ from core.license.license_service import (
 )
 
 router = Router()
+
+
+@router.get("/app-version", response=AppVersionOut, auth=None, summary="客户端最新版本信息")
+def app_version(request):
+    """对外公开的客户端升级通道：返回最新版本号、下载链接与更新说明。"""
+    return {
+        "version": settings.DOWNLOAD_LATEST_VERSION,
+        "mandatory": settings.DOWNLOAD_FORCE_UPDATE,
+        "notes": settings.DOWNLOAD_RELEASE_NOTES,
+        "macos_url": settings.DOWNLOAD_MACOS_URL,
+        "windows_url": settings.DOWNLOAD_WINDOWS_URL,
+        "release_page": settings.DOWNLOAD_RELEASE_PAGE,
+    }
 
 
 @router.post("/activate", response=ClientAuthStateOut, auth=None, summary="客户端激活卡密")

@@ -135,6 +135,16 @@ def license_deactivate(request, payload: ClientLicenseDeactivateIn):
     return deactivate_remote_license(reason=(payload.reason or '').strip())
 
 
+@client_router.get('/app-update/check', auth=None, summary='检查客户端更新（仅本机）')
+def app_update_check(request, current: str = ''):
+    from common.local_desktop_auth import _is_loopback
+    from core.client.app_update import check_app_update
+
+    if not _is_loopback(request):
+        return client_api.create_response(request, {'detail': 'forbidden'}, status=403)
+    return check_app_update(current_version=(current or '').strip())
+
+
 @client_router.get('/runtime-logs/files', summary='运行日志文件列表（隐藏入口）')
 def runtime_log_files(request):
     from core.client.admin_auth import require_admin

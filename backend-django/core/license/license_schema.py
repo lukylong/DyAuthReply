@@ -326,3 +326,12 @@ class ClientAuthStateOut(Schema):
 class ClientAuthDeactivateOut(Schema):
     ok: bool
     status: str
+
+
+class AppVersionOut(Schema):
+    version: str
+    mandatory: bool = False
+    notes: str = ""
+    macos_url: str = ""
+    windows_url: str = ""
+    release_page: str = ""

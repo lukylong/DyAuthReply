@@ -4,6 +4,8 @@ import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router';
 import { checkAppUpdate, getHealth, openExternalUrl, type AppUpdateInfo } from '../api/client';
 import { useClientLicense } from '../composables/useClientLicense';
 import { APP_VERSION, useHiddenAdminEntry } from '../composables/useHiddenAdminEntry';
+import { useVersionUpdate } from '../composables/useVersionUpdate';
+import { useAnnouncementListener } from '../composables/useAnnouncementListener';
 import AppModal from '../components/AppModal.vue';
 
 const route = useRoute();
@@ -14,6 +16,10 @@ const isOnline = ref(false);
 const serviceName = ref('core-api');
 const { licenseStatus, ensureStatus } = useClientLicense();
 let healthTimer: ReturnType<typeof setInterval> | null = null;
+
+// 集成版本更新和公告监听
+const { hasUpdate: hasVersionUpdate, updateInfo: versionUpdateInfo } = useVersionUpdate();
+const { unreadCount: unreadAnnouncementCount } = useAnnouncementListener();
 
 const updateInfo = ref<AppUpdateInfo | null>(null);
 const updateModalOpen = ref(false);
@@ -132,6 +138,9 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
         <RouterLink to="/logs" class="nav-item">
           <span class="icon">📝</span>回复记录
         </RouterLink>
+        <RouterLink to="/settings" class="nav-item">
+          <span class="icon">⚙️</span>客户端设置
+        </RouterLink>
       </nav>
 
       <!-- Sidebar footer with connection health status -->
@@ -149,11 +158,12 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
         </div>
         <div
           class="version-tag"
-          :class="{ checking: checkingUpdate }"
+          :class="{ checking: checkingUpdate, 'has-update': hasVersionUpdate }"
           :title="'点击检查更新'"
           @click="runUpdateCheck(true)"
         >
           {{ updateHint || APP_VERSION }}
+          <span v-if="hasVersionUpdate" class="update-badge"></span>
         </div>
       </div>
     </aside>
@@ -533,5 +543,37 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
 .main-workspace.wide .scroll-container {
   padding: 0;
   overflow: hidden;
+}
+
+/* 版本更新红点 */
+.version-tag {
+  position: relative;
+}
+
+.version-tag.has-update .update-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 8px;
+  height: 8px;
+  background: #ef4444;
+  border-radius: 50%;
+  border: 2px solid var(--glass-bg);
+  animation: pulse-red 2s infinite;
+}
+
+@keyframes pulse-red {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+  }
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 6px rgba(239, 68, 68, 0);
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+  }
 }
 </style>

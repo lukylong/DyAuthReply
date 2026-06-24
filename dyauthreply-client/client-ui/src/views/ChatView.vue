@@ -19,6 +19,20 @@ const activeAccountId = ref('');
 const conversations = ref<ConversationItem[]>([]);
 const activeConversationId = ref('');
 const messages = ref<MessageItem[]>([]);
+/** 本地待确认/outbound 消息（发送中/失败），按会话隔离 */
+interface PendingOutbound {
+  localId: string;
+  conversationId: string;
+  content: string;
+  status: 'sending' | 'failed';
+  error?: string;
+  createdAt: string;
+}
+type DisplayMessage = MessageItem & {
+  send_status?: 'sending' | 'failed';
+  send_error?: string;
+};
+const pendingOutbounds = ref<PendingOutbound[]>([]);
 const replyText = ref('');
 const messagesEl = ref<HTMLElement | null>(null);
 const messagesEndRef = ref<HTMLElement | null>(null);
@@ -222,6 +236,89 @@ function insertEmoji(emoji: string) {
   showEmoji.value = false;
 }
 
+function humanizeSendError(raw?: string | null): string {
+  if (!raw) return '未知错误';
+  const s = raw.trim();
+  if (s.includes('7911') || s.includes('机房')) return '风控拦截(7911)，请换网络或稍后重试';
+  if (s.includes('8101')) return '发送被限制(8101)';
+  if (s.includes('登录失效') || s.includes('401') || s.includes('LoginExpired')) {
+    return '登录失效，请重新导入登录态';
+  }
+  if (s.includes('超时')) return '等待回执超时';
+  if (s.includes('signer') || s.includes('签名')) return '签名引擎未就绪';
+  return s.length > 56 ? `${s.slice(0, 56)}…` : s;
+}
+
+function pendingToMessage(p: PendingOutbound): DisplayMessage {
+  return {
+    id: `local:${p.localId}`,
+    direction: 'out',
+    content_type: 'text',
+    content: p.content,
+    received_at: p.createdAt,
+    processed: true,
+    send_status: p.status,
+    send_error: p.error,
+  };
+}
+
+function reconcilePending(items: MessageItem[]) {
+  const convId = activeConversationId.value;
+  if (!convId) return;
+  pendingOutbounds.value = pendingOutbounds.value.filter((p) => {
+    if (p.conversationId !== convId) return true;
+    if (p.status === 'failed') return true;
+    return !items.some(
+      (m) =>
+        m.direction === 'out' &&
+        m.content.trim() === p.content.trim() &&
+        Math.abs(
+          new Date(m.received_at || 0).getTime() - new Date(p.createdAt).getTime(),
+        ) < 120_000,
+    );
+  });
+}
+
+const displayMessages = computed<DisplayMessage[]>(() => {
+  const convId = activeConversationId.value;
+  const pending = pendingOutbounds.value
+    .filter((p) => p.conversationId === convId)
+    .map(pendingToMessage);
+  return [...messages.value, ...pending].sort((a, b) => {
+    const ta = a.received_at ? new Date(a.received_at).getTime() : 0;
+    const tb = b.received_at ? new Date(b.received_at).getTime() : 0;
+    return ta - tb;
+  });
+});
+
+function sendStatus(msg: DisplayMessage): 'sending' | 'failed' | null {
+  return msg.send_status ?? null;
+}
+
+function markPendingFailed(localId: string, error: string) {
+  const row = pendingOutbounds.value.find((p) => p.localId === localId);
+  if (row) {
+    row.status = 'failed';
+    row.error = error;
+  }
+}
+
+function removePending(localId: string) {
+  pendingOutbounds.value = pendingOutbounds.value.filter((p) => p.localId !== localId);
+}
+
+function dismissFailed(msg: DisplayMessage) {
+  if (!msg.id.startsWith('local:')) return;
+  removePending(msg.id.slice(6));
+}
+
+function retryFailed(msg: DisplayMessage) {
+  if (!msg.id.startsWith('local:')) return;
+  const content = msg.content;
+  dismissFailed(msg);
+  void sendText(content);
+}
+
 function sortConversations(items: ConversationItem[]) {
   return [...items].sort((a, b) => {
     const ta = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
@@ -410,6 +507,7 @@ async function loadMessages(silent = false, force = false) {
     if (force || sig !== msgSig) {
       msgSig = sig;
       messages.value = items;
+      reconcilePending(items);
       if (shouldScroll) {
         stickToBottom.value = true;
         await scrollMessagesToBottom();
@@ -428,6 +526,7 @@ function selectAccount(id: string) {
   activeAccountId.value = id;
   activeConversationId.value = '';
   messages.value = [];
+  pendingOutbounds.value = [];
   convSig = '';
   msgSig = '';
   convPage.value = 1;
@@ -503,42 +602,67 @@ async function waitManualReplyResult(commandId: string, sentText: string) {
   return { ok: false as const, error: '等待回执超时，请稍后刷新重试' };
 }
 
-async function onSend() {
+async function sendText(text: string) {
   if (!license.value?.can_use_business) {
     toast.value = `当前授权状态为「${license.value?.state_label || '未激活'}」，无法发送消息`;
     return;
   }
-  const text = replyText.value.trim();
-  if (!text || !activeAccountId.value || !activeConversationId.value) return;
+  const normalized = text.trim();
+  if (!normalized || !activeAccountId.value || !activeConversationId.value) return;
+
+  const localId = crypto.randomUUID();
+  pendingOutbounds.value.push({
+    localId,
+    conversationId: activeConversationId.value,
+    content: normalized,
+    status: 'sending',
+    createdAt: new Date().toISOString(),
+  });
+  stickToBottom.value = true;
+  await scrollMessagesToBottom();
+
   sending.value = true;
   toast.value = '';
   try {
-    const res = await sendManualReply(activeAccountId.value, activeConversationId.value, text);
+    const res = await sendManualReply(
+      activeAccountId.value,
+      activeConversationId.value,
+      normalized,
+    );
     if (!res.success) {
+      markPendingFailed(localId, res.message || '发送失败');
       toast.value = res.message || '发送失败';
       return;
     }
-    replyText.value = '';
-    toast.value = '正在投递消息至抖音云端...';
     if (res.command_id) {
-      const outcome = await waitManualReplyResult(res.command_id, text);
+      const outcome = await waitManualReplyResult(res.command_id, normalized);
       if (outcome.ok) {
-        toast.value = '发送成功';
-        window.setTimeout(() => {
-          if (toast.value === '发送成功') toast.value = '';
-        }, 2500);
+        removePending(localId);
+        msgSig = '';
+        await Promise.all([loadMessages(true, true), loadConversations(true)]);
         return;
       }
+      markPendingFailed(localId, outcome.error || '发送失败');
       toast.value = outcome.error || '发送失败';
       return;
     }
+    removePending(localId);
     msgSig = '';
     await refreshAfterSend();
   } catch (e) {
-    toast.value = e instanceof Error ? e.message : String(e);
+    const err = e instanceof Error ? e.message : String(e);
+    markPendingFailed(localId, err);
+    toast.value = err;
   } finally {
     sending.value = false;
   }
+}
+
+async function onSend() {
+  const text = replyText.value.trim();
+  if (!text) return;
+  replyText.value = '';
+  await sendText(text);
 }
 
 function stopPolling() {
@@ -702,10 +826,13 @@ onUnmounted(() => {
         <div ref="messagesEl" class="messages" @scroll="onMessagesScroll">
           <div v-if="loadingMessages && messages.length === 0" class="chat-loading inline">正在拉取记录...</div>
           <div
-            v-for="msg in messages"
+            v-for="msg in displayMessages"
             :key="msg.id"
             class="msg-row"
-            :class="msg.direction === 'out' ? 'out' : 'in'"
+            :class="[
+              msg.direction === 'out' ? 'out' : 'in',
+              sendStatus(msg) === 'failed' ? 'send-failed' : '',
+            ]"
           >
             <div v-if="msg.direction === 'in'" class="avatar xs">
               <img
@@ -715,7 +842,7 @@ onUnmounted(() => {
               />
               <span v-else>{{ avatarInitial(displayPeerName(activeConversation)) }}</span>
             </div>
-            <div class="bubble">
+            <div class="bubble" :class="{ 'is-pending': sendStatus(msg) === 'sending' }">
               <!-- 图片 / 表情贴纸 -->
               <template v-if="mediaKind(msg) === 'image' || mediaKind(msg) === 'emoji'">
                 <img
@@ -758,6 +885,23 @@ onUnmounted(() => {
               <p v-else class="text">{{ msg.content }}</p>
 
               <time>{{ formatTime(msg.received_at) }}</time>
+              <span
+                v-if="msg.direction === 'out' && sendStatus(msg)"
+                class="send-status"
+                :class="sendStatus(msg)!"
+                :title="msg.send_error || undefined"
+              >
+                <template v-if="sendStatus(msg) === 'sending'">发送中…</template>
+                <template v-else>
+                  发送失败 · {{ humanizeSendError(msg.send_error) }}
+                  <button type="button" class="send-retry" @click.stop="retryFailed(msg)">
+                    重试
+                  </button>
+                  <button type="button" class="send-dismiss" @click.stop="dismissFailed(msg)">
+                    关闭
+                  </button>
+                </template>
+              </span>
             </div>
             <div v-if="msg.direction === 'out'" class="avatar xs out-av">
               <img v-if="activeAccount?.avatar" :src="activeAccount.avatar" alt="" />
@@ -1302,6 +1446,42 @@ onUnmounted(() => {
   opacity: 0.7;
   color: var(--text-muted);
   text-align: right;
+}
+
+.bubble.is-pending {
+  opacity: 0.82;
+}
+.msg-row.send-failed .bubble {
+  box-shadow: inset 0 0 0 1px rgba(245, 34, 45, 0.35);
+}
+.send-status {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.68rem;
+  text-align: right;
+  line-height: 1.4;
+}
+.send-status.sending {
+  color: var(--text-muted);
+}
+.send-status.failed {
+  color: #cf1322;
+}
+.send-retry,
+.send-dismiss {
+  margin-left: 6px;
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  opacity: 0.85;
+}
+.send-retry:hover,
+.send-dismiss:hover {
+  opacity: 1;
 }
 
 .no-msg {

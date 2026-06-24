@@ -4,6 +4,11 @@ import type {
   DouyinMessageItem,
 } from '#/api/core/douyin';
 
+type ChatMessage = DouyinMessageItem & {
+  send_status?: 'sending' | 'failed';
+  send_error?: string;
+};
+
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 
 import {
@@ -24,13 +29,15 @@ const props = defineProps<{
   accountId?: string;
   conversationId?: string;
   conversation?: DouyinConversationItem | null;
-  messages: DouyinMessageItem[];
+  messages: ChatMessage[];
   loading?: boolean;
 }>();
 
 const emit = defineEmits<{
   refresh: [];
   sendMessage: [text: string];
+  retryMessage: [text: string];
+  dismissPending: [localId: string];
 }>();
 
 const messageInput = ref('');
@@ -265,6 +272,39 @@ function insertEmoji(emoji: string) {
   emojiVisible.value = false;
 }
 
+function humanizeSendError(raw?: string | null): string {
+  if (!raw) return '未知错误';
+  const s = raw.trim();
+  if (s.includes('7911') || s.includes('机房')) return '风控拦截(7911)，请换网络或稍后重试';
+  if (s.includes('8101')) return '发送被限制(8101)';
+  if (s.includes('登录失效') || s.includes('401') || s.includes('LoginExpired')) {
+    return '登录失效，请重新导入登录态';
+  }
+  if (s.includes('超时')) return '等待回执超时';
+  if (s.includes('signer') || s.includes('签名')) return '签名引擎未就绪';
+  return s.length > 56 ? `${s.slice(0, 56)}…` : s;
+}
+
+function sendStatus(msg: ChatMessage): 'sending' | 'failed' | null {
+  return msg.send_status ?? null;
+}
+
+function pendingLocalId(msg: ChatMessage): string | null {
+  if (!msg.id.startsWith('local:')) return null;
+  return msg.id.slice(6);
+}
+
+function retryFailed(msg: ChatMessage) {
+  const id = pendingLocalId(msg);
+  if (id) emit('dismissPending', id);
+  emit('retryMessage', msg.content);
+}
+
+function dismissFailed(msg: ChatMessage) {
+  const id = pendingLocalId(msg);
+  if (id) emit('dismissPending', id);
+}
+
 function formatTime(dateStr?: null | string): string {
   if (!dateStr) return '';
   const date = new Date(dateStr);
@@ -355,7 +395,10 @@ watch(
           v-for="msg in messages"
           :key="msg.id"
           class="message-item"
-          :class="{ 'is-mine': msg.direction === 'out' }"
+          :class="{
+            'is-mine': msg.direction === 'out',
+            'send-failed': sendStatus(msg) === 'failed',
+          }"
         >
           <ElAvatar
             :src="getSenderInfo(msg).avatar || undefined"
@@ -376,7 +419,10 @@ watch(
             </div>
             <div
               class="message-bubble"
-              :class="{ 'is-media': mediaKind(msg) !== 'text' }"
+              :class="{
+                'is-media': mediaKind(msg) !== 'text',
+                'is-pending': sendStatus(msg) === 'sending',
+              }"
             >
               <!-- 图片 / 表情贴纸 -->
               <template
@@ -438,6 +484,22 @@ watch(
               <template v-else>
                 {{ msg.content }}
               </template>
+              <div
+                v-if="msg.direction === 'out' && sendStatus(msg)"
+                class="send-status"
+                :class="sendStatus(msg)!"
+              >
+                <template v-if="sendStatus(msg) === 'sending'">发送中…</template>
+                <template v-else>
+                  发送失败 · {{ humanizeSendError(msg.send_error) }}
+                  <ElButton link type="primary" size="small" @click.stop="retryFailed(msg)">
+                    重试
+                  </ElButton>
+                  <ElButton link size="small" @click.stop="dismissFailed(msg)">
+                    关闭
+                  </ElButton>
+                </template>
+              </div>
             </div>
           </div>
         </div>
@@ -640,6 +702,28 @@ watch(
   &.is-media {
     padding: 6px;
     background: transparent;
+  }
+
+  &.is-pending {
+    opacity: 0.82;
+  }
+}
+
+.message-item.send-failed .message-bubble {
+  box-shadow: inset 0 0 0 1px rgba(245, 34, 45, 0.35);
+}
+
+.send-status {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+
+  &.sending {
+    color: #8c8c8c;
+  }
+
+  &.failed {
+    color: #cf1322;
   }
 }
 

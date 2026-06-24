@@ -35,6 +35,79 @@ const messagesLoading = ref(false);
 // 会话列表和消息列表
 const conversations = ref<DouyinConversationItem[]>([]);
 const messages = ref<DouyinMessageItem[]>([]);
+
+interface PendingOutbound {
+  localId: string;
+  conversationId: string;
+  content: string;
+  status: 'sending' | 'failed';
+  error?: string;
+  createdAt: string;
+}
+type DisplayMessageItem = DouyinMessageItem & {
+  send_status?: 'sending' | 'failed';
+  send_error?: string;
+};
+const pendingOutbounds = ref<PendingOutbound[]>([]);
+
+function pendingToMessage(p: PendingOutbound): DisplayMessageItem {
+  return {
+    id: `local:${p.localId}`,
+    direction: 'out',
+    content_type: 'text',
+    content: p.content,
+    received_at: p.createdAt,
+    processed: true,
+    send_status: p.status,
+    send_error: p.error,
+  };
+}
+
+function reconcilePending(items: DouyinMessageItem[]) {
+  const convId = activeConversationId.value;
+  if (!convId) return;
+  pendingOutbounds.value = pendingOutbounds.value.filter((p) => {
+    if (p.conversationId !== convId) return true;
+    if (p.status === 'failed') return true;
+    return !items.some(
+      (m) =>
+        m.direction === 'out' &&
+        m.content.trim() === p.content.trim() &&
+        Math.abs(
+          new Date(m.received_at || 0).getTime() - new Date(p.createdAt).getTime(),
+        ) < 120_000,
+    );
+  });
+}
+
+const displayMessages = computed<DisplayMessageItem[]>(() => {
+  const convId = activeConversationId.value;
+  const pending = pendingOutbounds.value
+    .filter((p) => p.conversationId === convId)
+    .map(pendingToMessage);
+  return [...messages.value, ...pending].sort((a, b) => {
+    const ta = a.received_at ? new Date(a.received_at).getTime() : 0;
+    const tb = b.received_at ? new Date(b.received_at).getTime() : 0;
+    return ta - tb;
+  });
+});
+
+function markPendingFailed(localId: string, error: string) {
+  const row = pendingOutbounds.value.find((p) => p.localId === localId);
+  if (row) {
+    row.status = 'failed';
+    row.error = error;
+  }
+}
+
+function removePending(localId: string) {
+  pendingOutbounds.value = pendingOutbounds.value.filter((p) => p.localId !== localId);
+}
+
+function onDismissPending(localId: string) {
+  removePending(localId);
+}
+
 const convKeyword = ref('');
 const convPage = ref(1);
 const convTotal = ref(0);
@@ -58,6 +131,7 @@ async function onAccountSelect(accountId: string) {
   activeAccountId.value = accountId;
   activeConversationId.value = '';
   messages.value = [];
+  pendingOutbounds.value = [];
   convKeyword.value = '';
   convPage.value = 1;
   convTotal.value = 0;
@@ -202,6 +276,7 @@ async function loadMessages() {
       activeAccountId.value,
       activeConversationId.value,
     );
+    reconcilePending(messages.value);
   } catch (error: any) {
     ElMessage.error(error.message || '加载消息列表失败');
     messages.value = [];
@@ -252,25 +327,41 @@ async function onSendMessage(text: string) {
     return;
   }
 
+  const normalized = text.trim();
+  if (!normalized) return;
+
+  const localId = crypto.randomUUID();
+  pendingOutbounds.value.push({
+    localId,
+    conversationId: activeConversationId.value,
+    content: normalized,
+    status: 'sending',
+    createdAt: new Date().toISOString(),
+  });
+
   try {
     const res = await sendAccountManualReply(
       activeAccountId.value,
       activeConversationId.value,
-      text,
+      normalized,
     );
 
     if (!res.success) {
+      markPendingFailed(localId, res.message || '发送失败');
       ElMessage.error(res.message || '发送失败');
       return;
     }
 
     const outcome = await waitManualReplyResult(res.command_id);
     if (outcome.ok) {
+      removePending(localId);
       ElMessage.success(outcome.message || res.message || '发送成功');
-    } else {
-      ElMessage.error(outcome.message || '发送失败');
+      return;
     }
+    markPendingFailed(localId, outcome.message || '发送失败');
+    ElMessage.error(outcome.message || '发送失败');
   } catch (error: any) {
+    markPendingFailed(localId, error.message || '发送失败');
     ElMessage.error(error.message || '发送失败');
   }
 }
@@ -286,6 +377,7 @@ async function pollReplyData() {
         activeAccountId.value,
         activeConversationId.value,
       );
+      reconcilePending(messages.value);
     }
   } catch (error) {
     console.error('静默刷新会话或消息失败:', error);
@@ -336,10 +428,12 @@ onUnmounted(() => {
         :account-id="activeAccountId"
         :conversation-id="activeConversationId"
         :conversation="activeConversation"
-        :messages="messages"
+        :messages="displayMessages"
         :loading="messagesLoading"
         @refresh="onRefresh"
         @send-message="onSendMessage"
+        @retry-message="onSendMessage"
+        @dismiss-pending="onDismissPending"
       />
     </div>
   </Page>

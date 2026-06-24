@@ -437,8 +437,13 @@ class FrontierWsDecorator(AccountTransport):
         # 0. 过滤非用户/系统消息
         if not m.conversation_id or m.server_message_id <= 0:
             return
-        if m.msg_type != 1 or not m.text:
-            logger.debug(f"[frontier.ws] 跳过非用户/系统消息 server_msg_id={m.server_message_id} msg_type={m.msg_type}")
+        # 系统/已读回执(content_type=system) 或 无占位文本 → 丢弃；
+        # 富媒体(图片/语音/视频/表情)有占位文本，保留并和文本一样进入回复引擎
+        if getattr(m, "content_type", "text") == "system" or not m.text:
+            logger.debug(
+                f"[frontier.ws] 跳过系统/空消息 server_msg_id={m.server_message_id} "
+                f"content_type={getattr(m, 'content_type', '?')}"
+            )
             return
 
         # 1. 确定方向
@@ -498,6 +503,8 @@ class FrontierWsDecorator(AccountTransport):
                 external_msg_id=f"srv_{m.server_message_id}",
                 platform_conversation_id=m.conversation_id,
                 direction=direction,
+                content_type=getattr(m, "content_type", "text"),
+                media=getattr(m, "media", None),
             )
         except Exception as ex:
             logger.exception(f"[frontier.ws] 消息落库异常 server_msg_id={m.server_message_id}: {ex}")

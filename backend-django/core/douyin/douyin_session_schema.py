@@ -121,6 +121,8 @@ class DouyinMessageItemOut(Schema):
     # 发送者信息（用于消息回复界面显示）
     sender_name: Optional[str] = None
     sender_avatar: Optional[str] = None
+    # 富媒体结构化数据（kind/url/cover_url/duration 等），来自 raw_payload.media
+    media: Optional[dict] = None
 
     @staticmethod
     def resolve_received_at(obj):

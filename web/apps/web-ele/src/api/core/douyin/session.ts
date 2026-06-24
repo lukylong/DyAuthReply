@@ -30,6 +30,22 @@ export interface DouyinConversationItem {
   unread_count: number;
 }
 
+export interface DouyinMessageMedia {
+  kind?: string;
+  url?: string;
+  cover_url?: string;
+  duration_s?: null | number | string;
+  duration_ms?: null | number | string;
+  width?: null | number;
+  height?: null | number;
+  item_id?: string;
+  ai_text?: null | string;
+  vid?: string;
+  inline_pic?: string;
+  encrypted?: boolean;
+  [key: string]: unknown;
+}
+
 export interface DouyinMessageItem {
   id: string;
   direction: 'in' | 'out';
@@ -39,6 +55,7 @@ export interface DouyinMessageItem {
   processed: boolean;
   sender_name?: null | string;
   sender_avatar?: null | string;
+  media?: DouyinMessageMedia | null;
 }
 
 
@@ -102,6 +119,23 @@ export async function getSessionMessages(sessionId: string, conversationId: stri
   return requestClient.get<DouyinMessageItem[]>(
     `/api/core/douyin/session/${sessionId}/conversation/${conversationId}/messages`,
   );
+}
+
+/**
+ * 拉取并解密私信加密图片，返回可用于 <img src> 的 object URL。
+ * web 端走 JWT 鉴权，<img> 标签无法携带 token，故用 axios(blob) 拉取后转 object URL。
+ * 调用方需在不再使用时 URL.revokeObjectURL 释放。
+ */
+export async function getMessageImageObjectUrl(
+  accountId: string,
+  conversationId: string,
+  messageId: string,
+): Promise<string> {
+  const blob = await requestClient.get<Blob>(
+    `/api/core/douyin/account/${accountId}/conversation/${conversationId}/message/${messageId}/image`,
+    { responseType: 'blob' },
+  );
+  return URL.createObjectURL(blob);
 }
 
 export async function sendManualReply(

@@ -60,21 +60,22 @@ class DouyinMediaUpsertTests(TestCase):
             peer_nickname="PeerUser",
             text="[图片]",
             received_at=self.received_at,
-            raw={
-                "source": "test",
-                "content_json": '{"image": {"url": "https://example.com/image.jpg", "width": 100, "height": 100}}'
-            },
+            raw={"source": "test"},
             external_msg_id="ext_msg_2",
-            direction="in"
+            direction="in",
+            content_type="image",
+            media={"kind": "image", "url": "https://example.com/image.jpg",
+                   "width": 100, "height": 100},
         )
         self.assertIsNotNone(res)
         conv_id, msg_id = res
 
         msg = await DouyinMessage.objects.aget(id=msg_id)
-        self.assertEqual(msg.content_type, "text")
+        self.assertEqual(msg.content_type, "image")
         self.assertEqual(msg.content, "[图片]")
+        self.assertEqual(msg.raw_payload["media"]["url"], "https://example.com/image.jpg")
 
-        # The preview in the conversation list should still be "[图片]"
+        # 会话列表预览仍是占位文本
         conv = await DouyinConversation.objects.aget(id=conv_id)
         self.assertEqual(conv.last_message_preview, "[图片]")
 
@@ -85,19 +86,19 @@ class DouyinMediaUpsertTests(TestCase):
             peer_nickname="PeerUser",
             text="[表情]",
             received_at=self.received_at,
-            raw={
-                "source": "test",
-                "content_json": '{"emoji": {"url_list": ["https://example.com/sticker.png"]}}'
-            },
+            raw={"source": "test"},
             external_msg_id="ext_msg_3",
-            direction="in"
+            direction="in",
+            content_type="other",
+            media={"kind": "emoji", "url": "https://example.com/sticker.png"},
         )
         self.assertIsNotNone(res)
         _, msg_id = res
 
         msg = await DouyinMessage.objects.aget(id=msg_id)
-        self.assertEqual(msg.content_type, "text")
+        self.assertEqual(msg.content_type, "other")
         self.assertEqual(msg.content, "[表情]")
+        self.assertEqual(msg.raw_payload["media"]["kind"], "emoji")
 
     async def test_upsert_video_message(self):
         res = await _upsert_conversation_and_message(
@@ -106,37 +107,39 @@ class DouyinMediaUpsertTests(TestCase):
             peer_nickname="PeerUser",
             text="[视频]",
             received_at=self.received_at,
-            raw={
-                "source": "test",
-                "content_json": '{"video": {"url": "https://example.com/video.mp4"}}'
-            },
+            raw={"source": "test"},
             external_msg_id="ext_msg_4",
-            direction="in"
+            direction="in",
+            content_type="video",
+            media={"kind": "video", "cover_url": "https://example.com/cover.jpg",
+                   "vid": "v123", "duration_s": "1.33"},
         )
         self.assertIsNotNone(res)
         _, msg_id = res
 
         msg = await DouyinMessage.objects.aget(id=msg_id)
-        self.assertEqual(msg.content_type, "text")
+        self.assertEqual(msg.content_type, "video")
         self.assertEqual(msg.content, "[视频]")
+        self.assertEqual(msg.raw_payload["media"]["cover_url"], "https://example.com/cover.jpg")
 
-    async def test_upsert_real_world_emoji_message(self):
+    async def test_upsert_voice_message(self):
         res = await _upsert_conversation_and_message(
             account_id=self.account.id,
             peer_sec_uid=self.peer_sec_uid,
             peer_nickname="PeerUser",
-            text="[表情]",
+            text="[语音]",
             received_at=self.received_at,
-            raw={
-                "source": "test",
-                "content_json": '{"display_name":"早上好","emoji_type":"lite_emoji","url":{"url_list":["https://example.com/real_sticker.png"]}}'
-            },
+            raw={"source": "test"},
             external_msg_id="ext_msg_5",
-            direction="in"
+            direction="in",
+            content_type="other",
+            media={"kind": "voice", "url": "https://example.com/voice.mp3",
+                   "duration_ms": 2600},
         )
         self.assertIsNotNone(res)
         _, msg_id = res
 
         msg = await DouyinMessage.objects.aget(id=msg_id)
-        self.assertEqual(msg.content_type, "text")
-        self.assertEqual(msg.content, "[表情]")
+        self.assertEqual(msg.content_type, "other")
+        self.assertEqual(msg.content, "[语音]")
+        self.assertEqual(msg.raw_payload["media"]["duration_ms"], 2600)

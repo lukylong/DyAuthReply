@@ -5,6 +5,7 @@ import {
   listAccounts,
   listConversations,
   listMessages,
+  messageImageUrl,
   refreshConversationUser,
   sendManualReply,
   type ConversationItem,
@@ -115,6 +116,110 @@ function formatTime(iso?: string | null) {
 
 function previewText(conv: ConversationItem) {
   return conv.last_message_preview || '暂无消息';
+}
+
+// 富媒体渲染辅助
+// 注意：用户本地图片/视频是抖音加密 CDN 资源，直链多为密文无法直接 <img> 显示；
+// 优先用消息自带的 inline_pic(base64 预览)，否则尝试直链，加载失败回退占位。
+const brokenMedia = ref<Record<string, boolean>>({});
+function onMediaError(id: string) {
+  brokenMedia.value[id] = true;
+}
+
+function mediaKind(msg: MessageItem): string {
+  const m = msg.media;
+  if (m?.kind) return String(m.kind);
+  if (msg.content_type === 'image') return 'image';
+  if (msg.content_type === 'video') return 'video';
+  if (msg.content_type === 'card') return 'share_video';
+  return 'text';
+}
+
+function inlineDataUri(msg: MessageItem): string {
+  const p = msg.media?.inline_pic;
+  if (typeof p === 'string' && p.length > 0) {
+    return `data:image/webp;base64,${p.replace(/\s+/g, '')}`;
+  }
+  return '';
+}
+
+// 加密图片/视频封面走后端解密代理；表情等公开资源用直链
+function proxyImageUrl(msg: MessageItem): string {
+  if (!activeAccountId.value || !activeConversationId.value) return '';
+  return messageImageUrl(activeAccountId.value, activeConversationId.value, msg.id);
+}
+
+function imageSrc(msg: MessageItem): string {
+  if (msg.media?.encrypted) return proxyImageUrl(msg);
+  return inlineDataUri(msg) || msg.media?.url || msg.media?.cover_url || '';
+}
+
+function videoCover(msg: MessageItem): string {
+  if (msg.media?.encrypted) return proxyImageUrl(msg);
+  return inlineDataUri(msg) || msg.media?.cover_url || msg.media?.url || '';
+}
+
+function showImage(msg: MessageItem): boolean {
+  return !brokenMedia.value[msg.id] && Boolean(imageSrc(msg));
+}
+
+function showVideoCover(msg: MessageItem): boolean {
+  return !brokenMedia.value[msg.id] && Boolean(videoCover(msg));
+}
+
+function videoDurationLabel(msg: MessageItem): string {
+  const sec = Math.round(Number(msg.media?.duration_s));
+  return Number.isFinite(sec) && sec > 0 ? `${sec}s` : '视频';
+}
+
+function voiceDurationLabel(msg: MessageItem): string {
+  const sec = Math.round(Number(msg.media?.duration_ms) / 1000);
+  return Number.isFinite(sec) && sec > 0 ? `${sec}″` : '';
+}
+
+function openMedia(url?: string) {
+  if (url) window.open(url, '_blank', 'noopener');
+}
+
+// 应用内图片预览（灯箱）
+const previewUrl = ref('');
+function previewImage(url?: string) {
+  if (url) previewUrl.value = url;
+}
+function closePreview() {
+  previewUrl.value = '';
+}
+
+// emoji 选择器（unicode 表情，走文本发送）
+const replyTextarea = ref<HTMLTextAreaElement | null>(null);
+const showEmoji = ref(false);
+const EMOJI_LIST: string[] = [
+  '😀', '😁', '😂', '🤣', '😊', '😍', '😘', '😎', '🤔', '😅',
+  '😭', '😉', '😏', '😴', '🥰', '😋', '😜', '🤗', '🤭', '😇',
+  '👍', '👎', '👌', '🙏', '👏', '💪', '🤝', '🙌', '✌️', '🤙',
+  '❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '💕', '💯', '🔥',
+  '🎉', '🎁', '✨', '⭐', '🌟', '💰', '🧧', '🤑', '🛒', '📦',
+  '😡', '😱', '😢', '😤', '🤧', '😷', '🥺', '😳', '🙄', '😬',
+];
+function toggleEmoji() {
+  showEmoji.value = !showEmoji.value;
+}
+function insertEmoji(emoji: string) {
+  const el = replyTextarea.value;
+  if (!el) {
+    replyText.value += emoji;
+  } else {
+    const start = el.selectionStart ?? replyText.value.length;
+    const end = el.selectionEnd ?? replyText.value.length;
+    replyText.value =
+      replyText.value.slice(0, start) + emoji + replyText.value.slice(end);
+    nextTick(() => {
+      el.focus();
+      const pos = start + emoji.length;
+      el.setSelectionRange(pos, pos);
+    });
+  }
+  showEmoji.value = false;
 }
 
 function sortConversations(items: ConversationItem[]) {
@@ -453,17 +558,26 @@ watch(activeConversationId, () => {
   loadMessages();
 });
 
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    if (previewUrl.value) closePreview();
+    if (showEmoji.value) showEmoji.value = false;
+  }
+}
+
 onMounted(async () => {
   await loadAccounts();
   await loadConversations();
   startPolling();
   document.addEventListener('visibilitychange', onVisibilityChange);
+  document.addEventListener('keydown', onKeydown);
 });
 
 onUnmounted(() => {
   stopPolling();
   if (convSearchTimer) clearTimeout(convSearchTimer);
   document.removeEventListener('visibilitychange', onVisibilityChange);
+  document.removeEventListener('keydown', onKeydown);
 });
 </script>
 
@@ -602,7 +716,47 @@ onUnmounted(() => {
               <span v-else>{{ avatarInitial(displayPeerName(activeConversation)) }}</span>
             </div>
             <div class="bubble">
-              <p class="text">{{ msg.content }}</p>
+              <!-- 图片 / 表情贴纸 -->
+              <template v-if="mediaKind(msg) === 'image' || mediaKind(msg) === 'emoji'">
+                <img
+                  v-if="showImage(msg)"
+                  :src="imageSrc(msg)"
+                  class="msg-media-img"
+                  :class="{ emoji: mediaKind(msg) === 'emoji' }"
+                  loading="lazy"
+                  @click="previewImage(imageSrc(msg))"
+                  @error="onMediaError(msg.id)"
+                />
+                <span v-else class="msg-media-fallback" @click="previewImage(imageSrc(msg))">
+                  🖼️ {{ msg.content || '[图片]' }}
+                </span>
+              </template>
+
+              <!-- 视频文件 / 分享视频卡片 -->
+              <template v-else-if="mediaKind(msg) === 'video' || mediaKind(msg) === 'share_video'">
+                <div class="msg-video" @click="previewImage(videoCover(msg))">
+                  <img
+                    v-if="showVideoCover(msg)"
+                    :src="videoCover(msg)"
+                    class="msg-media-img"
+                    loading="lazy"
+                    @error="onMediaError(msg.id)"
+                  />
+                  <span v-else class="msg-media-fallback">🎬 {{ msg.content || '[视频]' }}</span>
+                  <span class="msg-video-tag">▶ {{ videoDurationLabel(msg) }}</span>
+                </div>
+              </template>
+
+              <!-- 语音（仅展示占位+时长） -->
+              <template v-else-if="mediaKind(msg) === 'voice'">
+                <span class="msg-voice" @click="openMedia(msg.media?.url)">
+                  🎤 语音 {{ voiceDurationLabel(msg) }}
+                </span>
+              </template>
+
+              <!-- 文本 / 兜底 -->
+              <p v-else class="text">{{ msg.content }}</p>
+
               <time>{{ formatTime(msg.received_at) }}</time>
             </div>
             <div v-if="msg.direction === 'out'" class="avatar xs out-av">
@@ -624,7 +778,30 @@ onUnmounted(() => {
             </p>
           </transition>
           <div class="composer-row">
+            <div class="composer-tools">
+              <button
+                type="button"
+                class="emoji-btn"
+                title="表情"
+                :disabled="license ? !license.can_use_business : false"
+                @click="toggleEmoji"
+              >
+                😀
+              </button>
+              <div v-if="showEmoji" class="emoji-panel">
+                <button
+                  v-for="e in EMOJI_LIST"
+                  :key="e"
+                  type="button"
+                  class="emoji-item"
+                  @click="insertEmoji(e)"
+                >
+                  {{ e }}
+                </button>
+              </div>
+            </div>
             <textarea
+              ref="replyTextarea"
               v-model="replyText"
               rows="2"
               placeholder="输入消息以手动回复，按 Enter 发送，Shift + Enter 换行..."
@@ -645,6 +822,14 @@ onUnmounted(() => {
     </section>
 
     <p v-if="error" class="page-error">{{ error }}</p>
+
+    <!-- 图片预览灯箱 -->
+    <div v-if="previewUrl" class="img-preview-mask" @click="closePreview">
+      <button class="img-preview-close" type="button" @click.stop="closePreview">
+        ✕
+      </button>
+      <img :src="previewUrl" class="img-preview-img" alt="预览" @click.stop />
+    </div>
   </div>
 </template>
 
@@ -1058,6 +1243,58 @@ onUnmounted(() => {
   color: var(--text-primary);
 }
 
+.msg-media-img {
+  display: block;
+  max-width: 200px;
+  max-height: 260px;
+  border-radius: 10px;
+  object-fit: cover;
+  cursor: zoom-in;
+}
+
+.msg-media-img.emoji {
+  max-width: 120px;
+  max-height: 120px;
+}
+
+.msg-video {
+  position: relative;
+  display: inline-block;
+  cursor: pointer;
+}
+
+.msg-video-tag {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  padding: 2px 7px;
+  font-size: 0.72rem;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.5);
+  border-radius: 6px;
+}
+
+.msg-voice {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.msg-media-fallback {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 12px;
+  font-size: 0.86rem;
+  color: var(--text-primary);
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
 .bubble time {
   display: block;
   margin-top: 6px;
@@ -1216,5 +1453,103 @@ onUnmounted(() => {
   .col.accounts, .col.convs {
     max-height: 200px;
   }
+}
+
+/* 图片预览灯箱 */
+.img-preview-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.78);
+  cursor: zoom-out;
+  animation: img-preview-fade 0.12s ease;
+}
+@keyframes img-preview-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.img-preview-img {
+  max-width: 92vw;
+  max-height: 92vh;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+  cursor: default;
+}
+.img-preview-close {
+  position: fixed;
+  top: 20px;
+  right: 24px;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.img-preview-close:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* emoji 选择器 */
+.composer-tools {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+}
+.emoji-btn {
+  width: 40px;
+  height: 40px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.6);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.emoji-btn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.05);
+}
+.emoji-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.emoji-panel {
+  position: absolute;
+  bottom: 48px;
+  left: 0;
+  z-index: 50;
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 2px;
+  width: 320px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+}
+.emoji-item {
+  border: none;
+  background: transparent;
+  font-size: 20px;
+  line-height: 1;
+  padding: 4px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.emoji-item:hover {
+  background: rgba(0, 0, 0, 0.07);
 }
 </style>

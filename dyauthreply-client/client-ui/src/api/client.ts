@@ -354,6 +354,22 @@ export interface ConversationItem {
   unread_count: number;
 }
 
+export interface MessageMedia {
+  kind?: string;
+  url?: string;
+  cover_url?: string;
+  duration_s?: number | string | null;
+  duration_ms?: number | string | null;
+  width?: number | null;
+  height?: number | null;
+  item_id?: string;
+  ai_text?: string | null;
+  vid?: string;
+  inline_pic?: string;
+  encrypted?: boolean;
+  [key: string]: unknown;
+}
+
 export interface MessageItem {
   id: string;
   direction: 'in' | 'out';
@@ -363,6 +379,7 @@ export interface MessageItem {
   processed: boolean;
   sender_name?: string | null;
   sender_avatar?: string | null;
+  media?: MessageMedia | null;
 }
 
 export interface ConversationListResponse {
@@ -390,6 +407,18 @@ export function listMessages(accountId: string, conversationId: string) {
   return request<MessageItem[]>(
     `/douyin/account/${accountId}/conversation/${conversationId}/messages`,
   );
+}
+
+/**
+ * 加密图片解密代理 URL（后端下载密文→AES-GCM 解密→转 JPEG）。
+ * 客户端走本机回环鉴权，<img> 可直接引用此 URL。
+ */
+export function messageImageUrl(
+  accountId: string,
+  conversationId: string,
+  messageId: string,
+): string {
+  return `${API_PREFIX}/douyin/account/${accountId}/conversation/${conversationId}/message/${messageId}/image`;
 }
 
 export function refreshConversationUser(accountId: string, conversationId: string) {

@@ -4,15 +4,19 @@ import type {
   DouyinMessageItem,
 } from '#/api/core/douyin';
 
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 
 import {
   ElAvatar,
   ElButton,
   ElEmpty,
+  ElImageViewer,
   ElInput,
   ElMessage,
+  ElPopover,
 } from 'element-plus';
+
+import { getMessageImageObjectUrl } from '#/api/core/douyin/session';
 
 defineOptions({ name: 'ChatPanel' });
 
@@ -103,6 +107,162 @@ function handleKeydown(event: Event | KeyboardEvent) {
     keyboardEvent.preventDefault();
     onSendMessage();
   }
+}
+
+// 富媒体渲染判定
+// 用户本地图片/视频是抖音加密 CDN 资源，直链多为密文无法直接 <img> 显示；
+// 优先用消息自带 inline_pic(base64 预览)，否则尝试直链，加载失败回退占位。
+const brokenMedia = ref<Record<string, boolean>>({});
+function onMediaError(id: string) {
+  brokenMedia.value[id] = true;
+}
+
+function mediaKind(msg: DouyinMessageItem): string {
+  const m = msg.media;
+  if (m?.kind) return String(m.kind);
+  if (msg.content_type === 'image') return 'image';
+  if (msg.content_type === 'video') return 'video';
+  if (msg.content_type === 'card') return 'share_video';
+  return 'text';
+}
+
+function inlineDataUri(msg: DouyinMessageItem): string {
+  const p = msg.media?.inline_pic;
+  if (typeof p === 'string' && p.length > 0) {
+    return `data:image/webp;base64,${p.replace(/\s+/g, '')}`;
+  }
+  return '';
+}
+
+// 加密图片(用户本地图/视频封面)需后端解密：web 端 <img> 无法携带 JWT，
+// 故用 axios(blob) 拉取解密后的图片转 object URL；解密到达前先用 inline_pic 预览。
+const decryptedUrls = ref<Record<string, string>>({});
+const decrypting = ref<Record<string, boolean>>({});
+
+async function ensureDecrypted(msg: DouyinMessageItem) {
+  if (!msg.media?.encrypted) return;
+  if (decryptedUrls.value[msg.id] || decrypting.value[msg.id]) return;
+  if (!props.accountId || !props.conversationId) return;
+  decrypting.value[msg.id] = true;
+  try {
+    decryptedUrls.value[msg.id] = await getMessageImageObjectUrl(
+      props.accountId,
+      props.conversationId,
+      msg.id,
+    );
+  } catch {
+    // 解密/下载失败：若无 inline 预览则回退占位
+    if (!inlineDataUri(msg)) onMediaError(msg.id);
+  } finally {
+    decrypting.value[msg.id] = false;
+  }
+}
+
+function revokeDecrypted() {
+  for (const url of Object.values(decryptedUrls.value)) {
+    if (url) URL.revokeObjectURL(url);
+  }
+  decryptedUrls.value = {};
+  decrypting.value = {};
+}
+
+watch(
+  () => props.messages,
+  (list) => {
+    for (const m of list || []) {
+      if (m.media?.encrypted) void ensureDecrypted(m);
+    }
+  },
+  { immediate: true },
+);
+
+watch(
+  () => props.conversationId,
+  () => {
+    revokeDecrypted();
+    brokenMedia.value = {};
+  },
+);
+
+onBeforeUnmount(revokeDecrypted);
+
+function imageSrc(msg: DouyinMessageItem): string {
+  if (msg.media?.encrypted) {
+    return decryptedUrls.value[msg.id] || inlineDataUri(msg) || '';
+  }
+  return inlineDataUri(msg) || msg.media?.url || msg.media?.cover_url || '';
+}
+
+function videoCover(msg: DouyinMessageItem): string {
+  if (msg.media?.encrypted) {
+    return decryptedUrls.value[msg.id] || inlineDataUri(msg) || '';
+  }
+  return inlineDataUri(msg) || msg.media?.cover_url || msg.media?.url || '';
+}
+
+function showImage(msg: DouyinMessageItem): boolean {
+  return !brokenMedia.value[msg.id] && Boolean(imageSrc(msg));
+}
+
+function showVideoCover(msg: DouyinMessageItem): boolean {
+  return !brokenMedia.value[msg.id] && Boolean(videoCover(msg));
+}
+
+function videoDurationLabel(msg: DouyinMessageItem): string {
+  const d = msg.media?.duration_s;
+  const sec = d == null ? Number.NaN : Math.round(Number(d));
+  return Number.isFinite(sec) && sec > 0 ? `${sec}s` : '视频';
+}
+
+function voiceDurationLabel(msg: DouyinMessageItem): string {
+  const d = msg.media?.duration_ms;
+  const sec = d == null ? Number.NaN : Math.round(Number(d) / 1000);
+  return Number.isFinite(sec) && sec > 0 ? `${sec}″` : '';
+}
+
+function openMedia(url?: string) {
+  if (url) window.open(url, '_blank', 'noopener');
+}
+
+// 应用内图片预览（Element Plus 图片查看器）
+const previewUrl = ref('');
+function previewImage(url?: string) {
+  if (url) previewUrl.value = url;
+}
+function closePreview() {
+  previewUrl.value = '';
+}
+
+// emoji 选择器（unicode 表情，走文本发送）
+const messageInputRef = ref();
+const emojiVisible = ref(false);
+const EMOJI_LIST: string[] = [
+  '😀', '😁', '😂', '🤣', '😊', '😍', '😘', '😎', '🤔', '😅',
+  '😭', '😉', '😏', '😴', '🥰', '😋', '😜', '🤗', '🤭', '😇',
+  '👍', '👎', '👌', '🙏', '👏', '💪', '🤝', '🙌', '✌️', '🤙',
+  '❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '💕', '💯', '🔥',
+  '🎉', '🎁', '✨', '⭐', '🌟', '💰', '🧧', '🤑', '🛒', '📦',
+  '😡', '😱', '😢', '😤', '🤧', '😷', '🥺', '😳', '🙄', '😬',
+];
+function insertEmoji(emoji: string) {
+  const el: HTMLTextAreaElement | undefined =
+    messageInputRef.value?.textarea;
+  if (!el) {
+    messageInput.value += emoji;
+  } else {
+    const start = el.selectionStart ?? messageInput.value.length;
+    const end = el.selectionEnd ?? messageInput.value.length;
+    messageInput.value =
+      messageInput.value.slice(0, start) +
+      emoji +
+      messageInput.value.slice(end);
+    nextTick(() => {
+      el.focus();
+      const pos = start + emoji.length;
+      el.setSelectionRange(pos, pos);
+    });
+  }
+  emojiVisible.value = false;
 }
 
 function formatTime(dateStr?: null | string): string {
@@ -214,8 +374,70 @@ watch(
               <span class="sender-name">{{ getSenderInfo(msg).name }}</span>
               <span class="message-time">{{ formatTime(msg.received_at) }}</span>
             </div>
-            <div class="message-bubble">
-              {{ msg.content }}
+            <div
+              class="message-bubble"
+              :class="{ 'is-media': mediaKind(msg) !== 'text' }"
+            >
+              <!-- 图片 / 表情贴纸 -->
+              <template
+                v-if="mediaKind(msg) === 'image' || mediaKind(msg) === 'emoji'"
+              >
+                <img
+                  v-if="showImage(msg)"
+                  :src="imageSrc(msg)"
+                  class="msg-media-img"
+                  :class="{ 'is-emoji': mediaKind(msg) === 'emoji' }"
+                  loading="lazy"
+                  @click="previewImage(imageSrc(msg))"
+                  @error="onMediaError(msg.id)"
+                />
+                <span
+                  v-else
+                  class="msg-media-fallback"
+                  @click="previewImage(imageSrc(msg))"
+                >
+                  🖼️ {{ msg.content || '[图片]' }}
+                </span>
+              </template>
+
+              <!-- 视频文件 / 分享视频卡片（流加密，仅展示封面+时长，不可播放） -->
+              <template
+                v-else-if="
+                  mediaKind(msg) === 'video' || mediaKind(msg) === 'share_video'
+                "
+              >
+                <div
+                  class="msg-video"
+                  @click="previewImage(videoCover(msg))"
+                >
+                  <img
+                    v-if="showVideoCover(msg)"
+                    :src="videoCover(msg)"
+                    class="msg-media-img"
+                    loading="lazy"
+                    @error="onMediaError(msg.id)"
+                  />
+                  <span v-else class="msg-media-fallback">
+                    🎬 {{ msg.content || '[视频]' }}
+                  </span>
+                  <span class="msg-video-tag">▶ {{ videoDurationLabel(msg) }}</span>
+                </div>
+              </template>
+
+              <!-- 语音（不接播放器，展示占位+时长，可点开音频源） -->
+              <template v-else-if="mediaKind(msg) === 'voice'">
+                <span
+                  class="msg-voice"
+                  @click="openMedia(msg.media?.url)"
+                >
+                  🎤 语音 {{ voiceDurationLabel(msg) }}
+                </span>
+              </template>
+
+              <!-- 文本 / 兜底 -->
+              <template v-else>
+                {{ msg.content }}
+              </template>
             </div>
           </div>
         </div>
@@ -225,6 +447,7 @@ watch(
     <!-- 输入区域 -->
     <div class="chat-footer">
       <ElInput
+        ref="messageInputRef"
         v-model="messageInput"
         type="textarea"
         :rows="3"
@@ -235,6 +458,35 @@ watch(
       />
       <div class="footer-actions">
         <div class="footer-hint">
+          <ElPopover
+            v-model:visible="emojiVisible"
+            :width="328"
+            placement="top-start"
+            trigger="click"
+            popper-class="emoji-popover"
+          >
+            <template #reference>
+              <button
+                type="button"
+                class="emoji-trigger"
+                title="表情"
+                :disabled="!conversationId"
+              >
+                😀
+              </button>
+            </template>
+            <div class="emoji-grid">
+              <button
+                v-for="e in EMOJI_LIST"
+                :key="e"
+                type="button"
+                class="emoji-grid-item"
+                @click="insertEmoji(e)"
+              >
+                {{ e }}
+              </button>
+            </div>
+          </ElPopover>
           <span class="hint-text">Enter 发送</span>
           <span class="hint-divider">|</span>
           <span class="hint-text">Shift + Enter 换行</span>
@@ -249,6 +501,13 @@ watch(
         </ElButton>
       </div>
     </div>
+
+    <ElImageViewer
+      v-if="previewUrl"
+      :url-list="[previewUrl]"
+      teleported
+      @close="closePreview"
+    />
   </div>
 </template>
 
@@ -377,6 +636,75 @@ watch(
   line-height: 1.6;
   color: #262626;
   word-break: break-word;
+
+  &.is-media {
+    padding: 6px;
+    background: transparent;
+  }
+}
+
+.msg-media-img {
+  display: block;
+  max-width: 180px;
+  max-height: 240px;
+  border-radius: 8px;
+  object-fit: cover;
+  cursor: zoom-in;
+
+  &.is-emoji {
+    max-width: 120px;
+    max-height: 120px;
+  }
+}
+
+.msg-video {
+  position: relative;
+  display: inline-block;
+  cursor: pointer;
+}
+
+.msg-video-placeholder {
+  width: 160px;
+  height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #e8e8e8;
+  border-radius: 8px;
+  color: #595959;
+}
+
+.msg-video-tag {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  padding: 2px 6px;
+  font-size: 12px;
+  color: #fff;
+  background: rgb(0 0 0 / 50%);
+  border-radius: 4px;
+}
+
+.msg-voice {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 14px;
+  background: #f5f5f5;
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.msg-media-fallback {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 12px;
+  background: #f0f0f0;
+  border-radius: 10px;
+  font-size: 13px;
+  color: #595959;
+  cursor: pointer;
 }
 
 .chat-footer {
@@ -411,6 +739,45 @@ watch(
 
 .hint-divider {
   color: #d9d9d9;
+}
+
+.emoji-trigger {
+  border: none;
+  background: transparent;
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background 0.12s ease;
+}
+.emoji-trigger:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.06);
+}
+.emoji-trigger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 2px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.emoji-grid-item {
+  border: none;
+  background: transparent;
+  font-size: 18px;
+  line-height: 1;
+  padding: 4px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.emoji-grid-item:hover {
+  background: rgba(0, 0, 0, 0.07);
 }
 
 @keyframes slideIn {

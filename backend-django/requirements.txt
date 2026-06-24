@@ -30,3 +30,7 @@ httpx==0.28.1
 PyExecJS==1.5.1
 # IM 私信 protobuf 编解码（发送请求体 dy_request_pb2，vendored 自 DouYin_Spider/static）
 protobuf>=5.27.1,<6
+# 富媒体接收：加密图片解密(AES-256-GCM, 走 cryptography)后转码显示。
+# 用户本地图片解出来常为 HEIF/HEIC（iPhone 照片），浏览器不支持需转 JPEG。
+Pillow>=10.0.0
+pillow-heif>=0.16.0

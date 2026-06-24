@@ -172,6 +172,8 @@ def _upsert_conversation_and_message(
     platform_conversation_id: Optional[str] = None,
     direction: str = 'in',
     mark_processed: bool = False,
+    content_type: str = 'text',
+    media: Optional[dict] = None,
 ) -> Optional[tuple]:
     """
     upsert DouyinConversation + DouyinMessage。
@@ -261,14 +263,18 @@ def _upsert_conversation_and_message(
         if external_msg_id
         else _hash_msg_id(peer_sec_uid, received_at.isoformat(), text)
     )
+    # 富媒体结构化字段并入 raw_payload，前端按 raw_payload.media 渲染
+    raw_payload = raw
+    if media:
+        raw_payload = {**(raw or {}), 'media': media}
     msg, msg_created = DouyinMessage.objects.get_or_create(
         conversation=conv,
         external_msg_id=ext_id,
         defaults={
             'direction': direction,
-            'content_type': 'text',
+            'content_type': content_type or 'text',
             'content': text or '',
-            'raw_payload': raw,
+            'raw_payload': raw_payload,
             'received_at': received_at,
             'processed': mark_processed or direction != 'in',
         },

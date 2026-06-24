@@ -888,6 +888,30 @@ def list_account_messages(request, account_id: str, conversation_id: str):
             sender_avatar = account.avatar
 
         # 创建 Schema 实例（不是 dict）
+        media = None
+        if isinstance(msg.raw_payload, dict):
+            media = msg.raw_payload.get("media")
+            # 兼容旧消息：media 未带 encrypted 标志时，从 content_json 推导
+            # （是否存在可解密的加密图片源），让前端统一走解密代理
+            if isinstance(media, dict) and "encrypted" not in media:
+                content_json = msg.raw_payload.get("content_json")
+                if content_json:
+                    try:
+                        import json as _json
+
+                        from core.douyin.runtime.media_decrypt import pick_encrypted_image
+
+                        _obj = (
+                            _json.loads(content_json)
+                            if isinstance(content_json, str)
+                            else content_json
+                        )
+                        media = {
+                            **media,
+                            "encrypted": bool(pick_encrypted_image(_obj)),
+                        }
+                    except (ValueError, TypeError):
+                        pass
         item = DouyinMessageItemOut(
             id=str(msg.id),
             direction=msg.direction,
@@ -897,10 +921,77 @@ def list_account_messages(request, account_id: str, conversation_id: str):
             processed=msg.processed,
             sender_name=sender_name,
             sender_avatar=sender_avatar,
+            media=media,
         )
         result.append(item)
 
     return result
+
+
+@router.get(
+    "/account/{account_id}/conversation/{conversation_id}/message/{message_id}/image",
+    summary="解密并返回私信加密图片（图片/视频封面）",
+)
+def get_message_decrypted_image(request, account_id: str, conversation_id: str, message_id: str):
+    """下载抖音 IM 加密图片密文 → AES-256-GCM 解密(skey) → 转浏览器可显示格式回吐。
+
+    抖音用户本地图片/视频封面是加密 CDN 资源，<img> 无法直连显示，故由后端代理解密。
+    鉴权沿用 router 默认（客户端=本机回环放行；web=JWT）。
+    """
+    import json
+
+    import httpx
+    from django.http import HttpResponse, HttpResponseNotFound
+
+    from core.douyin.douyin_conversation_model import DouyinConversation
+    from core.douyin.douyin_message_model import DouyinMessage
+    from core.douyin.runtime.media_decrypt import (
+        MediaDecryptError,
+        decrypt_im_media,
+        pick_encrypted_image,
+        to_browser_image,
+    )
+
+    account = get_object_or_404(DouyinAccount, id=account_id)
+    conv = get_object_or_404(
+        DouyinConversation, id=conversation_id, account_id=account.id
+    )
+    msg = get_object_or_404(
+        DouyinMessage, id=message_id, conversation_id=conv.id
+    )
+
+    raw = msg.raw_payload if isinstance(msg.raw_payload, dict) else {}
+    content_json = raw.get("content_json")
+    if not content_json:
+        return HttpResponseNotFound("该消息无原始内容，无法解密")
+    try:
+        obj = json.loads(content_json) if isinstance(content_json, str) else content_json
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return HttpResponseNotFound("content_json 解析失败")
+
+    picked = pick_encrypted_image(obj if isinstance(obj, dict) else {})
+    if not picked:
+        return HttpResponseNotFound("该消息无可解密的加密图片")
+    url, skey = picked
+
+    try:
+        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            ciphertext = resp.content
+    except Exception as e:  # noqa: BLE001
+        raise HttpError(502, f"下载加密媒体失败: {type(e).__name__}: {e}")
+
+    try:
+        plain = decrypt_im_media(ciphertext, skey)
+        img_bytes, ctype = to_browser_image(plain)
+    except MediaDecryptError as e:
+        raise HttpError(500, f"媒体解密失败: {e}")
+
+    response = HttpResponse(img_bytes, content_type=ctype)
+    # 解密结果按消息不可变，可长期缓存（浏览器/webview 本地缓存，避免重复解密）
+    response["Cache-Control"] = "private, max-age=86400"
+    return response
 
 
 @router.post(

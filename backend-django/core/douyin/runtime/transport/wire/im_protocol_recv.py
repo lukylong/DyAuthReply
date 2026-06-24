@@ -371,13 +371,15 @@ class IMMessage:
     sender_uid: int
     sender_sec_uid: str
     content_json: str
-    text: str  # 从 content_json["text"] 取，失败或非文本类消息时为 ""
+    text: str  # 文本原文；富媒体为占位文本（[图片]/[语音]/[视频]/[表情]/[分享视频]）；系统消息为 ""
     client_message_id: str  # 从 ext_kv 找 s:client_message_id；失败时为 ""
+    content_type: str = "text"  # text/image/video/card/other/system（由 content_json 结构判定）
+    media: dict = field(default_factory=dict)  # 结构化媒体：kind/url/cover_url/duration 等
 
     @property
     def is_text(self) -> bool:
         # msg_type=1 + content 里能解出 text 字段才算"用户文本消息"
-        return self.msg_type == 1 and bool(self.text)
+        return self.msg_type == 1 and self.content_type == "text" and bool(self.text)
 
 
 _MSG_F_CONV_ID = 1
@@ -390,41 +392,165 @@ _MSG_F_EXT_KV = 9
 _MSG_F_SENDER_SEC_UID = 14
 
 
-def _decode_text_from_content_json(content_json: str) -> str:
-    """从 content_json 安全提取可回复文本。失败返回空串。
+@dataclass
+class ParsedContent:
+    """content_json 结构化解析结果。
 
-    抖音 IM 的 content 永远是 JSON 字符串，常见结构：
-      {"text":"hello"} —— 普通文本
-      {"text":"...", "richTextInfos":[...], "mention_users":[...], "ai_ext":"{}", ...}
-      {"emoji":...} / {"sticker":...} —— 纯表情 / 贴纸，无 text，但仍是用户入向消息
+    content_type: text/image/video/card/other/system
+    text:         文本原文，或富媒体占位文本（[图片]/[语音]/[视频]/[表情]/[分享视频]）；
+                  system（已读回执等）为 ""，由上层过滤丢弃。
+    media:        结构化媒体字段（kind/url/cover_url/duration 等），文本/系统为空 dict。
+    """
+
+    content_type: str
+    text: str
+    media: dict = field(default_factory=dict)
+
+
+def _first_url(d: object, *keys: str) -> str:
+    """从 dict 里按 keys 顺序找第一个非空 url_list 首元素。"""
+    if not isinstance(d, dict):
+        return ""
+    for k in keys:
+        v = d.get(k)
+        if isinstance(v, list) and v and isinstance(v[0], str) and v[0]:
+            return v[0]
+    return ""
+
+
+def parse_content_json(content_json: str) -> ParsedContent:
+    """把抖音 IM 的 content_json 解析成 (content_type, 占位文本, 结构化媒体)。
+
+    判定**只能靠 content_json 自身结构**（msg_type 恒=1，不可用作类型依据）。
+    字段映射来自真实账号采样（见 .trellis/tasks/06-24-rich-media-inbound/research/）。
+
+    判定顺序（互斥，靠前优先）：
+      read_index/command_type(系统) → text → 分享视频卡片(itemId)
+      → 视频文件(video.vid) → 图片(resource_url+cover_*) → 语音(voice_wave/resource_url+duration)
+      → 表情贴纸(display_name+url) → display_name 兜底当文本 → 模糊兜底 → 未知
     """
     if not content_json:
-        return ""
+        return ParsedContent("text", "")
     try:
         obj = json.loads(content_json)
     except (json.JSONDecodeError, ValueError, TypeError):
-        return ""
+        return ParsedContent("text", "")
     if not isinstance(obj, dict):
-        return ""
-    val = obj.get("text")
-    if isinstance(val, str) and val.strip():
-        return val
+        return ParsedContent("text", "")
 
-    # 优先检测表情描述名称，如 "display_name": "[赞][赞][赞]" 或 "display_name": "早上好"
-    disp_name = obj.get("display_name")
-    if isinstance(disp_name, str) and disp_name.strip():
-        return disp_name
+    # 系统消息 / 已读回执：不作为用户消息，丢弃
+    if "read_index" in obj or "command_type" in obj:
+        return ParsedContent("system", "")
 
-    # 纯表情/贴纸类消息通常没有 text 字段。生成稳定占位文本，让兜底规则可触发；
-    # 模糊匹配键名以检测媒体类型，防止由于 Douyin 键名变化（如 emoji_type, sticker_type）漏掉包
+    # 文本
+    text = obj.get("text")
+    if isinstance(text, str) and text.strip():
+        return ParsedContent("text", text)
+
+    # 分享视频卡片（分享公开抖音作品，DouYin_Spider msg_type=8）
+    item_id = obj.get("itemId") or obj.get("item_id")
+    if item_id:
+        return ParsedContent(
+            "card", "[分享视频]", {"kind": "share_video", "item_id": str(item_id)}
+        )
+
+    # 视频文件（从相册发的视频）：video.vid + poster；视频流加密，只存封面
+    video = obj.get("video")
+    if isinstance(video, dict) and video.get("vid"):
+        poster = obj.get("poster") if isinstance(obj.get("poster"), dict) else {}
+        cover = _first_url(poster, "origin_url_list", "medium_url_list")
+        return ParsedContent(
+            "video",
+            "[视频]",
+            {
+                "kind": "video",
+                "cover_url": cover,
+                "vid": video.get("vid"),
+                "duration_s": obj.get("duration"),
+                "width": obj.get("width"),
+                "height": obj.get("height"),
+                # 视频封面(poster)同为加密 CDN 资源（poster.skey 存在即加密），
+                # 直链是密文，前端走后端解密代理；inline_pic 是 base64 预览可直接渲染
+                "encrypted": bool(poster.get("skey")),
+                "inline_pic": obj.get("inline_pic") or "",
+            },
+        )
+
+    res = obj.get("resource_url")
+
+    # 图片：resource_url + cover_width/cover_height
+    if isinstance(res, dict) and ("cover_width" in obj or "cover_height" in obj):
+        url = _first_url(
+            res, "origin_url_list", "large_url_list", "medium_url_list", "thumb_url_list"
+        )
+        return ParsedContent(
+            "image",
+            "[图片]",
+            {
+                "kind": "image",
+                "url": url,
+                "width": obj.get("cover_width"),
+                "height": obj.get("cover_height"),
+                # 用户本地图片是加密 CDN 资源（resource_url.skey 存在即加密），
+                # url 直链是密文无法直接 <img> 显示，前端需走后端解密代理；
+                # inline_pic（若有）是 base64 webp 预览，可直接渲染
+                "encrypted": bool(res.get("skey")),
+                "inline_pic": obj.get("inline_pic") or "",
+            },
+        )
+
+    # 语音：voice_wave / (resource_url + duration)，且无 cover
+    if "voice_wave" in obj or (isinstance(res, dict) and "duration" in obj):
+        url = _first_url(res, "url_list") if isinstance(res, dict) else ""
+        return ParsedContent(
+            "other",
+            "[语音]",
+            {
+                "kind": "voice",
+                "url": url,
+                "duration_ms": obj.get("duration"),
+                "ai_text": obj.get("ai_audio_text"),
+            },
+        )
+
+    # 表情 / 贴纸：display_name + url（含 sticker/emoji 标记）
+    disp = obj.get("display_name")
+    url_obj = obj.get("url")
     keys = [k.lower() for k in obj.keys()]
-    if any("emoji" in k or "sticker" in k or "emoticon" in k for k in keys):
-        return "[表情]"
+    is_emoji = any("emoji" in k or "sticker" in k or "emoticon" in k for k in keys) or isinstance(
+        url_obj, dict
+    )
+    if is_emoji and ((isinstance(disp, str) and disp.strip()) or isinstance(url_obj, dict)):
+        url = _first_url(url_obj, "url_list")
+        placeholder = disp.strip() if isinstance(disp, str) and disp.strip() else "[表情]"
+        return ParsedContent(
+            "other",
+            placeholder,
+            {
+                "kind": "emoji",
+                "url": url,
+                "width": obj.get("width"),
+                "height": obj.get("height"),
+            },
+        )
+
+    # display_name 兜底当文本（如"比心"）
+    if isinstance(disp, str) and disp.strip():
+        return ParsedContent("text", disp.strip())
+
+    # 模糊键名兜底（防 Douyin 改键名漏判）
     if any("image" in k or "picture" in k for k in keys):
-        return "[图片]"
+        return ParsedContent("image", "[图片]", {"kind": "image", "url": ""})
     if any("video" in k for k in keys):
-        return "[视频]"
-    return ""
+        return ParsedContent("video", "[视频]", {"kind": "video"})
+
+    # 未知：text 空，由上层过滤丢弃
+    return ParsedContent("other", "")
+
+
+def _decode_text_from_content_json(content_json: str) -> str:
+    """[兼容保留] 仅返回占位/文本，内部委托 parse_content_json。"""
+    return parse_content_json(content_json).text
 
 
 def _decode_client_msg_id_from_ext(ext_payloads: list[bytes]) -> str:
@@ -468,7 +594,8 @@ def decode_im_message(buf: bytes) -> Optional[IMMessage]:
     except UnicodeDecodeError:
         content_json = ""
 
-    text = _decode_text_from_content_json(content_json)
+    parsed = parse_content_json(content_json)
+    text = parsed.text
     ext_list = fields.get(_MSG_F_EXT_KV) or []
     
     # Try to extract true server creation time from ext_kv
@@ -504,6 +631,8 @@ def decode_im_message(buf: bytes) -> Optional[IMMessage]:
         content_json=content_json,
         text=text,
         client_message_id=client_msg_id,
+        content_type=parsed.content_type,
+        media=parsed.media,
     )
 
 

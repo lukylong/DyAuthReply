@@ -1613,8 +1613,11 @@ class HttpProtocolTransport(AccountTransport):
                 request_len=len(body),
             )
 
+        soft = bool(result.biz_status_code not in (0, 8101) and result.server_msg_id)
         logger.info(
-            f"[transport.http] {log_tag} 成功 account={account.id} "
+            f"[transport.http] {log_tag} 成功{'(软成功/疑似风控)' if soft else ''} "
+            f"account={account.id} biz_status_code={result.biz_status_code} "
+            f"biz_status_text={result.biz_status_text!r} "
             f"server_msg_id={result.server_msg_id} client_msg_id={client_msg_id}"
         )
         return result, client_msg_id
@@ -1971,11 +1974,12 @@ class HttpProtocolTransport(AccountTransport):
 
                 pending: list[tuple[Any, Any, str, str]] = []
                 for m in filtered:
-                    if not m.is_text or not m.text or m.sender_uid <= 0:
+                    # 系统/已读回执 或 无占位文本 或 无发送方 → 丢弃；富媒体(占位文本非空)保留
+                    if getattr(m, "content_type", "text") == "system" or not m.text or m.sender_uid <= 0:
                         if m.server_message_id > 0:
                             logger.debug(
-                                f"[transport.http] 跳过非文本/无发送方消息 conv={hinted_conversation_id} "
-                                f"srv_id={m.server_message_id} msg_type={m.msg_type} "
+                                f"[transport.http] 跳过系统/无发送方消息 conv={hinted_conversation_id} "
+                                f"srv_id={m.server_message_id} content_type={getattr(m, 'content_type', '?')} "
                                 f"text={m.text!r} sender_uid={m.sender_uid} "
                                 f"content_preview={(m.content_json or '')[:120]!r}"
                             )
@@ -2061,6 +2065,8 @@ class HttpProtocolTransport(AccountTransport):
                             external_msg_id=external_msg_id,
                             platform_conversation_id=m.conversation_id,
                             direction=direction,
+                            content_type=getattr(m, "content_type", "text"),
+                            media=getattr(m, "media", None),
                         )
                     except Exception as e:  # noqa: BLE001
                         logger.warning(
@@ -2268,12 +2274,12 @@ class HttpProtocolTransport(AccountTransport):
         # pending: 通过所有过滤、准备落库的入向消息 (m, received_at, external_msg_id)
         pending: list[tuple[Any, Any, str]] = []
         for m in result.messages:
-            if not m.is_text:
-                # 系统消息（已读回执 / 输入中 / command_type≠空）跳过；正确性由
-                # IMMessage.is_text 判定（msg_type==1 + content_json["text"] 非空）
+            if getattr(m, "content_type", "text") == "system":
+                # 系统消息（已读回执 / 输入中 / command_type≠空）跳过；
+                # 富媒体(图片/语音/视频/表情)有占位文本，保留并进入回复引擎
                 logger.debug(
-                    f"[transport.http] 跳过非文本消息 srv_id={m.server_message_id} "
-                    f"msg_type={m.msg_type} text={m.text!r} "
+                    f"[transport.http] 跳过系统消息 srv_id={m.server_message_id} "
+                    f"content_type={getattr(m, 'content_type', '?')} text={m.text!r} "
                     f"content_preview={(m.content_json or '')[:120]!r}"
                 )
                 continue
@@ -2398,6 +2404,8 @@ class HttpProtocolTransport(AccountTransport):
                     mark_processed=bool(
                         is_baseline and include_recent_without_unread and direction == 'in'
                     ),
+                    content_type=getattr(m, "content_type", "text"),
+                    media=getattr(m, "media", None),
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning(

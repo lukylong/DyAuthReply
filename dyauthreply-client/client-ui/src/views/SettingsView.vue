@@ -26,15 +26,29 @@ async function handleToggleAutoStart(enabled: boolean) {
       const { enable, disable } = await import('@tauri-apps/plugin-autostart');
       if (enabled) {
         await enable();
+        console.log('Auto-start enabled successfully');
       } else {
         await disable();
+        console.log('Auto-start disabled successfully');
       }
     } else {
       console.warn('Auto-start is only available in Tauri environment');
+      alert('开机自启动功能仅在桌面客户端中可用');
+      settings.value.runtime.auto_start = !enabled; // 回滚
     }
   } catch (error) {
     console.error('Failed to toggle auto-start:', error);
-    settings.value.runtime.auto_start = !enabled;
+
+    // 友好的错误提示
+    const errorMessage = error instanceof Error ? error.message : String(error);
+
+    if (errorMessage.includes('not found') || errorMessage.includes('Cannot find module')) {
+      alert('开机自启动功能需要安装 Tauri 插件支持\n\n请在 Tauri 后端添加：\ntauri-plugin-autostart = "2"');
+    } else {
+      alert(`设置开机自启动失败：${errorMessage}`);
+    }
+
+    settings.value.runtime.auto_start = !enabled; // 回滚
   }
 }
 

@@ -18,8 +18,8 @@ const { licenseStatus, ensureStatus } = useClientLicense();
 let healthTimer: ReturnType<typeof setInterval> | null = null;
 
 // 集成版本更新和公告监听
-const { hasUpdate: hasVersionUpdate, updateInfo: versionUpdateInfo } = useVersionUpdate();
-const { unreadCount: unreadAnnouncementCount } = useAnnouncementListener();
+const { hasUpdate: hasVersionUpdate } = useVersionUpdate();
+useAnnouncementListener(); // 启动公告监听
 
 const updateInfo = ref<AppUpdateInfo | null>(null);
 const updateModalOpen = ref(false);

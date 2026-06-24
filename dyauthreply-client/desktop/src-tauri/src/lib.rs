@@ -189,6 +189,10 @@ pub fn run() {
     let app = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![]),
+        ))
         .on_window_event(|window, event| match event {
             // 点 × 仅隐藏到托盘，不退出；真正退出走托盘菜单 / Cmd+Q / ExitRequested
             WindowEvent::CloseRequested { api, .. } => {

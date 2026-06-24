@@ -7,6 +7,9 @@
     "core:default",
     "opener:default",
     "shell:default",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled",
     {
       "identifier": "shell:allow-execute",
       "allow": [

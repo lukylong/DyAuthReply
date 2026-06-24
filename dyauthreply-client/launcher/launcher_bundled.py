@@ -148,6 +148,13 @@ if not os.environ.get('CLIENT_LICENSE_SERVER_URL'):
     if default_license_server:
         os.environ['CLIENT_LICENSE_SERVER_URL'] = default_license_server
 
+if not os.environ.get('CLIENT_APP_VERSION'):
+    app_version = _read_env_file_value('CLIENT_APP_VERSION')
+    if not app_version:
+        app_version = str(bundled_defaults.get('client_app_version') or '').strip()
+    if app_version:
+        os.environ['CLIENT_APP_VERSION'] = app_version
+
 
 def _shutdown_bundled(*_args: object) -> None:
     print('[launcher_bundled] 正在退出...', flush=True)

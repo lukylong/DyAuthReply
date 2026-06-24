@@ -57,7 +57,53 @@ def _state_file_path() -> Path:
 
 
 def _client_app_version() -> str:
-    return os.environ.get("CLIENT_APP_VERSION") or os.environ.get("APP_VERSION") or "0.1.5"
+    """客户端版本号：优先环境变量，其次打包 defaults / tauri.conf（与 UI 左下角一致）。"""
+    for key in ('CLIENT_APP_VERSION', 'APP_VERSION'):
+        value = (os.environ.get(key) or '').strip()
+        if value:
+            return value
+
+    import sys
+    from pathlib import Path
+
+    search_roots: list[Path] = []
+    if getattr(sys, 'frozen', False) and getattr(sys, '_MEIPASS', None):
+        search_roots.append(Path(sys._MEIPASS))
+    # backend-django/core/client/license_auth.py -> repo root
+    search_roots.append(Path(__file__).resolve().parents[3])
+
+    defaults_rel = (
+        'launcher/generated_defaults.json',
+        'dyauthreply-client/launcher/generated_defaults.json',
+    )
+    tauri_rel = (
+        'dyauthreply-client/desktop/src-tauri/tauri.conf.json',
+        'desktop/src-tauri/tauri.conf.json',
+    )
+    for root in search_roots:
+        for rel in defaults_rel:
+            path = root / rel
+            if not path.is_file():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding='utf-8'))
+                version = str(data.get('client_app_version') or '').strip()
+                if version:
+                    return version
+            except Exception:
+                pass
+        for rel in tauri_rel:
+            path = root / rel
+            if not path.is_file():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding='utf-8'))
+                version = str(data.get('version') or '').strip()
+                if version:
+                    return version
+            except Exception:
+                pass
+    return 'unknown'
 
 
 def _now() -> datetime:

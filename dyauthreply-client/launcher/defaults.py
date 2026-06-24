@@ -24,3 +24,22 @@ def load_launcher_defaults(search_root: Path) -> dict[str, Any]:
         if isinstance(payload, dict):
             return payload
     return {}
+
+
+def read_tauri_app_version(search_root: Path) -> str:
+    """从 tauri.conf.json 读取客户端版本（开发态兜底）。"""
+    candidates = (
+        search_root / "dyauthreply-client" / "desktop" / "src-tauri" / "tauri.conf.json",
+        search_root / "desktop" / "src-tauri" / "tauri.conf.json",
+    )
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        version = str(data.get("version") or "").strip()
+        if version:
+            return version
+    return ""

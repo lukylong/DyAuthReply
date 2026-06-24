@@ -8,6 +8,7 @@ from ninja.renderers import JSONRenderer
 from ninja.responses import NinjaJSONEncoder
 
 from common.local_desktop_auth import LocalDesktopAuth
+from core.client.license_auth import _client_app_version
 from core.douyin.douyin_account_api import router as douyin_account_router
 from core.douyin.douyin_blacklist_api import router as douyin_blacklist_router
 from core.douyin.douyin_event_api import router as douyin_event_router
@@ -50,7 +51,7 @@ class _ClientJsonRenderer(JSONRenderer):
 
 client_api = NinjaAPI(
     title='DyAuthReply Client API',
-    version='0.1.5',
+    version=_client_app_version(),
     auth=LocalDesktopAuth(),
     renderer=_ClientJsonRenderer(),
 )

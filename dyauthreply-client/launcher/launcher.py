@@ -194,7 +194,7 @@ def _ensure_env(args: argparse.Namespace) -> dict[str, str]:
     launcher_dir = ROOT / 'dyauthreply-client' / 'launcher'
     if str(launcher_dir) not in sys.path:
         sys.path.insert(0, str(launcher_dir))
-    from defaults import load_launcher_defaults
+    from defaults import load_launcher_defaults, read_tauri_app_version
     from node_runtime import configure_node_env
 
     node = configure_node_env(app_root=ROOT)
@@ -247,6 +247,15 @@ def _ensure_env(args: argparse.Namespace) -> dict[str, str]:
             default_license_server = str(bundled_defaults.get('client_license_server_url') or '').strip()
         if default_license_server:
             env['CLIENT_LICENSE_SERVER_URL'] = default_license_server
+
+    if not env.get('CLIENT_APP_VERSION'):
+        app_version = _read_env_file_value('CLIENT_APP_VERSION')
+        if not app_version:
+            app_version = str(bundled_defaults.get('client_app_version') or '').strip()
+        if not app_version:
+            app_version = read_tauri_app_version(ROOT)
+        if app_version:
+            env['CLIENT_APP_VERSION'] = app_version
 
     return env
 

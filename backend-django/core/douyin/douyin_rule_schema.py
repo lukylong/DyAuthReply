@@ -35,13 +35,15 @@ class DouyinRuleSchemaIn(ModelSchema):
 
     account_id 可为空：表示全局规则（对所有账号生效）。
     """
-    account_id: Optional[str] = Field(None, description="所属抖音账号ID；为空表示全局规则，对所有账号生效")
+    account_id: Optional[str] = Field(None, description="[兼容] 旧单账号字段；优先使用 account_ids")
+    account_ids: Optional[List[str]] = Field(default=None, description="绑定的账号 ID 列表；为空表示全局规则")
+    force_move: bool = Field(default=False, description="账号已被其他规则绑定时，是否强制移动到本规则")
     template_id: Optional[str] = Field(None, description="引用模板ID")
     links: Optional[List[Union[DouyinRuleLinkIn, str, dict[str, Any]]]] = None
 
     class Config:
         model = DouyinRule
-        model_exclude = (*exclude_fields, 'account', 'hit_count', 'template')
+        model_exclude = (*exclude_fields, 'account', 'account_ids', 'hit_count', 'template')
 
     @field_validator('regex_pattern', check_fields=False)
     @classmethod
@@ -73,6 +75,8 @@ class DouyinRuleSchemaPatch(Schema):
     status: Optional[bool] = None
     cooldown_seconds: Optional[int] = None
     remark: Optional[str] = None
+    account_ids: Optional[List[str]] = None
+    force_move: bool = False
 
     @field_validator('regex_pattern')
     @classmethod
@@ -92,6 +96,8 @@ class DouyinRuleSchemaOut(ModelSchema):
     send_mode_display: Optional[str] = None
     account_id: Optional[str] = None
     account_nickname: Optional[str] = None
+    account_ids: List[str] = []
+    account_nicknames: List[str] = []
     template_id: Optional[str] = None
     template_name: Optional[str] = None
 
@@ -119,6 +125,22 @@ class DouyinRuleSchemaOut(ModelSchema):
             return obj.account.nickname
         except Exception:
             return None
+
+    @staticmethod
+    def resolve_account_ids(obj):
+        return [str(x) for x in (obj.account_ids or [])]
+
+    @staticmethod
+    def resolve_account_nicknames(obj):
+        ids = [str(x) for x in (obj.account_ids or [])]
+        if not ids:
+            return []
+        from core.douyin.douyin_account_model import DouyinAccount
+        mapping = {
+            str(a.id): a.nickname
+            for a in DouyinAccount.objects.filter(id__in=ids)
+        }
+        return [mapping.get(i, i) for i in ids]
 
     @staticmethod
     def resolve_template_id(obj):
@@ -152,3 +174,18 @@ class DouyinRuleQuickEnableOut(Schema):
     created: bool
     message: str
     rule_id: str
+
+
+class DryRunMatchIn(Schema):
+    text: str = Field(..., description="模拟消息文本")
+    account_id: Optional[str] = Field(None, description="指定账号ID；为空则匹配全局规则")
+    channel: str = Field("dm", description="渠道：dm / comment")
+
+
+class DryRunMatchOut(Schema):
+    matched: bool
+    rule_id: Optional[str] = None
+    rule_name: Optional[str] = None
+    match_type: Optional[str] = None
+    reply_preview: Optional[str] = None
+    miss_reasons: List[str] = []

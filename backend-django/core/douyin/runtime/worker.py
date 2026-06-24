@@ -204,29 +204,24 @@ def _create_synthetic_inbound_message(account_id: str, conversation_id: str, tex
 def _load_rules_for_account(account_id: str) -> list:
     """按优先级降序返回启用中的规则。
 
-    合并两类规则：
-      1) account_id == 入参 account_id  → 账号专属规则
-      2) account_id IS NULL              → 全局规则（对所有账号生效）
+    多账号绑定模型（account_ids JSONField）：
+      1) 账号专属规则：account_ids 包含入参 account_id
+      2) 全局规则：account_ids 为空（对所有未被显式绑定的账号生效）
 
-    排序：priority DESC, account_id NULLS LAST (账号专属优先于全局),
-          sys_create_datetime DESC（同优先级时新建优先）。
+    命中顺序：账号专属规则在前（最高优先级），全局规则兜底。
+    SQLite 不支持 JSONField__contains，故在 Python 侧过滤。
     """
-    from django.db.models import F, Q
-
     from core.douyin.douyin_rule_model import DouyinRule
 
-    return list(
-        DouyinRule.objects.filter(
-            Q(account_id=account_id) | Q(account_id__isnull=True),
-            status=True,
-        )
+    aid = str(account_id)
+    all_enabled = list(
+        DouyinRule.objects.filter(status=True)
         .select_related('template')
-        .order_by(
-            '-priority',
-            F('account_id').asc(nulls_last=True),
-            '-sys_create_datetime',
-        )
+        .order_by('-priority', '-sys_create_datetime')
     )
+    bound = [r for r in all_enabled if aid in [str(x) for x in (r.account_ids or [])]]
+    glob = [r for r in all_enabled if not (r.account_ids or [])]
+    return bound + glob
 
 
 @sync_to_async

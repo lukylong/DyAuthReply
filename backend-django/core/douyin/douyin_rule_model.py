@@ -43,8 +43,14 @@ class DouyinRule(RootModel):
         null=True,
         blank=True,
         related_name='rules',
-        help_text="规则所属的抖音账号；为空表示全局规则，对所有账号生效",
+        help_text="[已弃用] 旧单账号绑定字段；保留兼容，实际绑定见 account_ids",
         db_index=True,
+    )
+
+    account_ids = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="显式绑定的账号 ID 列表；为空表示全局规则，对所有未绑定账号生效。一个账号只能属于一条规则",
     )
 
     name = models.CharField(

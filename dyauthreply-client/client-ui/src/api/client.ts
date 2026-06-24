@@ -470,6 +470,8 @@ export interface DouyinRule {
   name: string;
   account_id?: string | null;
   account_nickname?: string | null;
+  account_ids?: string[];
+  account_nicknames?: string[];
   match_type: string;
   match_type_display?: string;
   keywords?: string[];
@@ -483,6 +485,9 @@ export interface DouyinRule {
   status: boolean;
   cooldown_seconds?: number;
   remark?: string | null;
+  time_window_start?: string | null;
+  time_window_end?: string | null;
+  weekday_mask?: string;
 }
 
 export interface RuleLink {
@@ -492,6 +497,8 @@ export interface RuleLink {
 
 export interface DouyinRuleInput {
   account_id?: string | null;
+  account_ids?: string[];
+  force_move?: boolean;
   name: string;
   match_type: string;
   keywords?: string[];
@@ -505,6 +512,30 @@ export interface DouyinRuleInput {
   cooldown_seconds?: number;
   channel?: string;
   weekday_mask?: string;
+  time_window_start?: string | null;
+  time_window_end?: string | null;
+}
+
+export interface RuleAccountConflict {
+  account_id: string;
+  account_nickname: string;
+  rule_id: string;
+  rule_name: string;
+}
+
+/** 解析后端 409 冲突响应；非冲突返回 null */
+export function parseAccountConflict(err: unknown): RuleAccountConflict[] | null {
+  const msg = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+  if (!msg || !msg.includes('account_conflict')) return null;
+  try {
+    const parsed = JSON.parse(msg);
+    if (parsed?.code === 'account_conflict' && Array.isArray(parsed.conflicts)) {
+      return parsed.conflicts as RuleAccountConflict[];
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 export interface DouyinTemplate {
@@ -600,6 +631,26 @@ export function patchRule(ruleId: string, data: Partial<DouyinRuleInput>) {
 
 export function deleteRule(ruleId: string) {
   return request<DouyinRule>(`/douyin/rule/${ruleId}`, { method: 'DELETE' });
+}
+
+export function cloneRule(ruleId: string) {
+  return request<DouyinRule>(`/douyin/rule/${ruleId}/clone`, { method: 'POST' });
+}
+
+export interface DryRunMatchResult {
+  matched: boolean;
+  rule_id?: string;
+  rule_name?: string;
+  match_type?: string;
+  reply_preview?: string;
+  miss_reasons: string[];
+}
+
+export function dryRunMatch(params: { text: string; account_id?: string; channel?: string }) {
+  return request<DryRunMatchResult>('/douyin/rule/dry-run-match', {
+    method: 'POST',
+    body: JSON.stringify({ channel: 'dm', ...params }),
+  });
 }
 
 export function listTemplatesAll() {

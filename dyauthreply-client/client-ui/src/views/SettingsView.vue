@@ -451,18 +451,19 @@ const updateStatusText = computed(() => {
 
 .setting-main {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
 }
 
 .setting-label {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 14px;
   cursor: pointer;
   user-select: none;
   flex: 1;
+  padding-top: 2px;
 }
 
 /* 自定义复选框 */
@@ -483,6 +484,7 @@ const updateStatusText = computed(() => {
   place-items: center;
   transition: var(--transition-quick);
   position: relative;
+  margin-top: 1px;
 }
 
 .checkbox-icon::after {
@@ -530,6 +532,8 @@ const updateStatusText = computed(() => {
 .setting-select {
   min-width: 160px;
   flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 2px;
 }
 
 /* 设置操作 */

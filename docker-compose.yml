@@ -51,8 +51,8 @@ x-backend-env: &backend-env
   DOUYIN_SNIFFER_DIR: ${DOUYIN_SNIFFER_DIR:-}
   DOUYIN_SNIFFER_MAX_BODY: ${DOUYIN_SNIFFER_MAX_BODY:-32768}
   DOUYIN_SNIFFER_URL_KEYWORDS: ${DOUYIN_SNIFFER_URL_KEYWORDS:-}
-  # Phase 2 transport：true 时启用 WS 入向消息快路径（默认关闭，灰度开启）
-  DOUYIN_TRANSPORT_WS_INBOUND: ${DOUYIN_TRANSPORT_WS_INBOUND:-false}
+  # Phase 2 transport：true 时启用 WS 入向消息快路径（默认开启，WS 不可用时自动 HTTP 兜底）
+  DOUYIN_TRANSPORT_WS_INBOUND: ${DOUYIN_TRANSPORT_WS_INBOUND:-true}
   # 脱浏览器：默认 http_protocol（纯协议，浏览器子系统已移除）
   DOUYIN_TRANSPORT_BACKEND: ${DOUYIN_TRANSPORT_BACKEND:-http_protocol}
   # 签名后端：'js'(dy_ab.js + bd-ticket-guard，脱浏览器，唯一支持)

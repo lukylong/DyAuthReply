@@ -69,6 +69,8 @@ class FrontierImWsClient:
         self._stopped = False
         self._connected = False
         self._ws = None
+        self._frames_total = 0
+        self._reconnect_count = 0
 
     @property
     def connected(self) -> bool:
@@ -157,7 +159,24 @@ class FrontierImWsClient:
                     self._ws = ws
                     self._connected = True
                     backoff = 2.0
-                    logger.info(f"[frontier.ws] 已连接 account={self._account_id}")
+                    is_reconnect = self._reconnect_count > 0
+                    logger.info(
+                        f"[frontier.ws] 已连接 account={self._account_id} "
+                        f"{'(重连)' if is_reconnect else ''}".rstrip()
+                    )
+                    await _log_ws_event(
+                        self._account_id,
+                        "ws_connected",
+                        "info",
+                        "WS已连接（重连）" if is_reconnect else "WS已连接",
+                        f"device_id={device_id} reconnect_count={self._reconnect_count}",
+                        {
+                            "device_id": device_id,
+                            "reconnect": is_reconnect,
+                            "reconnect_count": self._reconnect_count,
+                            "frames_total": self._frames_total,
+                        },
+                    )
                     async for message in ws:
                         if self._stopped:
                             break
@@ -169,6 +188,19 @@ class FrontierImWsClient:
                     f"[frontier.ws] 断开/失败 account={self._account_id} "
                     f"err={type(e).__name__}: {e}；{backoff:.0f}s 后重连"
                 )
+                await _log_ws_event(
+                    self._account_id,
+                    "ws_disconnected",
+                    "warning",
+                    "WS断开，准备重连",
+                    f"err={type(e).__name__}: {e}; backoff={backoff:.0f}s",
+                    {
+                        "error": f"{type(e).__name__}: {e}",
+                        "backoff_s": backoff,
+                        "frames_total": self._frames_total,
+                        "reconnect_count": self._reconnect_count,
+                    },
+                )
             finally:
                 self._connected = False
                 self._ws = None
@@ -176,6 +208,7 @@ class FrontierImWsClient:
                 break
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60.0)
+            self._reconnect_count += 1
         logger.info(f"[frontier.ws] 接收循环退出 account={self._account_id}")
 
     def _handle_frame(self, message: Any) -> None:
@@ -185,11 +218,12 @@ class FrontierImWsClient:
         if not isinstance(message, (bytes, bytearray, memoryview)):
             return
 
-        logger.info(f"[frontier.ws] 收到原始二进制帧 account={self._account_id} len={len(message)}")
+        self._frames_total += 1
+        logger.debug(f"[frontier.ws] 收到原始二进制帧 account={self._account_id} len={len(message)}")
 
         # 深度解包二进制帧
         msgs, log_id, ack_ext = decode_frontier_ws_messages(bytes(message))
-        logger.info(
+        logger.debug(
             f"[frontier.ws] 解包结果 account={self._account_id}: "
             f"msgs_len={len(msgs)} log_id={log_id} ack_ext={ack_ext!r}"
         )
@@ -251,10 +285,19 @@ class FrontierWsDecorator(AccountTransport):
             )
 
         cookies = await _load_cookies(self._account_id)
-        if not cookies.get("sessionid"):
+        missing = [k for k in ("sessionid", "s_v_web_id") if not cookies.get(k)]
+        if missing:
             logger.warning(
-                f"[frontier.ws] 账号无 sessionid，跳过 WS 实时监控（仍走 inner 轮询） "
-                f"account={self._account_id}"
+                f"[frontier.ws] 账号缺少 cookie 字段 {missing}，跳过 WS 实时监控"
+                f"（仍走 inner 轮询）account={self._account_id}"
+            )
+            await _log_ws_event(
+                self._account_id,
+                "ws_skipped",
+                "warning",
+                "WS未启用：cookie 缺关键字段",
+                f"缺少 {missing}，已退回 HTTP 轮询收信",
+                {"missing_cookies": missing},
             )
             return
 
@@ -512,6 +555,39 @@ class FrontierWsDecorator(AccountTransport):
 
 
 # ──────────────────────── helpers ────────────────────────
+
+
+async def _log_ws_event(
+    account_id: Optional[str],
+    event_type: str,
+    level: str,
+    title: str,
+    detail: str = "",
+    payload: Optional[dict] = None,
+) -> None:
+    """写一条 WS 运行事件到 DouyinEvent（带结构化 payload）。失败不影响 WS 主流程。"""
+
+    @sync_to_async
+    def _write() -> None:
+        try:
+            from django.utils import timezone
+
+            from core.douyin.douyin_event_model import DouyinEvent
+
+            DouyinEvent.objects.create(
+                account_id=account_id,
+                event_type=event_type,
+                level=level,
+                title=title,
+                detail=detail,
+                payload=payload or {},
+                occurred_at=timezone.now(),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[frontier.ws] 写 DouyinEvent 失败: {e}")
+
+    with suppress(Exception):
+        await _write()
 
 
 async def _load_cookies(account_id: str) -> dict[str, str]:

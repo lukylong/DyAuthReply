@@ -145,7 +145,7 @@ DOUYIN_REDIS_CHANNEL_PREFIX = _env('DOUYIN_REDIS_CHANNEL_PREFIX', 'douyin')
 # ---- 抖音 Transport ----
 # WS 入向消息快路径：HttpProtocolTransport 被 FrontierWsDecorator 包一层，监听 IM
 # WebSocket 帧 → 解 Frontier protobuf → 命中即立即唤醒 scan_inbox（低延时信号）。
-DOUYIN_TRANSPORT_WS_INBOUND = _env('DOUYIN_TRANSPORT_WS_INBOUND', 'false').lower() == 'true'
+DOUYIN_TRANSPORT_WS_INBOUND = _env('DOUYIN_TRANSPORT_WS_INBOUND', 'true').lower() == 'true'
 
 # Transport backend：纯 HTTP 协议（http_protocol），无浏览器。保留该开关仅为兼容，
 # 其它取值会被忽略并退回 http_protocol。

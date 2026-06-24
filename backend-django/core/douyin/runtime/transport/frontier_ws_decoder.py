@@ -64,14 +64,14 @@ def decode_frontier_ws_messages(data: bytes) -> Tuple[List[IMMessage], int, str]
     try:
         fields = parse_protobuf_fields(data, max_depth=2)
     except Exception as e:
-        logger.info(f"[frontier.ws_decoder] 解析 PushFrame 失败: {e}")
+        logger.debug(f"[frontier.ws_decoder] 解析 PushFrame 失败: {e}")
         return [], 0, ""
 
     log_id = 0
     encoding = ""
     payload = b""
 
-    logger.info(f"[frontier.ws_decoder] PushFrame 解析字段:\n{dump_proto_fields(fields)}")
+    logger.debug(f"[frontier.ws_decoder] PushFrame 解析字段:\n{dump_proto_fields(fields)}")
 
     for f in fields:
         if f.field_id == 2 and isinstance(f.value, int):
@@ -85,10 +85,10 @@ def decode_frontier_ws_messages(data: bytes) -> Tuple[List[IMMessage], int, str]
             payload = f.value
 
     if not payload:
-        logger.info(f"[frontier.ws_decoder] 没有 payload")
+        logger.debug(f"[frontier.ws_decoder] 没有 payload")
         return [], log_id, ""
 
-    logger.info(f"[frontier.ws_decoder] encoding={encoding!r} payload_len={len(payload)}")
+    logger.debug(f"[frontier.ws_decoder] encoding={encoding!r} payload_len={len(payload)}")
 
     # 解压 payload
     if encoding == "gzip":
@@ -100,15 +100,15 @@ def decode_frontier_ws_messages(data: bytes) -> Tuple[List[IMMessage], int, str]
     else:
         decompressed = payload
 
-    logger.info(f"[frontier.ws_decoder] decompressed_len={len(decompressed)}")
+    logger.debug(f"[frontier.ws_decoder] decompressed_len={len(decompressed)}")
 
     try:
         resp_fields = parse_protobuf_fields(decompressed, max_depth=6)
     except Exception as e:
-        logger.info(f"[frontier.ws_decoder] 解析 Response 失败: {e}")
+        logger.debug(f"[frontier.ws_decoder] 解析 Response 失败: {e}")
         return [], log_id, ""
 
-    logger.info(f"[frontier.ws_decoder] Response 解析字段:\n{dump_proto_fields(resp_fields)}")
+    logger.debug(f"[frontier.ws_decoder] Response 解析字段:\n{dump_proto_fields(resp_fields)}")
 
     messages_raw_list = []
     need_ack = False
@@ -162,7 +162,7 @@ def decode_frontier_ws_messages(data: bytes) -> Tuple[List[IMMessage], int, str]
                         im_msg = decode_im_message(f.value)
                         if im_msg is not None:
                             decoded_messages.append(im_msg)
-                            logger.info(f"[frontier.ws_decoder] 从 real 结构成功解码 IMMessage: {im_msg.__dict__}")
+                            logger.debug(f"[frontier.ws_decoder] 从 real 结构成功解码 IMMessage: {im_msg.__dict__}")
     except Exception as e:
         logger.debug(f"[frontier.ws_decoder] 尝试以 real 结构解码失败: {e}")
 
@@ -186,14 +186,14 @@ def decode_frontier_ws_messages(data: bytes) -> Tuple[List[IMMessage], int, str]
                     im_msg = decode_im_message(msg_payload)
                     if im_msg is not None:
                         decoded_messages.append(im_msg)
-                        logger.info(f"[frontier.ws_decoder] 从 mock 结构成功解码 IMMessage: {im_msg.__dict__}")
+                        logger.debug(f"[frontier.ws_decoder] 从 mock 结构成功解码 IMMessage: {im_msg.__dict__}")
                     else:
                         if method:
-                            logger.info(f"[frontier.ws_decoder] 跳过非 IM 消息 method={method}")
+                            logger.debug(f"[frontier.ws_decoder] 跳过非 IM 消息 method={method}")
             except Exception as e:
-                logger.info(f"[frontier.ws_decoder] 解析 mock Message {idx} 失败: {e}")
+                logger.debug(f"[frontier.ws_decoder] 解析 mock Message {idx} 失败: {e}")
 
-    logger.info(f"[frontier.ws_decoder] 最终解析出消息数 count={len(decoded_messages)} ack_ext={ack_ext!r}")
+    logger.debug(f"[frontier.ws_decoder] 最终解析出消息数 count={len(decoded_messages)} ack_ext={ack_ext!r}")
     return decoded_messages, log_id, ack_ext
 
 

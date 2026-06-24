@@ -139,7 +139,7 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
           <span class="icon">📝</span>回复记录
         </RouterLink>
         <RouterLink to="/settings" class="nav-item">
-          <span class="icon">⚙️</span>客户端设置
+          <span class="icon">🎛️</span>客户端设置
         </RouterLink>
       </nav>
 

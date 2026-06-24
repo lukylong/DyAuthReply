@@ -85,7 +85,7 @@ class JsSignProvider:
         self._cookies, self._bd_ticket = await _load_account_credentials(self._account_id)
 
         # JS 引擎健康预检：dy_ab.js / Node / PyExecJS 任一缺失则不就绪，触发上层 fallback
-        if not await sync_to_async(js_signer.is_available)():
+        if not await sync_to_async(js_signer.is_available, thread_sensitive=False)():
             logger.warning(
                 f"[sign.js] JS 签名引擎不可用（dy_ab.js/Node/PyExecJS 缺失），"
                 f"account={self._account_id} 将不就绪"
@@ -205,7 +205,12 @@ class JsSignProvider:
                 pass
 
         try:
-            a_bogus = await sync_to_async(js_signer.get_ab)(params_with_token, body_str)
+            # thread_sensitive=False：签名只与常驻 Node 进程池通信、不触碰 Django ORM，
+            # 放到独立线程池并行执行，避免占用 Django 共享线程（默认 thread_sensitive=True
+            # 会让所有签名与 DB 操作在同一线程串行，多账号下成为延迟主因）。
+            a_bogus = await sync_to_async(js_signer.get_ab, thread_sensitive=False)(
+                params_with_token, body_str
+            )
         except js_signer.JsSignerUnavailable as e:
             raise SignerUnavailable(f"JS a_bogus 失败: {e}") from e
         final_url = f"{url}?{params_with_token}&a_bogus={a_bogus}"
@@ -277,9 +282,9 @@ class JsSignProvider:
             )
             return
         try:
-            client_data = await sync_to_async(js_signer.build_bd_ticket_client_data)(
-                path, ticket, ts_sign, prik
-            )
+            client_data = await sync_to_async(
+                js_signer.build_bd_ticket_client_data, thread_sensitive=False
+            )(path, ticket, ts_sign, prik)
         except js_signer.JsSignerUnavailable as e:
             raise SignerUnavailable(f"bd-ticket-guard 签名失败: {e}") from e
         req_headers["bd-ticket-guard-client-data"] = client_data

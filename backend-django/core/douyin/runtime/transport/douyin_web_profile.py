@@ -130,7 +130,7 @@ async def _signed_web_get(
 
     query = urlencode(params)
     try:
-        a_bogus = await sync_to_async(js_signer.get_ab)(query, "")
+        a_bogus = await sync_to_async(js_signer.get_ab, thread_sensitive=False)(query, "")
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[web.profile] a_bogus 失败 err={type(e).__name__}: {e}")
         return None

@@ -10,6 +10,7 @@
 import asyncio
 import json
 import logging
+from contextlib import suppress
 from datetime import datetime
 from typing import Optional, Dict, Any
 from urllib.parse import parse_qs
@@ -489,6 +490,54 @@ class RedisMonitorConsumer(TokenAuthWebSocketConsumer):
             await self.send_error(f'Redis连接测试失败: {str(e)}')
 
 
+def _read_data_version() -> int:
+    """读取 SQLite PRAGMA data_version：任意其它连接（含 Worker 进程）提交写入后会变化，
+    自身连接提交不变。用作极廉价的"库是否被改过"探针，避免空转全表查询。
+
+    非 SQLite（如 Postgres 服务端）无此 pragma：返回 -1，调用方据此退化为每轮都查增量。
+    """
+    from django.db import connection
+    try:
+        with connection.cursor() as c:
+            c.execute('PRAGMA data_version')
+            row = c.fetchone()
+            return int(row[0]) if row else -1
+    except Exception:  # noqa: BLE001
+        return -1
+
+
+def _account_new_messages(account_id: str, after_ts) -> dict:
+    """查询某账号自 after_ts 之后新增的消息（入向+出向），返回新游标与受影响会话集合。
+
+    用 sys_create_datetime（本地落库时间，随 Worker 插入单调递增）做游标，覆盖
+    收到的新私信与本方已发出的回复，让 UI 据此增量刷新。
+    """
+    from django.db.models import Max
+    from core.douyin.douyin_message_model import DouyinMessage
+
+    qs = DouyinMessage.objects.filter(conversation__account_id=account_id)
+    if after_ts is not None:
+        qs = qs.filter(sys_create_datetime__gt=after_ts)
+    rows = list(
+        qs.order_by('-sys_create_datetime')
+        .values('conversation_id', 'sys_create_datetime')[:50]
+    )
+    if not rows:
+        return {'new': False, 'cursor': after_ts, 'conversation_ids': []}
+    new_max = rows[0]['sys_create_datetime']
+    conv_ids = list({str(r['conversation_id']) for r in rows})
+    return {'new': True, 'cursor': new_max, 'conversation_ids': conv_ids}
+
+
+def _account_max_message_ts(account_id: str):
+    from django.db.models import Max
+    from core.douyin.douyin_message_model import DouyinMessage
+    return (
+        DouyinMessage.objects.filter(conversation__account_id=account_id)
+        .aggregate(m=Max('sys_create_datetime'))['m']
+    )
+
+
 class DouyinConsumer(TokenAuthWebSocketConsumer):
     """抖音托管事件 WebSocket 消费者
 
@@ -502,6 +551,7 @@ class DouyinConsumer(TokenAuthWebSocketConsumer):
       - reply_sent       已发送自动回复
       - reply_failed     回复失败
       - event            通用运行时事件（对应 DouyinEvent）
+
     """
 
     async def connect(self):
@@ -540,6 +590,111 @@ class DouyinConsumer(TokenAuthWebSocketConsumer):
                 'timestamp': event.get('timestamp'),
             },
         )
+
+
+class DouyinClientRealtimeConsumer(AsyncWebsocketConsumer):
+    """桌面客户端实时私信消费者（方案 D）。
+
+    客户端模式 Worker 与 API 跨进程、InMemoryChannelLayer 无法跨进程 group_send，
+    故在 API 进程内用 PRAGMA data_version 廉价感知 Worker 落库，再查订阅账号的增量
+    消息，推送 `new_message` 信号；UI 收到后走 REST 拉增量（复用解密/富媒体渲染），
+    替代原 3 秒轮询。
+
+    鉴权与客户端 REST 一致：仅允许本机回环连接（LocalDesktopAuth 同款），无 JWT。
+    端点：`ws://127.0.0.1:8765/ws/client/douyin/`。
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._sub_account_id = None
+        self._sub_conversation_id = None
+        self._dbpoll_task = None
+        self._last_data_version = None
+        self._cursor_ts = None
+
+    def _is_loopback(self) -> bool:
+        client = self.scope.get('client') or []
+        host = client[0] if client else ''
+        return host in ('127.0.0.1', '::1', 'localhost', '')
+
+    async def connect(self):
+        if not self._is_loopback():
+            await self.close(code=4003)
+            return
+        await self.accept()
+
+    async def disconnect(self, close_code):
+        if self._dbpoll_task is not None:
+            self._dbpoll_task.cancel()
+            self._dbpoll_task = None
+
+    async def receive(self, text_data=None, bytes_data=None):
+        try:
+            data = json.loads(text_data or '{}')
+        except json.JSONDecodeError:
+            return
+        mtype = data.get('type', '')
+        if mtype == 'ping':
+            await self._send('pong', {})
+            return
+        if mtype == 'subscribe':
+            self._sub_account_id = (data.get('account_id') or '').strip() or None
+            self._sub_conversation_id = (data.get('conversation_id') or '').strip() or None
+            # 订阅时把游标对齐到当前最新，避免把已存在的历史消息当作"新消息"重复推送。
+            if self._sub_account_id:
+                with suppress(Exception):
+                    self._cursor_ts = await sync_to_async(
+                        _account_max_message_ts, thread_sensitive=True
+                    )(self._sub_account_id)
+            await self._ensure_dbpoll_started()
+            await self._send('subscribe_response', {
+                'account_id': self._sub_account_id,
+                'conversation_id': self._sub_conversation_id,
+            })
+
+    async def _send(self, mtype: str, data: dict):
+        await self.send(text_data=json.dumps({
+            'type': mtype,
+            'data': data,
+            'timestamp': datetime.now().isoformat(),
+        }))
+
+    async def _ensure_dbpoll_started(self):
+        if not bool(getattr(settings, 'DOUYIN_WS_REALTIME_ENABLED', True)):
+            return
+        if self._dbpoll_task is None or self._dbpoll_task.done():
+            self._dbpoll_task = asyncio.create_task(self._dbpoll_loop())
+
+    async def _dbpoll_loop(self):
+        """每 interval 读 data_version；变化时查订阅账号增量消息并推送 new_message。"""
+        interval = max(
+            0.1,
+            float(getattr(settings, 'DOUYIN_WS_DBPOLL_INTERVAL_MS', 400)) / 1000.0,
+        )
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                if not self._sub_account_id:
+                    continue
+                try:
+                    dv = await sync_to_async(_read_data_version, thread_sensitive=True)()
+                    # SQLite：dv 未变说明无任何写入，直接跳过；非 SQLite(dv=-1) 每轮都查。
+                    if dv != -1 and dv == self._last_data_version:
+                        continue
+                    self._last_data_version = dv
+                    result = await sync_to_async(
+                        _account_new_messages, thread_sensitive=True
+                    )(self._sub_account_id, self._cursor_ts)
+                    if result.get('new'):
+                        self._cursor_ts = result['cursor']
+                        await self._send('new_message', {
+                            'account_id': self._sub_account_id,
+                            'conversation_ids': result.get('conversation_ids', []),
+                        })
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(f"[DouyinClientRealtime] dbpoll 异常: {e}")
+        except asyncio.CancelledError:
+            pass
 
 
 class DatabaseMonitorConsumer(TokenAuthWebSocketConsumer):

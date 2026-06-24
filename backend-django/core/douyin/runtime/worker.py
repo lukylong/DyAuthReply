@@ -200,6 +200,36 @@ def _create_synthetic_inbound_message(account_id: str, conversation_id: str, tex
     )
 
 
+# 规则全表是所有账号共享的：多账号高频处理消息时，每条消息都重新加载全表会把
+# Django 共享线程压满（SQLite 读串行）。这里做进程内 TTL 缓存，只缓存"启用中的规则
+# 全集"，再在内存里按账号做归属拆分（账号专属 / 全局兜底）。规则变更最多 TTL 秒后生效。
+_RULES_CACHE: dict = {'ts': 0.0, 'rows': None}
+
+
+def _enabled_rules_cached() -> list:
+    ttl = float(getattr(settings, 'DOUYIN_RULES_CACHE_TTL_S', 30) or 0)
+    now = time.monotonic()
+    rows = _RULES_CACHE.get('rows')
+    if ttl > 0 and rows is not None and (now - _RULES_CACHE['ts']) < ttl:
+        return rows
+    from core.douyin.douyin_rule_model import DouyinRule
+
+    rows = list(
+        DouyinRule.objects.filter(status=True)
+        .select_related('template')
+        .order_by('-priority', '-sys_create_datetime')
+    )
+    _RULES_CACHE['rows'] = rows
+    _RULES_CACHE['ts'] = now
+    return rows
+
+
+def invalidate_rules_cache() -> None:
+    """规则发生写操作后可调用以立即失效缓存（API 侧可选接入）。"""
+    _RULES_CACHE['rows'] = None
+    _RULES_CACHE['ts'] = 0.0
+
+
 @sync_to_async
 def _load_rules_for_account(account_id: str) -> list:
     """按优先级降序返回启用中的规则。
@@ -209,16 +239,10 @@ def _load_rules_for_account(account_id: str) -> list:
       2) 全局规则：account_ids 为空（对所有未被显式绑定的账号生效）
 
     命中顺序：账号专属规则在前（最高优先级），全局规则兜底。
-    SQLite 不支持 JSONField__contains，故在 Python 侧过滤。
+    SQLite 不支持 JSONField__contains，故在 Python 侧过滤；全集走 TTL 缓存。
     """
-    from core.douyin.douyin_rule_model import DouyinRule
-
     aid = str(account_id)
-    all_enabled = list(
-        DouyinRule.objects.filter(status=True)
-        .select_related('template')
-        .order_by('-priority', '-sys_create_datetime')
-    )
+    all_enabled = _enabled_rules_cached()
     bound = [r for r in all_enabled if aid in [str(x) for x in (r.account_ids or [])]]
     glob = [r for r in all_enabled if not (r.account_ids or [])]
     return bound + glob
@@ -392,31 +416,60 @@ async def _backfill_missing_peer_profiles(
         logger.info(f"[worker] 补全会话资料 account={account_id} updated={updated}")
 
 
+# 黑名单同样是共享全表，按 TTL 缓存，避免每条消息全表扫描压满共享线程。
+# 命中计数（hit_count+1）是低频写，仍实时写库。黑名单变更最多 TTL 秒后生效。
+_BLACKLIST_CACHE: dict = {'ts': 0.0, 'rows': None}
+
+
+def _enabled_blacklist_cached() -> list:
+    ttl = float(getattr(settings, 'DOUYIN_BLACKLIST_CACHE_TTL_S', 30) or 0)
+    now = time.monotonic()
+    rows = _BLACKLIST_CACHE.get('rows')
+    if ttl > 0 and rows is not None and (now - _BLACKLIST_CACHE['ts']) < ttl:
+        return rows
+    from core.douyin.douyin_blacklist_model import DouyinBlacklist
+
+    rows = list(DouyinBlacklist.objects.filter(status=True))
+    _BLACKLIST_CACHE['rows'] = rows
+    _BLACKLIST_CACHE['ts'] = now
+    return rows
+
+
+def invalidate_blacklist_cache() -> None:
+    _BLACKLIST_CACHE['rows'] = None
+    _BLACKLIST_CACHE['ts'] = 0.0
+
+
 @sync_to_async
 def _blacklist_hit(account_id: str, peer_sec_uid: str, peer_nickname: str, text: str) -> Optional[str]:
     """返回命中原因字符串；未命中返回 None"""
     from core.douyin.douyin_account_model import DouyinAccount
     from core.douyin.douyin_blacklist_model import DouyinBlacklist
-    acc = DouyinAccount.objects.filter(id=account_id).first()
-    group_id = acc.group_id if acc else None
 
-    qs = DouyinBlacklist.objects.filter(status=True).filter(
-        # scope 范围：全局 / 当前账号 / 当前分组
-        # 这里用简单的 Python 侧过滤避免复杂 OR
-    )
-    for bl in qs:
+    from django.db.models import F
+
+    rows = _enabled_blacklist_cached()
+    if not rows:
+        return None
+    group_id = DouyinAccount.objects.filter(id=account_id).values_list('group_id', flat=True).first()
+
+    def _bump(bl_id) -> None:
+        # 用 F() 基于库内真实值自增，避免缓存里的 hit_count 过期导致计数回退。
+        DouyinBlacklist.objects.filter(id=bl_id).update(hit_count=F('hit_count') + 1)
+
+    for bl in rows:
         if bl.scope == 'account' and str(bl.account_id) != str(account_id):
             continue
         if bl.scope == 'group' and str(bl.group_id or '') != str(group_id or ''):
             continue
         if bl.blacklist_type == 'user' and bl.value == peer_sec_uid:
-            DouyinBlacklist.objects.filter(id=bl.id).update(hit_count=bl.hit_count + 1)
+            _bump(bl.id)
             return f"用户黑名单: {peer_sec_uid}"
         if bl.blacklist_type == 'nickname_keyword' and bl.value and bl.value in (peer_nickname or ''):
-            DouyinBlacklist.objects.filter(id=bl.id).update(hit_count=bl.hit_count + 1)
+            _bump(bl.id)
             return f"昵称黑名单: {bl.value}"
         if bl.blacklist_type == 'content_keyword' and bl.value and bl.value in (text or ''):
-            DouyinBlacklist.objects.filter(id=bl.id).update(hit_count=bl.hit_count + 1)
+            _bump(bl.id)
             return f"内容黑名单: {bl.value}"
     return None
 
@@ -599,15 +652,24 @@ class DouyinWorker:
     def __init__(
         self,
         *,
-        refresh_interval: int = 15,
-        heartbeat_interval: int = 15,
+        refresh_interval: int | None = None,
+        heartbeat_interval: int | None = None,
         idle_poll_min: int | None = None,
         idle_poll_max: int | None = None,
         transport_factory=None,
     ) -> None:
         self.worker_id = f"{socket.gethostname()}:{os.getpid()}"
-        self.refresh_interval = refresh_interval
-        self.heartbeat_interval = heartbeat_interval
+        # refresh / heartbeat 间隔支持 env 配置（多账号低端机可适当拉长以降低 SQLite 写竞争）。
+        self.refresh_interval = (
+            refresh_interval
+            if refresh_interval is not None
+            else int(getattr(settings, 'DOUYIN_WORKER_REFRESH_INTERVAL', 15) or 15)
+        )
+        self.heartbeat_interval = (
+            heartbeat_interval
+            if heartbeat_interval is not None
+            else int(getattr(settings, 'DOUYIN_WORKER_HEARTBEAT_INTERVAL', 15) or 15)
+        )
         self.idle_poll_min = (
             idle_poll_min
             if idle_poll_min is not None

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import {
+  DouyinRealtime,
   getWorkerCommandStatus,
   listAccounts,
   listConversations,
@@ -546,15 +547,51 @@ function selectConversation(id: string) {
   stickToBottom.value = true;
 }
 
+// 实时私信：WS 在线时降为慢兜底轮询，断线/不可用时回退原 3s 快轮询。
+const FAST_POLL_MS = 3000;
+const SLOW_POLL_MS = 30000;
+let realtime: DouyinRealtime | null = null;
+const realtimeOn = ref(false);
+
 function pollTick() {
   if (document.hidden) return;
   if (activeAccountId.value) void loadConversations(true);
   if (activeConversationId.value) void loadMessages(true);
 }
 
-function startPolling() {
+function startPolling(intervalMs = FAST_POLL_MS) {
   stopPolling();
-  pollTimer = setInterval(pollTick, 3000);
+  pollTimer = setInterval(pollTick, intervalMs);
+}
+
+function subscribeRealtime() {
+  realtime?.subscribe(activeAccountId.value, activeConversationId.value);
+}
+
+function setupRealtime() {
+  realtime = new DouyinRealtime({
+    onNewMessage: (d) => {
+      if (!d.account_id || d.account_id !== activeAccountId.value) return;
+      void loadConversations(true);
+      const ids = d.conversation_ids || [];
+      if (
+        activeConversationId.value &&
+        (ids.length === 0 || ids.includes(activeConversationId.value))
+      ) {
+        void loadMessages(true, true);
+      }
+    },
+    onOpen: () => {
+      realtimeOn.value = true;
+      subscribeRealtime();
+      startPolling(SLOW_POLL_MS);
+    },
+    onClose: () => {
+      realtimeOn.value = false;
+      startPolling(FAST_POLL_MS);
+    },
+  });
+  realtime.connect();
 }
 
 function onVisibilityChange() {
@@ -675,11 +712,13 @@ function stopPolling() {
 watch(activeAccountId, () => {
   convSig = '';
   loadConversations();
+  subscribeRealtime();
 });
 
 watch(activeConversationId, () => {
   msgSig = '';
   loadMessages();
+  subscribeRealtime();
 });
 
 function onKeydown(e: KeyboardEvent) {
@@ -693,12 +732,15 @@ onMounted(async () => {
   await loadAccounts();
   await loadConversations();
   startPolling();
+  setupRealtime();
   document.addEventListener('visibilitychange', onVisibilityChange);
   document.addEventListener('keydown', onKeydown);
 });
 
 onUnmounted(() => {
   stopPolling();
+  realtime?.close();
+  realtime = null;
   if (convSearchTimer) clearTimeout(convSearchTimer);
   document.removeEventListener('visibilitychange', onVisibilityChange);
   document.removeEventListener('keydown', onKeydown);

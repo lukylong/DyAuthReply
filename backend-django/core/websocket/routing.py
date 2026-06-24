@@ -31,4 +31,7 @@ websocket_urlpatterns = [
 
     # 抖音托管事件推送（扫码二维码 / 登录结果 / 回复事件等）
     re_path(r'ws/douyin/$', consumers.DouyinConsumer.as_asgi()),
+
+    # 桌面客户端实时私信（方案 D：data_version 探测推送，仅本机回环鉴权）
+    re_path(r'ws/client/douyin/$', consumers.DouyinClientRealtimeConsumer.as_asgi()),
 ]

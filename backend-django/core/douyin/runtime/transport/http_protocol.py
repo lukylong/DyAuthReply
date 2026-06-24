@@ -1480,8 +1480,10 @@ class HttpProtocolTransport(AccountTransport):
             except Exception:  # noqa: BLE001
                 s_v_web_id = ""
 
+            # thread_sensitive=False：protobuf 编码 + EC request_sign 为 CPU 计算、不碰 ORM，
+            # 放独立线程池避免阻塞 Django 共享线程。
             body, client_msg_id, seq_id = await sync_to_async(
-                encode_send_message_request_pb2
+                encode_send_message_request_pb2, thread_sensitive=False
             )(
                 conversation_id=conversation_id,
                 text=normalized,

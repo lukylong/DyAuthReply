@@ -182,6 +182,21 @@ DOUYIN_SIGN_POOL_MAX = int(_env('DOUYIN_SIGN_POOL_MAX', '6'))
 DOUYIN_SIGN_POOL_TIMEOUT = float(_env('DOUYIN_SIGN_POOL_TIMEOUT', '20'))
 DOUYIN_NODE_BIN = _env('DOUYIN_NODE_BIN', 'node')
 
+# Worker 子循环间隔：refresh 扫描托管账号、heartbeat 写会话心跳（多账号时可拉长心跳降写竞争）。
+DOUYIN_WORKER_REFRESH_INTERVAL = int(_env('DOUYIN_WORKER_REFRESH_INTERVAL', '15'))
+DOUYIN_WORKER_HEARTBEAT_INTERVAL = int(_env('DOUYIN_WORKER_HEARTBEAT_INTERVAL', '15'))
+
+# 规则/黑名单是所有账号共享的全表，按 TTL 做进程内缓存，避免每条消息全表加载压满
+# Django 共享线程（SQLite 读串行）。变更最多 TTL 秒后在 worker 内生效；设 0 关闭缓存。
+DOUYIN_RULES_CACHE_TTL_S = float(_env('DOUYIN_RULES_CACHE_TTL_S', '30'))
+DOUYIN_BLACKLIST_CACHE_TTL_S = float(_env('DOUYIN_BLACKLIST_CACHE_TTL_S', '30'))
+
+# 实时私信（方案 D）：API 进程内 DouyinConsumer 用 PRAGMA data_version 探测 Worker 落库后
+# 推送 new_message 信号，替代 UI 3s 轮询。ENABLED=false 关闭（UI 回退轮询）；
+# INTERVAL_MS 为探测间隔（空闲时只读 pragma，开销极低）。
+DOUYIN_WS_REALTIME_ENABLED = _env('DOUYIN_WS_REALTIME_ENABLED', 'true').lower() == 'true'
+DOUYIN_WS_DBPOLL_INTERVAL_MS = int(_env('DOUYIN_WS_DBPOLL_INTERVAL_MS', '400'))
+
 # 全局并发治理：同一时刻并发 scan/send 的账号数上限（<=0 不限制）；启动错峰最大抖动秒数。
 DOUYIN_MAX_CONCURRENT_IO = int(_env('DOUYIN_MAX_CONCURRENT_IO', '16'))
 DOUYIN_STARTUP_JITTER_S = float(_env('DOUYIN_STARTUP_JITTER_S', '8'))

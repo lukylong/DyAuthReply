@@ -743,3 +743,146 @@ export function credentialLabel(state?: string): string {
   };
   return map[state || ''] || state || '未知';
 }
+
+// ==================== 实时私信 WebSocket（方案 D）====================
+
+function isTauriRuntime(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    Boolean(
+      (window as any).__TAURI_INTERNALS__ ||
+        window.location.protocol.startsWith('tauri') ||
+        window.location.host.includes('tauri') ||
+        window.location.protocol === 'file:',
+    )
+  );
+}
+
+export function getRealtimeWsUrl(): string {
+  if (isTauriRuntime()) return 'ws://127.0.0.1:8765/ws/client/douyin/';
+  if (typeof window === 'undefined') return '';
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${window.location.host}/ws/client/douyin/`;
+}
+
+export interface RealtimeNewMessage {
+  account_id: string;
+  conversation_ids: string[];
+}
+
+export interface RealtimeHandlers {
+  onNewMessage?: (data: RealtimeNewMessage) => void;
+  onOpen?: () => void;
+  onClose?: () => void;
+}
+
+/**
+ * 客户端实时私信连接：维护一条到本机 API 的 WebSocket，断线自动重连（指数退避），
+ * 定时 ping 保活。收到 new_message 信号后由调用方走 REST 拉增量。
+ */
+export class DouyinRealtime {
+  private ws: WebSocket | null = null;
+  private readonly url: string;
+  private readonly handlers: RealtimeHandlers;
+  private sub: { account_id?: string; conversation_id?: string } = {};
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private closed = false;
+  private backoff = 1000;
+
+  constructor(handlers: RealtimeHandlers) {
+    this.handlers = handlers;
+    this.url = getRealtimeWsUrl();
+  }
+
+  get connected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  connect(): void {
+    if (!this.url || this.closed) return;
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+    try {
+      this.ws = new WebSocket(this.url);
+    } catch {
+      this.scheduleReconnect();
+      return;
+    }
+    this.ws.onopen = () => {
+      this.backoff = 1000;
+      this.sendSubscribe();
+      this.startPing();
+      this.handlers.onOpen?.();
+    };
+    this.ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data as string) as { type?: string; data?: any };
+        if (msg.type === 'new_message' && msg.data) {
+          this.handlers.onNewMessage?.(msg.data as RealtimeNewMessage);
+        }
+      } catch {
+        // ignore malformed frame
+      }
+    };
+    this.ws.onclose = () => {
+      this.stopPing();
+      this.handlers.onClose?.();
+      if (!this.closed) this.scheduleReconnect();
+    };
+    this.ws.onerror = () => {
+      this.ws?.close();
+    };
+  }
+
+  subscribe(accountId?: string, conversationId?: string): void {
+    this.sub = { account_id: accountId || undefined, conversation_id: conversationId || undefined };
+    this.sendSubscribe();
+  }
+
+  private sendSubscribe(): void {
+    if (this.connected && this.sub.account_id) {
+      this.ws?.send(JSON.stringify({ type: 'subscribe', ...this.sub }));
+    }
+  }
+
+  private startPing(): void {
+    this.stopPing();
+    this.pingTimer = setInterval(() => {
+      if (this.connected) this.ws?.send(JSON.stringify({ type: 'ping' }));
+    }, 25000);
+  }
+
+  private stopPing(): void {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+  }
+
+  private scheduleReconnect(): void {
+    if (this.closed || this.reconnectTimer) return;
+    const delay = this.backoff;
+    this.backoff = Math.min(this.backoff * 2, 15000);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, delay);
+  }
+
+  close(): void {
+    this.closed = true;
+    this.stopPing();
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    try {
+      this.ws?.close();
+    } catch {
+      // ignore
+    }
+    this.ws = null;
+  }
+}

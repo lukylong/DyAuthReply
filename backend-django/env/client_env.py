@@ -72,6 +72,20 @@ DOUYIN_WORKER_IDLE_POLL_MIN = int(_env('DOUYIN_WORKER_IDLE_POLL_MIN', '8'))
 DOUYIN_WORKER_IDLE_POLL_MAX = int(_env('DOUYIN_WORKER_IDLE_POLL_MAX', '15'))
 DOUYIN_WS_HTTP_FALLBACK_INTERVAL = float(_env('DOUYIN_WS_HTTP_FALLBACK_INTERVAL', '25'))
 
+# ---------------- 多账号 / 低端机性能调优（默认面向 4核8G + 20+ 账号）----------------
+# 签名为 CPU 密集，可用并行度受核数约束；签名调用已改为 thread_sensitive=False，
+# 在独立线程池并行、不再阻塞 Django 共享线程。池上限按 CPU 核数自适应，避免在
+# 低端机上开过多 Node 进程抢 CPU/吃内存。可用 DOUYIN_SIGN_POOL_MAX 环境变量覆盖。
+try:
+    _CPU = os.cpu_count() or 4
+except Exception:  # noqa: BLE001
+    _CPU = 4
+DOUYIN_SIGN_POOL_MAX = int(_env('DOUYIN_SIGN_POOL_MAX', str(max(4, min(_CPU, 8)))))
+
+# refresh/heartbeat 间隔：20+ 账号时适当拉长心跳，降低 SQLite 写竞争（心跳每账号 2 次写）。
+DOUYIN_WORKER_REFRESH_INTERVAL = int(_env('DOUYIN_WORKER_REFRESH_INTERVAL', '20'))
+DOUYIN_WORKER_HEARTBEAT_INTERVAL = int(_env('DOUYIN_WORKER_HEARTBEAT_INTERVAL', '25'))
+
 # 客户端历史补扫限流（避免首次启动一次性落库数百条导致卡顿）
 DOUYIN_CLIENT_BACKFILL_MAX_CONVERSATIONS = int(
     _env('DOUYIN_CLIENT_BACKFILL_MAX_CONVERSATIONS', '20')

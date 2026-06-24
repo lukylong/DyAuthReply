@@ -126,12 +126,28 @@ def set_account_hint(n: int) -> None:
             pool.grow(_pool_size())
 
 
+def _default_pool_cap() -> int:
+    """未显式配置时的签名池上限，按 CPU 核数自适应。
+
+    签名（dy_ab.js + EC 计算）为 CPU 密集，可用并行度受核数约束；在 4 核低端机上
+    开过多 Node 进程只会抢 CPU 并占内存。默认取 clamp(4, cpu_count, 8)。
+    """
+    try:
+        cpu = os.cpu_count() or 4
+    except Exception:  # noqa: BLE001
+        cpu = 4
+    return max(4, min(int(cpu), 8))
+
+
 def _pool_cap() -> int:
     try:
         from django.conf import settings
-        return max(1, int(getattr(settings, "DOUYIN_SIGN_POOL_MAX", 6) or 6))
+        configured = getattr(settings, "DOUYIN_SIGN_POOL_MAX", None)
+        if configured is None or str(configured).strip() == "":
+            return _default_pool_cap()
+        return max(1, int(configured))
     except Exception:  # noqa: BLE001
-        return 6
+        return _default_pool_cap()
 
 
 def _pool_size() -> int:

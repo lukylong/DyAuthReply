@@ -6,7 +6,7 @@ import { useVersionUpdate } from '../composables/useVersionUpdate';
 const { settings, resetSettings } = useClientSettings();
 const { checkUpdate, isChecking, updateInfo } = useVersionUpdate();
 
-const activeTab = ref<'version' | 'notification' | 'runtime' | 'privacy'>('version');
+const activeTab = ref<'version' | 'notification' | 'runtime'>('version');
 
 const checkFrequencyOptions = [
   { value: 'startup', label: '仅启动时' },
@@ -18,22 +18,6 @@ const checkFrequencyOptions = [
 
 async function handleCheckUpdate() {
   await checkUpdate();
-}
-
-async function handleOpenDataDir() {
-  try {
-    // 检测是否在 Tauri 环境
-    if ('__TAURI__' in window) {
-      const { open } = await import('@tauri-apps/plugin-shell');
-      // TODO: 从配置或环境变量获取实际的数据目录路径
-      await open('/var/lib/dyauthreply/client');
-    } else {
-      alert('此功能仅在桌面客户端中可用');
-    }
-  } catch (error) {
-    console.error('Failed to open data directory:', error);
-    alert('打开数据目录失败');
-  }
 }
 
 async function handleToggleAutoStart(enabled: boolean) {
@@ -76,7 +60,7 @@ const updateStatusText = computed(() => {
     <div class="page-head">
       <div>
         <h2>客户端设置</h2>
-        <p class="sub">管理客户端的版本更新、通知、运行和隐私设置</p>
+        <p class="sub">管理客户端的版本更新、通知和运行设置</p>
       </div>
     </div>
 
@@ -100,12 +84,6 @@ const updateStatusText = computed(() => {
           @click="activeTab = 'runtime'"
         >
           运行设置
-        </button>
-        <button
-          :class="['tab-btn', { active: activeTab === 'privacy' }]"
-          @click="activeTab = 'privacy'"
-        >
-          数据与隐私
         </button>
       </div>
 
@@ -219,33 +197,6 @@ const updateStatusText = computed(() => {
               <span>启动时最小化</span>
             </label>
             <p class="hint">启动时直接最小化到托盘，不显示主窗口</p>
-          </div>
-        </div>
-
-        <!-- 数据与隐私 -->
-        <div v-if="activeTab === 'privacy'" class="settings-section">
-          <h3>数据与隐私</h3>
-          <div class="form-group">
-            <label class="checkbox-label">
-              <input
-                type="checkbox"
-                v-model="settings.privacy.analytics_enabled"
-                disabled
-              />
-              <span>匿名数据收集（暂未实现）</span>
-            </label>
-            <p class="hint">
-              帮助我们改进产品，仅收集匿名使用数据，不包含个人信息
-            </p>
-          </div>
-
-          <div class="form-group">
-            <label class="form-label">数据目录</label>
-            <p class="path-text">/var/lib/dyauthreply/client</p>
-            <button class="btn btn-secondary" @click="handleOpenDataDir">
-              打开目录
-            </button>
-            <p class="hint">客户端数据存储位置</p>
           </div>
         </div>
 
@@ -382,15 +333,6 @@ const updateStatusText = computed(() => {
   color: #999;
 }
 
-.path-text {
-  font-family: monospace;
-  background: #f5f5f5;
-  padding: 0.5rem;
-  border-radius: 4px;
-  margin-bottom: 0.5rem;
-  color: #666;
-}
-
 .status-text {
   margin-top: 0.5rem;
   font-size: 0.9rem;
@@ -418,16 +360,6 @@ const updateStatusText = computed(() => {
 
 .btn-primary:hover:not(:disabled) {
   background: #1d4ed8;
-}
-
-.btn-secondary {
-  background: #f5f5f5;
-  color: #333;
-  border: 1px solid #d1d5db;
-}
-
-.btn-secondary:hover {
-  background: #e5e5e5;
 }
 
 .btn-danger {

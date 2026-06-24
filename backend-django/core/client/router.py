@@ -18,6 +18,7 @@ from core.douyin.douyin_rule_api import router as douyin_rule_router
 from core.douyin.douyin_session_api import router as douyin_session_router
 from core.douyin.douyin_template_api import router as douyin_template_router
 from ninja.main import NinjaAPI
+from core.client_announcement.client_announcement_client_api import router as client_announcement_client_router
 
 client_router = Router()
 
@@ -235,3 +236,4 @@ client_api.add_router('/client/v1/douyin', douyin_reply_log_router, tags=['Clien
 client_api.add_router('/client/v1/douyin', douyin_blacklist_router, tags=['Client-Douyin-Blacklist'])
 client_api.add_router('/client/v1/douyin', douyin_quick_reply_router, tags=['Client-Douyin-QuickReply'])
 client_api.add_router('/client/v1/douyin', douyin_event_router, tags=['Client-Douyin-Event'])
+client_api.add_router('/client/v1', client_announcement_client_router, tags=['Client-Announcement'])

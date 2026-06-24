@@ -48,6 +48,7 @@ from core.kuaishou.kuaishou_account_group_api import router as kuaishou_account_
 from core.kuaishou.kuaishou_session_api import router as kuaishou_session_router
 from core.kuaishou.kuaishou_event_api import router as kuaishou_event_router
 from core.kuaishou.kuaishou_reply_log_api import router as kuaishou_reply_log_router
+from core.client_announcement.client_announcement_api import router as client_announcement_router
 
 
 # 创建核心模块的总路由
@@ -100,3 +101,6 @@ core_router.add_router("/kuaishou", kuaishou_account_group_router, tags=["Core-K
 core_router.add_router("/kuaishou", kuaishou_session_router, tags=["Core-Kuaishou-Session"])
 core_router.add_router("/kuaishou", kuaishou_event_router, tags=["Core-Kuaishou-Event"])
 core_router.add_router("/kuaishou", kuaishou_reply_log_router, tags=["Core-Kuaishou-ReplyLog"])
+
+# 客户端公告（管理后台）
+core_router.add_router("/client-announcement", client_announcement_router, tags=["Core-ClientAnnouncement"])

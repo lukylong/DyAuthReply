@@ -20,6 +20,8 @@ const hasUpdate = ref(false);
 const latestVersion = ref('');
 const updateInfo = ref<UpdateInfo | null>(null);
 const isChecking = ref(false);
+const checkError = ref('');
+const lastCheckedAt = ref('');
 
 function getIntervalMs(frequency: string): number {
   switch (frequency) {
@@ -46,6 +48,7 @@ async function checkUpdate(): Promise<void> {
   }
 
   isChecking.value = true;
+  checkError.value = '';
 
   try {
     const result = await checkAppUpdate();
@@ -54,7 +57,9 @@ async function checkUpdate(): Promise<void> {
     latestVersion.value = result.latest_version;
 
     // 更新最后检查时间
-    settings.value.version_update.last_check_time = new Date().toISOString();
+    const now = new Date().toISOString();
+    settings.value.version_update.last_check_time = now;
+    lastCheckedAt.value = now;
 
     // 如果有更新且不是用户已忽略的版本，显示提示
     if (
@@ -66,6 +71,9 @@ async function checkUpdate(): Promise<void> {
     }
   } catch (error) {
     console.error('Failed to check update:', error);
+    checkError.value = error instanceof Error ? error.message : String(error);
+    updateInfo.value = null;
+    hasUpdate.value = false;
   } finally {
     isChecking.value = false;
   }
@@ -131,6 +139,8 @@ export function useVersionUpdate() {
     latestVersion,
     updateInfo,
     isChecking,
+    checkError,
+    lastCheckedAt,
     checkUpdate,
     dismissUpdate,
   };

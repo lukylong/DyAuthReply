@@ -42,6 +42,27 @@ body {
   color: var(--text-primary);
   overflow: hidden;
   position: relative;
+  /* 桌面客户端：禁止双击/拖拽选中 UI 文本（避免出现选中高亮的"点击效果"） */
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+}
+
+/* 仅在输入控件与显式标记可选的区域允许选中文本 */
+input,
+textarea,
+[contenteditable='true'],
+.selectable,
+.selectable * {
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: auto;
+}
+
+/* 禁止图片被拖拽产生残影 */
+img {
+  -webkit-user-drag: none;
+  user-select: none;
 }
 
 #app {

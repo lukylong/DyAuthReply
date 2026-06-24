@@ -1,12 +1,25 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useClientSettings } from '../composables/useClientSettings';
 import { useVersionUpdate } from '../composables/useVersionUpdate';
+import { openExternalUrl } from '../api/client';
 
 const { settings, resetSettings } = useClientSettings();
-const { checkUpdate, isChecking, updateInfo } = useVersionUpdate();
+const { checkUpdate, isChecking, updateInfo, checkError } = useVersionUpdate();
 
 const activeTab = ref<'version' | 'notification' | 'runtime'>('version');
+
+// 运行设置：开机自启状态反馈
+const autoStartBusy = ref(false);
+const autoStartMessage = ref('');
+const autoStartMessageType = ref<'info' | 'error' | 'success'>('info');
+
+function isTauriEnv(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    ('__TAURI__' in window || '__TAURI_INTERNALS__' in window)
+  );
+}
 
 const checkFrequencyOptions = [
   { value: 'startup', label: '仅启动时' },
@@ -20,35 +33,66 @@ async function handleCheckUpdate() {
   await checkUpdate();
 }
 
-async function handleToggleAutoStart(enabled: boolean) {
+async function handleOpenDownload() {
+  const url = updateInfo.value?.download_url || updateInfo.value?.release_page;
+  if (url) {
+    await openExternalUrl(url);
+  }
+}
+
+// 进入页面时，把开关同步为系统真实的自启状态，避免与本地缓存不一致
+onMounted(async () => {
+  if (!isTauriEnv()) return;
   try {
-    if ('__TAURI__' in window) {
-      const { enable, disable } = await import('@tauri-apps/plugin-autostart');
-      if (enabled) {
-        await enable();
-        console.log('Auto-start enabled successfully');
-      } else {
-        await disable();
-        console.log('Auto-start disabled successfully');
-      }
+    const { isEnabled } = await import('@tauri-apps/plugin-autostart');
+    const enabled = await isEnabled();
+    settings.value.runtime.auto_start = enabled;
+  } catch (error) {
+    console.warn('Failed to read auto-start state:', error);
+  }
+});
+
+function setAutoStartMessage(type: 'info' | 'error' | 'success', text: string) {
+  autoStartMessageType.value = type;
+  autoStartMessage.value = text;
+}
+
+async function onAutoStartChange(event: Event) {
+  const target = event.target as HTMLInputElement;
+  await handleToggleAutoStart(target.checked);
+  // 强制把 DOM 同步为最终状态，避免回滚到原值时 Vue 因 diff 无变化而不更新复选框
+  target.checked = settings.value.runtime.auto_start;
+}
+
+async function handleToggleAutoStart(enabled: boolean) {
+  autoStartBusy.value = true;
+  autoStartMessage.value = '';
+
+  if (!isTauriEnv()) {
+    setAutoStartMessage('error', '开机自启动仅在桌面客户端中可用');
+    settings.value.runtime.auto_start = false; // 回滚
+    autoStartBusy.value = false;
+    return;
+  }
+
+  try {
+    const { enable, disable, isEnabled } = await import('@tauri-apps/plugin-autostart');
+    if (enabled) {
+      await enable();
     } else {
-      console.warn('Auto-start is only available in Tauri environment');
-      alert('开机自启动功能仅在桌面客户端中可用');
-      settings.value.runtime.auto_start = !enabled; // 回滚
+      await disable();
     }
+    // 以系统真实状态为准回写，确保设置生效
+    const actual = await isEnabled();
+    settings.value.runtime.auto_start = actual;
+    setAutoStartMessage('success', actual ? '已开启开机自启动' : '已关闭开机自启动');
   } catch (error) {
     console.error('Failed to toggle auto-start:', error);
-
-    // 友好的错误提示
     const errorMessage = error instanceof Error ? error.message : String(error);
-
-    if (errorMessage.includes('not found') || errorMessage.includes('Cannot find module')) {
-      alert('开机自启动功能需要安装 Tauri 插件支持\n\n请在 Tauri 后端添加：\ntauri-plugin-autostart = "2"');
-    } else {
-      alert(`设置开机自启动失败：${errorMessage}`);
-    }
-
+    setAutoStartMessage('error', `设置失败：${errorMessage}`);
     settings.value.runtime.auto_start = !enabled; // 回滚
+  } finally {
+    autoStartBusy.value = false;
   }
 }
 
@@ -60,11 +104,20 @@ function handleReset() {
 
 const updateStatusText = computed(() => {
   if (isChecking.value) return '检查中...';
+  if (checkError.value) return `检查失败：${checkError.value}`;
   if (!updateInfo.value) return '未检查';
   if (updateInfo.value.has_update) {
-    return `有新版本：${updateInfo.value.latest_version}`;
+    return `发现新版本 ${updateInfo.value.latest_version}（当前 ${updateInfo.value.current_version}）`;
   }
-  return '已是最新版本';
+  return `已是最新版本（当前 ${updateInfo.value.current_version}）`;
+});
+
+const updateStatusType = computed<'info' | 'error' | 'success' | 'update'>(() => {
+  if (isChecking.value) return 'info';
+  if (checkError.value) return 'error';
+  if (!updateInfo.value) return 'info';
+  if (updateInfo.value.has_update) return 'update';
+  return 'success';
 });
 </script>
 
@@ -170,15 +223,28 @@ const updateStatusText = computed(() => {
           </div>
 
           <div class="settings-action">
-            <button
-              class="btn-glass btn-action"
-              @click="handleCheckUpdate"
-              :disabled="isChecking"
-            >
-              <span class="btn-icon">🔍</span>
-              <span>{{ isChecking ? '检查中...' : '立即检查更新' }}</span>
-            </button>
-            <p class="action-status">{{ updateStatusText }}</p>
+            <div class="action-row">
+              <button
+                class="btn-glass btn-action"
+                @click="handleCheckUpdate"
+                :disabled="isChecking"
+              >
+                <span class="btn-icon">🔍</span>
+                <span>{{ isChecking ? '检查中...' : '立即检查更新' }}</span>
+              </button>
+              <button
+                v-if="updateStatusType === 'update' && (updateInfo?.download_url || updateInfo?.release_page)"
+                class="btn-glass btn-action btn-primary"
+                @click="handleOpenDownload"
+              >
+                <span class="btn-icon">⬇️</span>
+                <span>前往下载</span>
+              </button>
+            </div>
+            <p :class="['action-status', `status-${updateStatusType}`]">{{ updateStatusText }}</p>
+            <p v-if="updateStatusType === 'update' && updateInfo?.notes" class="update-notes">
+              {{ updateInfo.notes }}
+            </p>
           </div>
         </div>
 
@@ -240,13 +306,18 @@ const updateStatusText = computed(() => {
                   <input
                     type="checkbox"
                     class="setting-checkbox"
-                    v-model="settings.runtime.auto_start"
-                    @change="handleToggleAutoStart(settings.runtime.auto_start)"
+                    :disabled="autoStartBusy"
+                    :checked="settings.runtime.auto_start"
+                    @change="onAutoStartChange"
                   />
                   <span class="checkbox-icon"></span>
                   <div class="setting-info">
                     <span class="setting-name">开机自启动</span>
                     <span class="setting-desc">系统启动时自动运行客户端（需系统授权）</span>
+                    <span
+                      v-if="autoStartMessage"
+                      :class="['inline-status', `status-${autoStartMessageType}`]"
+                    >{{ autoStartMessage }}</span>
                   </div>
                 </label>
               </div>
@@ -458,7 +529,6 @@ const updateStatusText = computed(() => {
 }
 
 .setting-item.nested {
-  margin-left: 40px;
   background: rgba(255, 255, 255, 0.25);
   border-color: rgba(255, 255, 255, 0.3);
 }
@@ -477,7 +547,6 @@ const updateStatusText = computed(() => {
   cursor: pointer;
   user-select: none;
   flex: 1;
-  padding-top: 2px;
 }
 
 /* 自定义复选框 */
@@ -498,7 +567,7 @@ const updateStatusText = computed(() => {
   place-items: center;
   transition: var(--transition-quick);
   position: relative;
-  margin-top: 1px;
+  margin-top: 0;
 }
 
 .checkbox-icon::after {
@@ -529,11 +598,18 @@ const updateStatusText = computed(() => {
   flex: 1;
 }
 
+/* 没有复选框的设置项（如"检查频率"）：补齐复选框宽度(22px)+间距(14px)，与上方标题左对齐 */
+.setting-main > .setting-info {
+  padding-left: 36px;
+}
+
 .setting-name {
   font-size: 0.95rem;
   font-weight: 600;
   color: var(--text-primary);
-  line-height: 1.3;
+  display: flex;
+  align-items: center;
+  min-height: 22px;
 }
 
 .setting-desc {
@@ -561,8 +637,25 @@ const updateStatusText = computed(() => {
   border-radius: 14px;
 }
 
+.action-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .btn-action {
   align-self: flex-start;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%);
+  border-color: #0284c7;
+  color: #fff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  filter: brightness(1.05);
 }
 
 .btn-icon {
@@ -575,6 +668,45 @@ const updateStatusText = computed(() => {
   font-size: 0.875rem;
   color: var(--text-secondary);
   font-weight: 500;
+}
+
+.action-status.status-error {
+  color: #dc2626;
+}
+
+.action-status.status-success {
+  color: #16a34a;
+}
+
+.action-status.status-update {
+  color: #0284c7;
+  font-weight: 600;
+}
+
+.update-notes {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.inline-status {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  margin-top: 2px;
+}
+
+.inline-status.status-error {
+  color: #dc2626;
+}
+
+.inline-status.status-success {
+  color: #16a34a;
+}
+
+.inline-status.status-info {
+  color: var(--text-secondary);
 }
 
 /* 底部操作 */

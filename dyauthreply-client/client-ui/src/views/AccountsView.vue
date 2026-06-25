@@ -2,8 +2,10 @@
 import { onBeforeRouteLeave } from 'vue-router';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import AppModal from '../components/AppModal.vue';
+import AccountProfileDrawer from '../components/AccountProfileDrawer.vue';
 import {
   credentialLabel,
+  deleteAccount,
   importCredential,
   listAccounts,
   patchAccount,
@@ -24,6 +26,52 @@ const importError = ref('');
 const importSuccess = ref('');
 const reimportTarget = ref<DouyinAccount | null>(null);
 const savingId = ref('');
+
+const showProfile = ref(false);
+const profileTarget = ref<DouyinAccount | null>(null);
+
+function openProfile(account: DouyinAccount) {
+  profileTarget.value = account;
+  showProfile.value = true;
+}
+
+function closeProfile() {
+  showProfile.value = false;
+}
+
+const showDelete = ref(false);
+const deleteTarget = ref<DouyinAccount | null>(null);
+const deleting = ref(false);
+const deleteError = ref('');
+
+function openDelete(account: DouyinAccount) {
+  deleteTarget.value = account;
+  deleteError.value = '';
+  showDelete.value = true;
+}
+
+function closeDelete() {
+  if (deleting.value) return;
+  showDelete.value = false;
+  deleteTarget.value = null;
+}
+
+async function confirmDelete() {
+  const acc = deleteTarget.value;
+  if (!acc) return;
+  deleting.value = true;
+  deleteError.value = '';
+  try {
+    await deleteAccount(acc.id);
+    accounts.value = accounts.value.filter((a) => a.id !== acc.id);
+    showDelete.value = false;
+    deleteTarget.value = null;
+  } catch (e) {
+    deleteError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    deleting.value = false;
+  }
+}
 
 const RECOMMENDED_MAX_ACCOUNTS = 10;
 const overAccountLimit = computed(
@@ -57,11 +105,14 @@ function closeImport() {
 }
 
 function onEscapeKey(e: KeyboardEvent) {
-  if (e.key === 'Escape') closeImport();
+  if (e.key !== 'Escape') return;
+  if (showDelete.value) closeDelete();
+  else if (showProfile.value) closeProfile();
+  else if (showImport.value) closeImport();
 }
 
-watch(showImport, (open) => {
-  if (open) {
+watch([showImport, showProfile, showDelete], ([imp, prof, del]) => {
+  if (imp || prof || del) {
     document.addEventListener('keydown', onEscapeKey);
   } else {
     document.removeEventListener('keydown', onEscapeKey);
@@ -70,6 +121,8 @@ watch(showImport, (open) => {
 
 onBeforeRouteLeave(() => {
   closeImport();
+  closeProfile();
+  showDelete.value = false;
 });
 
 onUnmounted(() => {
@@ -213,6 +266,15 @@ onMounted(load);
               </div>
             </div>
           </div>
+          <button
+            type="button"
+            class="btn-delete"
+            title="删除账号"
+            aria-label="删除账号"
+            @click="openDelete(acc)"
+          >
+            🗑
+          </button>
         </div>
 
         <div class="quota-setting">
@@ -244,9 +306,14 @@ onMounted(load);
             <span class="slider"></span>
             <span class="switch-lbl">自动回复</span>
           </label>
-          <button type="button" class="btn-glass btn-action" @click="openImport(acc)">
-            更新凭证
-          </button>
+          <div class="action-btns">
+            <button type="button" class="btn-glass btn-action" @click="openProfile(acc)">
+              查看主页
+            </button>
+            <button type="button" class="btn-glass btn-action" @click="openImport(acc)">
+              更新凭证
+            </button>
+          </div>
         </div>
       </article>
     </section>
@@ -281,6 +348,44 @@ onMounted(load);
           </button>
           <button type="button" class="btn-glass btn-primary-glass" :disabled="submitting" @click="submitImport">
             {{ submitting ? '验证导入中...' : '确认绑定' }}
+          </button>
+        </div>
+      </div>
+    </AppModal>
+
+    <AccountProfileDrawer
+      :open="showProfile"
+      :account="profileTarget"
+      @close="closeProfile"
+    />
+
+    <AppModal
+      :open="showDelete"
+      :title="`删除「${deleteTarget?.nickname ?? ''}」`"
+      dialog-role="alertdialog"
+      @close="closeDelete"
+    >
+      <div class="delete-modal-content">
+        <p class="del-desc">
+          确认删除该抖音号吗？删除后将清除其本地登录凭证与托管配置，此操作不可恢复。
+        </p>
+        <p v-if="deleteTarget?.status === 1" class="msg-box warn-msg">
+          该账号当前在线，可能需要先「登出 / 关闭自动回复」后才能删除。
+        </p>
+        <transition name="fade">
+          <p v-if="deleteError" class="msg-box error-msg">{{ deleteError }}</p>
+        </transition>
+        <div class="actions">
+          <button type="button" class="btn-glass" :disabled="deleting" @click="closeDelete">
+            取消
+          </button>
+          <button
+            type="button"
+            class="btn-glass btn-danger-glass"
+            :disabled="deleting"
+            @click="confirmDelete"
+          >
+            {{ deleting ? '删除中...' : '确认删除' }}
           </button>
         </div>
       </div>
@@ -414,10 +519,39 @@ onMounted(load);
   opacity: 0.85;
 }
 
+.account-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .profile-group {
   display: flex;
   gap: 16px;
   align-items: center;
+  min-width: 0;
+}
+
+.btn-delete {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  background: rgba(0, 0, 0, 0.03);
+  color: var(--text-muted);
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: var(--transition-quick);
+}
+.btn-delete:hover {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.25);
+  color: #b91c1c;
 }
 
 .avatar {
@@ -542,6 +676,11 @@ onMounted(load);
   justify-content: space-between;
   gap: 12px;
   margin-top: 4px;
+}
+
+.action-btns {
+  display: flex;
+  gap: 8px;
 }
 
 .btn-action {
@@ -672,6 +811,34 @@ onMounted(load);
   justify-content: flex-end;
   gap: 12px;
   margin-top: 8px;
+}
+
+.delete-modal-content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.del-desc {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.warn-msg {
+  background: rgba(234, 179, 8, 0.08);
+  color: #a16207;
+  border: 1px solid rgba(234, 179, 8, 0.2);
+}
+
+.btn-danger-glass {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.25);
+  color: #b91c1c;
+}
+.btn-danger-glass:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.2);
 }
 
 @keyframes spin {

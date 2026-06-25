@@ -244,3 +244,41 @@ class CheckCredentialOut(Schema):
     nickname: Optional[str] = Field(None, description="识别到的昵称")
     suggestions: list[str] = Field(default_factory=list, description="操作建议")
 
+
+class ProfileStatsOut(Schema):
+    """账号主页统计输出（粉丝/关注/作品/获赞）。"""
+    ok: bool = True
+    error: Optional[str] = Field(None, description="失败原因（凭证失效/风控/网络），ok=false 时给出")
+    nickname: Optional[str] = None
+    avatar: Optional[str] = None
+    unique_id: Optional[str] = None
+    follower_count: int = 0
+    following_count: int = 0
+    aweme_count: int = 0
+    total_favorited: int = 0
+    last_profile_sync_at: Optional[str] = Field(None, description="上次同步时间 ISO 字符串")
+    cached: bool = Field(False, description="是否来自本地缓存（未实时拉取）")
+
+
+class WorkItemOut(Schema):
+    """单条作品。"""
+    aweme_id: str
+    desc: str = ""
+    cover: str = ""
+    work_type: str = "video"
+    like_count: int = 0
+    comment_count: int = 0
+    collect_count: int = 0
+    share_count: int = 0
+    create_time: int = 0
+    share_url: str = ""
+
+
+class WorksOut(Schema):
+    """作品列表分页输出。"""
+    ok: bool = True
+    error: Optional[str] = None
+    items: List[WorkItemOut] = Field(default_factory=list)
+    max_cursor: str = "0"
+    has_more: bool = False
+

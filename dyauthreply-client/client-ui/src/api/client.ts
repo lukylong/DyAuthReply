@@ -152,6 +152,12 @@ export interface DouyinAccount {
   daily_reply_quota?: number;
   sec_uid?: string;
   avatar?: string;
+  unique_id?: string;
+  follower_count?: number;
+  following_count?: number;
+  aweme_count?: number;
+  total_favorited?: number;
+  last_profile_sync_at?: string | null;
 }
 
 export interface QuickCreatePayload {
@@ -324,6 +330,63 @@ export function adminEmergencyStop(reason = '管理员急停') {
 
 export function listAccounts() {
   return request<DouyinAccount[]>('/douyin/account/all');
+}
+
+export interface ProfileStats {
+  ok: boolean;
+  error?: string | null;
+  nickname?: string | null;
+  avatar?: string | null;
+  unique_id?: string | null;
+  follower_count: number;
+  following_count: number;
+  aweme_count: number;
+  total_favorited: number;
+  last_profile_sync_at?: string | null;
+  cached: boolean;
+}
+
+export interface WorkItem {
+  aweme_id: string;
+  desc: string;
+  cover: string;
+  work_type: string;
+  like_count: number;
+  comment_count: number;
+  collect_count: number;
+  share_count: number;
+  create_time: number;
+  share_url: string;
+}
+
+export interface WorksResult {
+  ok: boolean;
+  error?: string | null;
+  items: WorkItem[];
+  max_cursor: string;
+  has_more: boolean;
+}
+
+/** 账号主页统计（缓存优先，refresh=true 强制实时拉取） */
+export function getProfileStats(accountId: string, refresh = false) {
+  return request<ProfileStats>(
+    withQuery(`/douyin/account/${accountId}/profile-stats`, {
+      refresh: refresh ? 'true' : undefined,
+    }),
+  );
+}
+
+/** 账号作品列表（实时分页） */
+export function getAccountWorks(
+  accountId: string,
+  params?: { cursor?: string; count?: number },
+) {
+  return request<WorksResult>(
+    withQuery(`/douyin/account/${accountId}/works`, {
+      cursor: params?.cursor ?? '0',
+      count: params?.count ?? 18,
+    }),
+  );
 }
 
 export function quickCreateAccount(data: QuickCreatePayload) {
@@ -594,6 +657,12 @@ export function patchAccount(accountId: string, data: AccountPatch) {
   return request<DouyinAccount>(`/douyin/account/${accountId}`, {
     method: 'PATCH',
     body: JSON.stringify(data),
+  });
+}
+
+export function deleteAccount(accountId: string) {
+  return request<DouyinAccount>(`/douyin/account/${accountId}`, {
+    method: 'DELETE',
   });
 }
 

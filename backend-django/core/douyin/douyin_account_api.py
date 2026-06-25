@@ -13,7 +13,7 @@ from ninja import Query, Router
 from ninja.errors import HttpError
 from ninja.pagination import paginate
 
-from common.fu_crud import create, delete, retrieve
+from common.fu_crud import create, retrieve
 from common.fu_pagination import MyPagination
 from core.douyin.douyin_account_model import DouyinAccount
 from core.douyin.runtime import command_publisher
@@ -30,7 +30,9 @@ from core.douyin.douyin_account_schema import (
     DouyinAccountSchemaPatch,
     DouyinAccountSimpleOut,
     DouyinCredentialImportIn,
+    ProfileStatsOut,
     QuickCreateAccountIn,
+    WorksOut,
 )
 # 导入消息回复模块需要的 schema
 from core.douyin.douyin_session_schema import (
@@ -452,11 +454,24 @@ def patch_douyin_account(request, account_id: str, data: DouyinAccountSchemaPatc
 
 @router.delete("/account/{account_id}", response=DouyinAccountSchemaOut, summary="删除抖音账号")
 def delete_douyin_account(request, account_id: str):
-    """删除账号：在线账号需先登出/禁用"""
+    """硬删除账号：在线账号需先登出/禁用。
+
+    删除时一并：
+      1) 给 worker 发 session stop，使托管协程立即下线（worker 也会在下个刷新周期按 DB diff 自动摘除）；
+      2) 清理本地加密登录态 .bin / scan cursor / 会话 cursor，避免残留孤儿凭证。
+    """
+    from contextlib import suppress
+
     account = get_object_or_404(DouyinAccount, id=account_id)
     if account.is_online():
         raise HttpError(400, "在线账号无法直接删除，请先登出或禁用")
-    return delete(account_id, DouyinAccount)
+
+    with suppress(Exception):
+        command_publisher.send_session_control(account_id, 'stop')
+
+    _delete_douyin_account_with_storage(account)
+    account.id = account_id
+    return account
 
 
 @router.post(
@@ -465,6 +480,8 @@ def delete_douyin_account(request, account_id: str):
     summary="批量删除抖音账号",
 )
 def batch_delete_douyin_account(request, data: DouyinAccountBatchDeleteIn):
+    from contextlib import suppress
+
     failed_ids: List[str] = []
     success = 0
     for aid in data.ids:
@@ -473,7 +490,9 @@ def batch_delete_douyin_account(request, data: DouyinAccountBatchDeleteIn):
             if acc.is_online():
                 failed_ids.append(aid)
                 continue
-            acc.delete()
+            with suppress(Exception):
+                command_publisher.send_session_control(aid, 'stop')
+            _delete_douyin_account_with_storage(acc)
             success += 1
         except DouyinAccount.DoesNotExist:
             failed_ids.append(aid)
@@ -1167,3 +1186,184 @@ def refresh_account_conversation_user(request, account_id: str, conversation_id:
         return DouyinSessionControlOut(success=True, message="用户资料已成功更新")
     else:
         return DouyinSessionControlOut(success=False, message="已拉取资料，但未获取到对方的有效昵称")
+
+
+def _account_web_credentials(account: DouyinAccount, *, timeout_s: float = 20):
+    """复用 HttpProtocolTransport 加载账号登录态，返回 (cookies, user_agent, proxy_url)。
+
+    失败返回 None。供主页统计 / 作品列表走账号自身 Cookie + 代理，不串号。
+    """
+    import asyncio
+    from asgiref.sync import async_to_sync
+    from core.douyin.runtime.transport.http_protocol import HttpProtocolTransport
+
+    async def _run():
+        transport = HttpProtocolTransport()
+        await transport.start(account)
+        try:
+            cookies = await transport._sign.get_cookies()
+            ua = getattr(transport._sign, "_user_agent", "") or ""
+            proxy = getattr(transport._sign, "_proxy_url", None)
+            return cookies, ua, proxy
+        finally:
+            await transport.stop(account)
+
+    try:
+        return async_to_sync(_run)()
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning(
+            f"[account] 加载登录态失败 account={account.id} err={type(e).__name__}: {e}"
+        )
+        return None
+
+
+@router.get(
+    "/account/{account_id}/profile-stats",
+    response=ProfileStatsOut,
+    summary="账号主页统计（粉丝/关注/作品/获赞，缓存优先）",
+)
+def get_account_profile_stats(request, account_id: str, refresh: bool = False):
+    """拉取账号主页计数。默认缓存优先（10 分钟内直接返回缓存）；refresh=true 强制实时拉取并落库。"""
+    import asyncio
+    from datetime import timedelta
+    from django.utils import timezone
+    from asgiref.sync import async_to_sync
+    from core.douyin.runtime.transport.douyin_web_profile import (
+        fetch_profile_stats_via_douyin_web,
+    )
+
+    account = get_object_or_404(DouyinAccount, id=account_id)
+
+    def _cached_out(cached: bool) -> ProfileStatsOut:
+        return ProfileStatsOut(
+            ok=True,
+            nickname=account.nickname,
+            avatar=account.avatar,
+            unique_id=account.unique_id,
+            follower_count=account.follower_count,
+            following_count=account.following_count,
+            aweme_count=account.aweme_count,
+            total_favorited=account.total_favorited,
+            last_profile_sync_at=(
+                account.last_profile_sync_at.isoformat()
+                if account.last_profile_sync_at else None
+            ),
+            cached=cached,
+        )
+
+    # 软 TTL：10 分钟内且非强制刷新 → 直接给缓存
+    if not refresh and account.last_profile_sync_at:
+        if timezone.now() - account.last_profile_sync_at < timedelta(minutes=10):
+            return _cached_out(cached=True)
+
+    sec_uid = (account.sec_uid or "").strip()
+    if not sec_uid:
+        return ProfileStatsOut(ok=False, error="账号缺少 sec_uid，无法查询主页（请先完善登录态）")
+
+    creds = _account_web_credentials(account)
+    if not creds:
+        return ProfileStatsOut(ok=False, error="登录态加载失败，请检查账号凭证")
+    cookies, ua, proxy = creds
+
+    async def _run():
+        return await asyncio.wait_for(
+            fetch_profile_stats_via_douyin_web(
+                cookies, ua, sec_uid, proxy_url=proxy, account_id=str(account.id),
+            ),
+            timeout=20,
+        )
+
+    try:
+        stats = async_to_sync(_run)()
+    except asyncio.TimeoutError:
+        if account.last_profile_sync_at:
+            return _cached_out(cached=True)
+        return ProfileStatsOut(ok=False, error="拉取超时，请稍后重试")
+    except Exception as e:  # noqa: BLE001
+        return ProfileStatsOut(ok=False, error=f"拉取异常：{type(e).__name__}")
+
+    if not stats:
+        if account.last_profile_sync_at:
+            return _cached_out(cached=True)
+        return ProfileStatsOut(ok=False, error="拉取失败（凭证失效或风控），请稍后重试")
+
+    account.follower_count = stats.get("follower_count", 0)
+    account.following_count = stats.get("following_count", 0)
+    account.aweme_count = stats.get("aweme_count", 0)
+    account.total_favorited = stats.get("total_favorited", 0)
+    account.last_profile_sync_at = timezone.now()
+    update_fields = [
+        "follower_count", "following_count", "aweme_count",
+        "total_favorited", "last_profile_sync_at", "sys_update_datetime",
+    ]
+    if stats.get("unique_id") and not account.unique_id:
+        account.unique_id = str(stats["unique_id"])
+        update_fields.append("unique_id")
+    account.save(update_fields=update_fields)
+
+    return ProfileStatsOut(
+        ok=True,
+        nickname=account.nickname,
+        avatar=account.avatar,
+        unique_id=account.unique_id,
+        follower_count=account.follower_count,
+        following_count=account.following_count,
+        aweme_count=account.aweme_count,
+        total_favorited=account.total_favorited,
+        last_profile_sync_at=account.last_profile_sync_at.isoformat(),
+        cached=False,
+    )
+
+
+@router.get(
+    "/account/{account_id}/works",
+    response=WorksOut,
+    summary="账号作品列表（实时分页，不落库）",
+)
+def get_account_works(request, account_id: str, cursor: str = "0", count: int = 18):
+    """实时拉取账号作品列表分页（封面/标题/点赞等）。"""
+    import asyncio
+    from asgiref.sync import async_to_sync
+    from core.douyin.runtime.transport.douyin_web_profile import (
+        fetch_user_works_via_douyin_web,
+    )
+
+    account = get_object_or_404(DouyinAccount, id=account_id)
+    sec_uid = (account.sec_uid or "").strip()
+    if not sec_uid:
+        return WorksOut(ok=False, error="账号缺少 sec_uid，无法查询作品")
+
+    creds = _account_web_credentials(account)
+    if not creds:
+        return WorksOut(ok=False, error="登录态加载失败，请检查账号凭证")
+    cookies, ua, proxy = creds
+
+    safe_count = max(1, min(int(count or 18), 30))
+
+    async def _run():
+        return await asyncio.wait_for(
+            fetch_user_works_via_douyin_web(
+                cookies, ua, sec_uid,
+                max_cursor=str(cursor or "0"), count=safe_count,
+                proxy_url=proxy, account_id=str(account.id),
+            ),
+            timeout=20,
+        )
+
+    try:
+        data = async_to_sync(_run)()
+    except asyncio.TimeoutError:
+        return WorksOut(ok=False, error="拉取超时，请稍后重试")
+    except Exception as e:  # noqa: BLE001
+        return WorksOut(ok=False, error=f"拉取异常：{type(e).__name__}")
+
+    if not data:
+        return WorksOut(ok=False, error="拉取失败（凭证失效或风控），请稍后重试")
+
+    return WorksOut(
+        ok=True,
+        items=data.get("items", []),
+        max_cursor=data.get("max_cursor", "0"),
+        has_more=data.get("has_more", False),
+    )

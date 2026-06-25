@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 _WEB_QUERY_USER_URL = "https://www.douyin.com/aweme/v1/web/query/user/"
 _WEB_USER_SELF_URL = "https://www.douyin.com/user/self"
 _WEB_PROFILE_OTHER_URL = "https://www.douyin.com/aweme/v1/web/user/profile/other/"
+_WEB_AWEME_POST_URL = "https://www.douyin.com/aweme/v1/web/aweme/post/"
 
 
 def gen_verify_fp() -> str:
@@ -205,6 +206,13 @@ async def _fetch_sec_uid_from_user_self(
     return m.group(1).strip() if m else ""
 
 
+def _to_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _profile_from_user_info_payload(payload: dict[str, Any]) -> Optional[dict]:
     user = payload.get("user") or {}
     nickname = str(user.get("nickname") or "").strip()
@@ -227,6 +235,170 @@ def _profile_from_user_info_payload(payload: dict[str, Any]) -> Optional[dict]:
         "avatar": avatar,
         "sec_uid": str(user.get("sec_uid") or "").strip(),
         "user_id": user_id,
+        "unique_id": str(user.get("unique_id") or "").strip(),
+        "follower_count": _to_int(user.get("follower_count")),
+        "following_count": _to_int(user.get("following_count")),
+        "aweme_count": _to_int(user.get("aweme_count")),
+        "total_favorited": _to_int(user.get("total_favorited")),
+    }
+
+
+async def fetch_profile_stats_via_douyin_web(
+    cookies: Mapping[str, str],
+    user_agent: str,
+    sec_uid: str,
+    *,
+    proxy_url: Optional[str] = None,
+    account_id: str = "",
+) -> Optional[dict]:
+    """拉取指定 sec_uid 的主页计数（粉丝/关注/作品/获赞）。
+
+    对照 DouYin_Spider DouyinAPI.get_user_info（/aweme/v1/web/user/profile/other/）。
+    需要账号自身 Cookie + a_bogus，无需 bd-ticket-guard。
+
+    Returns:
+        {nickname, avatar, sec_uid, user_id, unique_id, follower_count,
+         following_count, aweme_count, total_favorited} 或 None
+    """
+    sec_uid = (sec_uid or "").strip()
+    if not sec_uid:
+        return None
+    cookies = ensure_web_cookie_fields(cookies)
+    ua = user_agent or (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+    is_mac = "Macintosh" in ua
+    aid = account_id or "?"
+
+    p_params = _web_platform_params(is_mac=is_mac)
+    p_params.update({
+        "source": "channel_pc_web",
+        "sec_user_id": sec_uid,
+        "personal_center_strategy": "1",
+        "update_version_code": "170400",
+    })
+    p_data = await _signed_web_get(
+        _WEB_PROFILE_OTHER_URL,
+        p_params,
+        cookies=cookies,
+        user_agent=ua,
+        referer=f"https://www.douyin.com/user/{quote(sec_uid, safe='')}",
+        proxy_url=proxy_url,
+    )
+    if not isinstance(p_data, dict):
+        logger.warning(f"[web.profile] profile-stats 请求失败 account={aid}")
+        return None
+    if p_data.get("status_code", 0) != 0:
+        logger.warning(
+            f"[web.profile] profile-stats 业务错误 account={aid} "
+            f"status_code={p_data.get('status_code')} msg={p_data.get('status_msg')!r}"
+        )
+        return None
+    profile = _profile_from_user_info_payload(p_data)
+    if profile and not profile.get("sec_uid"):
+        profile["sec_uid"] = sec_uid
+    return profile
+
+
+def _work_from_aweme(item: dict[str, Any]) -> dict:
+    """从 aweme_list 单条作品提取 UI 所需字段（对照 DouYin_Spider handle_work_info）。"""
+    stats = item.get("statistics") or {}
+    cover = ""
+    video = item.get("video") or {}
+    for key in ("cover", "origin_cover", "dynamic_cover"):
+        urls = (video.get(key) or {}).get("url_list") or []
+        if urls:
+            cover = str(urls[0])
+            break
+    if not cover:
+        images = item.get("images") or []
+        if images:
+            urls = (images[0] or {}).get("url_list") or []
+            if urls:
+                cover = str(urls[0])
+    aweme_type = item.get("aweme_type")
+    work_type = "image" if aweme_type == 68 else "video"
+    aweme_id = str(item.get("aweme_id") or "")
+    return {
+        "aweme_id": aweme_id,
+        "desc": str(item.get("desc") or ""),
+        "cover": cover,
+        "work_type": work_type,
+        "like_count": _to_int(stats.get("digg_count")),
+        "comment_count": _to_int(stats.get("comment_count")),
+        "collect_count": _to_int(stats.get("collect_count")),
+        "share_count": _to_int(stats.get("share_count")),
+        "create_time": _to_int(item.get("create_time")),
+        "share_url": f"https://www.douyin.com/video/{aweme_id}" if aweme_id else "",
+    }
+
+
+async def fetch_user_works_via_douyin_web(
+    cookies: Mapping[str, str],
+    user_agent: str,
+    sec_uid: str,
+    *,
+    max_cursor: str = "0",
+    count: int = 18,
+    proxy_url: Optional[str] = None,
+    account_id: str = "",
+) -> Optional[dict]:
+    """拉取指定 sec_uid 的作品列表（分页）。
+
+    对照 DouYin_Spider DouyinAPI.get_user_work_info（/aweme/v1/web/aweme/post/）。
+
+    Returns:
+        {items: [...], max_cursor: str, has_more: bool} 或 None
+    """
+    sec_uid = (sec_uid or "").strip()
+    if not sec_uid:
+        return None
+    cookies = ensure_web_cookie_fields(cookies)
+    ua = user_agent or (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+    is_mac = "Macintosh" in ua
+    aid = account_id or "?"
+    cursor = str(max_cursor or "0")
+
+    params = _web_platform_params(is_mac=is_mac)
+    params.update({
+        "sec_user_id": sec_uid,
+        "max_cursor": cursor,
+        "locate_query": "false",
+        "show_live_replay_strategy": "1",
+        "need_time_list": "1" if cursor == "0" else "0",
+        "time_list_query": "0",
+        "whale_cut_token": "",
+        "cut_version": "1",
+        "count": str(count),
+        "update_version_code": "170400",
+    })
+    data = await _signed_web_get(
+        _WEB_AWEME_POST_URL,
+        params,
+        cookies=cookies,
+        user_agent=ua,
+        referer=f"https://www.douyin.com/user/{quote(sec_uid, safe='')}",
+        proxy_url=proxy_url,
+    )
+    if not isinstance(data, dict):
+        logger.warning(f"[web.profile] works 请求失败 account={aid}")
+        return None
+    if data.get("status_code", 0) != 0 and "aweme_list" not in data:
+        logger.warning(
+            f"[web.profile] works 业务错误 account={aid} "
+            f"status_code={data.get('status_code')} msg={data.get('status_msg')!r}"
+        )
+        return None
+    aweme_list = data.get("aweme_list") or []
+    items = [_work_from_aweme(it) for it in aweme_list if isinstance(it, dict)]
+    return {
+        "items": items,
+        "max_cursor": str(data.get("max_cursor") or "0"),
+        "has_more": bool(data.get("has_more")),
     }
 
 

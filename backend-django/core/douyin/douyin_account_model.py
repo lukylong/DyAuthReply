@@ -211,6 +211,17 @@ class DouyinAccount(RootModel):
 
     reply_today = models.IntegerField(default=0, help_text="今日已回复数（每日 0 点由调度器重置）")
 
+    # ---------- 主页统计缓存（按需拉取 profile/other 落库，UI 展示 + 手动刷新） ----------
+    follower_count = models.BigIntegerField(default=0, help_text="粉丝数（缓存）")
+    following_count = models.BigIntegerField(default=0, help_text="关注数（缓存）")
+    aweme_count = models.BigIntegerField(default=0, help_text="作品数（缓存）")
+    total_favorited = models.BigIntegerField(default=0, help_text="获赞总数（缓存）")
+    last_profile_sync_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="最近一次主页统计同步时间",
+    )
+
     # ---------- 凭证生命周期治理（cookie 池） ----------
     CREDENTIAL_STATE_CHOICES = [
         ('unknown', '未知'),

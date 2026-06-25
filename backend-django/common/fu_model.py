@@ -9,6 +9,14 @@ import uuid
 from django.db import models
 
 
+def gen_uuid_str() -> str:
+    """主键默认值：返回字符串形式 UUID。
+
+    用具名函数而非 lambda，确保 Django 迁移可序列化（lambda 无法序列化）。
+    """
+    return str(uuid.uuid4())
+
+
 class RootModel(models.Model):
     """
     核心模型基类 - 为 core 模块提供统一的基础字段
@@ -27,7 +35,7 @@ class RootModel(models.Model):
     id = models.CharField(
         primary_key=True,
         max_length=36,
-        default=lambda: str(uuid.uuid4()),
+        default=gen_uuid_str,
         help_text="主键ID",
         editable=False,
     )

@@ -214,7 +214,7 @@ watch(
                 </div>
                 <p class="desc">{{ w.desc || '（无标题）' }}</p>
                 <div class="meta">
-                  <span>♥ {{ formatCount(w.like_count) }}</span>
+                  <span class="likes">♥ {{ formatCount(w.like_count) }}</span>
                   <span class="date">{{ formatTime(w.create_time) }}</span>
                 </div>
               </button>
@@ -453,7 +453,9 @@ watch(
 .work-card {
   display: flex;
   flex-direction: column;
+  align-items: stretch;
   gap: 6px;
+  width: 100%;
   text-decoration: none;
   color: inherit;
   text-align: left;
@@ -529,8 +531,19 @@ watch(
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+  width: 100%;
   font-size: 0.7rem;
   color: var(--text-muted);
+}
+.meta .likes {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.meta .date {
+  flex-shrink: 0;
+  margin-left: auto;
+  white-space: nowrap;
 }
 
 .works-foot {

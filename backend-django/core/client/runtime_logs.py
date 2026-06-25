@@ -19,13 +19,33 @@ def _logs_dir(data_root: Path | None = None) -> Path:
 
 
 def _known_log_names() -> tuple[str, ...]:
+    # 客户端模式下实际有内容的日志：launcher.log（tee）、server.log/error.log（Django）。
+    # client.log / douyin_worker.log 在客户端从不被写入（worker 同进程线程，basicConfig 被
+    # Django dictConfig 顶掉成 no-op），不再 seed，避免日志列表里出现永远空的占位文件。
     return (
         'launcher.log',
         'server.log',
         'error.log',
-        'douyin_worker.log',
-        'client.log',
     )
+
+
+# 历史遗留的死占位文件：仅含一行 "log file initialized"，客户端永不写入，启动时清掉。
+_LEGACY_PLACEHOLDER_LOGS = ('client.log', 'douyin_worker.log')
+
+
+def _remove_legacy_placeholder(path: Path) -> None:
+    if not path.is_file():
+        return
+    try:
+        if path.stat().st_size == 0:
+            path.unlink(missing_ok=True)
+            return
+        text = path.read_text(encoding='utf-8', errors='replace').strip()
+    except OSError:
+        return
+    # 只删「纯占位」文件，避免误删任何真实内容
+    if text.endswith('log file initialized') and text.count('\n') == 0:
+        path.unlink(missing_ok=True)
 
 
 def ensure_runtime_log_files() -> Path:
@@ -38,6 +58,8 @@ def ensure_runtime_log_files() -> Path:
         if path.is_file() and path.stat().st_size > 0:
             continue
         path.write_text(f'[{stamp}] log file initialized\n', encoding='utf-8')
+    for name in _LEGACY_PLACEHOLDER_LOGS:
+        _remove_legacy_placeholder(logs_dir / name)
     migration = _data_root() / 'migration_error.log'
     if migration.is_file() and migration.stat().st_size == 0:
         migration.unlink(missing_ok=True)

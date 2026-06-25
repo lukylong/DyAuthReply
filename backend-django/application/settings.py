@@ -208,6 +208,12 @@ STANDARD_LOG_FORMAT = (
 CONSOLE_LOG_FORMAT = (
     "[%(asctime)s][%(name)s.%(funcName)s():%(lineno)d] [%(levelname)s] %(message)s"
 )
+# 日志按天分片后仅保留最近 N 天（默认 7，可用 LOG_BACKUP_DAYS 覆盖）。
+try:
+    _LOG_BACKUP_DAYS = max(1, int(os.environ.get('LOG_BACKUP_DAYS', '7')))
+except (TypeError, ValueError):
+    _LOG_BACKUP_DAYS = 7
+
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
@@ -229,7 +235,7 @@ LOGGING = {
             "filename": SERVER_LOGS_FILE,
             "when": "midnight",
             "interval": 1,
-            "backupCount": 30,
+            "backupCount": _LOG_BACKUP_DAYS,
             "formatter": "standard",
             "encoding": "utf-8",
             "utc": False,
@@ -240,7 +246,7 @@ LOGGING = {
             "filename": ERROR_LOGS_FILE,
             "when": "midnight",
             "interval": 1,
-            "backupCount": 30,
+            "backupCount": _LOG_BACKUP_DAYS,
             "formatter": "standard",
             "encoding": "utf-8",
             "utc": False,

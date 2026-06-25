@@ -1,8 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
-import shutil
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path('backend-django').resolve()))
+sys.path.insert(0, str(Path('dyauthreply-client/launcher').resolve()))
 
 from PyInstaller.utils.hooks import collect_submodules
 
@@ -14,13 +14,24 @@ hidden_modules.extend(collect_submodules('common'))
 hidden_modules.extend(collect_submodules('env'))
 hidden_modules.extend(['launcher_logging', 'core.client.sign_probe'])
 
-# 打包时内嵌 Node.js（抖音 JS 签名必需；Tauri sidecar 无 shell PATH）
+# 打包时内嵌 Node.js（抖音 JS 签名必需；Tauri sidecar / macOS .app 无 shell PATH）。
+# 复用运行时同一套稳健发现逻辑（node_runtime.resolve_node_bin），避免 build 机 nvm/homebrew
+# node 不在裸 PATH 时 shutil.which 漏判 → mac 包静默缺 node → 运行时回退 Java 引擎报错。
+from node_runtime import resolve_node_bin
+
 node_binaries = []
-_node = shutil.which('node')
+_node = resolve_node_bin()
 if _node:
+    print(f'[launcher.spec] 内嵌 Node.js -> runtime/: {_node}')
     node_binaries = [(str(Path(_node).resolve()), 'runtime')]
 else:
-    print('WARNING: node not found on build machine — launcher will not bundle Node.js')
+    # 直接失败：宁可让构建中断，也不要产出一个无法签名/收消息的残缺客户端。
+    raise SystemExit(
+        '[launcher.spec] FATAL: 构建机未找到 Node.js，无法内嵌（抖音 JS 签名必需）。\n'
+        '  请安装 Node.js 18+，或在打包前设置 DOUYIN_NODE_BIN=<node 绝对路径>。\n'
+        '  注意 macOS 分发：建议指向官方/nvm 的 node（自包含 ICU、可移植）；\n'
+        '  homebrew 的 /opt/homebrew/bin/node 依赖 homebrew dylib，拷到无 homebrew 的机器会起不来。'
+    )
 
 a = Analysis(
     ['dyauthreply-client/launcher/launcher_bundled.py'],

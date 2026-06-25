@@ -83,17 +83,80 @@ class JsSignerUnavailable(RuntimeError):
 # ──────────────────────── 常驻 Node 进程池（消除子进程风暴） ────────────────────────
 
 
-def _node_bin() -> str:
+def _nvm_node_candidates() -> list[str]:
+    """枚举 nvm 安装的 node，按版本号从高到低返回 bin/node 绝对路径。"""
+    nvm_dir = Path(os.environ.get('NVM_DIR', '') or (Path.home() / '.nvm'))
+    versions_dir = nvm_dir / 'versions' / 'node'
+    if not versions_dir.is_dir():
+        return []
+
+    def _ver_key(p: Path) -> tuple:
+        nums = p.name.lstrip('v').split('.')
+        try:
+            return tuple(int(x) for x in nums[:3])
+        except (TypeError, ValueError):
+            return (0,)
+
+    out: list[str] = []
+    for d in sorted((p for p in versions_dir.iterdir() if p.is_dir()), key=_ver_key, reverse=True):
+        candidate = d / 'bin' / 'node'
+        if candidate.is_file():
+            out.append(str(candidate))
+    return out
+
+
+def _discover_node() -> Optional[str]:
+    """跨「裸 PATH」环境稳健地定位 node 绝对路径；找不到返回 None。
+
+    GUI/打包客户端或后台进程不会继承交互式 shell 的 PATH（nvm/homebrew 路径丢失），
+    因此除 PATH 外还要主动探测常见安装位置，避免回退到 PyExecJS 误选 Java 引擎。
+    """
     explicit = os.environ.get('DOUYIN_NODE_BIN', '').strip()
     if explicit and Path(explicit).is_file():
         return explicit
+
     if getattr(sys, 'frozen', False):
         runtime = Path(sys._MEIPASS) / 'runtime'
         for name in ('node', 'node.exe'):
             candidate = runtime / name
             if candidate.is_file():
                 return str(candidate)
-    return os.environ.get('DOUYIN_NODE_BIN', 'node')
+
+    found = which('node') or which('nodejs')
+    if found:
+        return found
+
+    candidates: list[str] = []
+    candidates.extend(_nvm_node_candidates())
+    candidates.extend([
+        '/opt/homebrew/bin/node',
+        '/usr/local/bin/node',
+        '/usr/bin/node',
+        r'C:\Program Files\nodejs\node.exe',
+    ])
+    for c in candidates:
+        if Path(c).is_file():
+            return c
+    return None
+
+
+def _node_bin() -> str:
+    """返回可用的 node（绝对路径优先）；探测不到时回退裸 'node' 名。"""
+    return _discover_node() or 'node'
+
+
+def _ensure_node_on_path(node_path: str) -> None:
+    """把 node 所在目录注入进程 PATH，使 execjs 的 Node runtime 也能探测到。"""
+    try:
+        node_dir = str(Path(node_path).resolve().parent)
+    except (OSError, RuntimeError):
+        return
+    if not node_dir:
+        return
+    current = os.environ.get('PATH', '')
+    parts = current.split(os.pathsep) if current else []
+    if node_dir not in parts:
+        os.environ['PATH'] = os.pathsep.join([node_dir, *parts]) if parts else node_dir
 
 
 def _pool_enabled() -> bool:
@@ -328,6 +391,16 @@ def _get_pool() -> Optional[_NodeSignPool]:
             _pool_failed = True
             _pool_error = f"签名脚本缺失: runner={_POOL_RUNNER} dy_ab={_DY_AB_JS}"
             return None
+        node = _discover_node()
+        if not node:
+            _pool_failed = True
+            _pool_error = (
+                'Node.js 不可用（裸 PATH 未找到 node；打包客户端需内嵌 runtime/node '
+                '或设置 DOUYIN_NODE_BIN）'
+            )
+            logger.warning(f"[sign.js] 常驻签名进程池启动失败: {_pool_error}")
+            return None
+        _ensure_node_on_path(node)
         try:
             _pool = _NodeSignPool(_pool_size())
             logger.info(f"[sign.js] 常驻签名进程池启动成功 size={_pool_size()}")
@@ -351,11 +424,23 @@ def _pool_or_ctx_call(method: str, *args: Any) -> str:
 
 
 def _compile():
-    """编译 dy_ab.js，返回 execjs 上下文。失败抛 JsSignerUnavailable。"""
-    os.environ.setdefault('EXECJS_RUNTIME', 'Node')
-    node = _node_bin()
-    if node != 'node' and Path(node).is_file():
-        os.environ['EXECJS_RUNTIME'] = 'Node'
+    """编译 dy_ab.js，返回 execjs 上下文。失败抛 JsSignerUnavailable。
+
+    关键：绝不允许 execjs 自动挑选运行时——裸 PATH 下它会回退到 Java 引擎
+    （Nashorn/`jjs`），macOS 无 Java 时直接抛 "Unable to locate a Java Runtime"。
+    因此这里强制 EXECJS_RUNTIME=Node 并把解析到的 node 目录注入 PATH；
+    解析不到真实 node 就提前抛 JsSignerUnavailable，让上层走降级而非崩在 Java。
+    """
+    node = _discover_node()
+    if not node:
+        raise JsSignerUnavailable(
+            'Node.js 不可用（打包客户端需内嵌 runtime/node，或设置 DOUYIN_NODE_BIN；'
+            '已禁止回退 Java/Nashorn 引擎）'
+        )
+    # 强制（而非 setdefault）：避免环境里残留的 EXECJS_RUNTIME=''/Nashorn 让 execjs 选 Java
+    os.environ['EXECJS_RUNTIME'] = 'Node'
+    _ensure_node_on_path(node)
+
     try:
         import execjs  # noqa: PLC0415  延迟导入，未装时给清晰提示
     except ImportError as e:
@@ -366,11 +451,6 @@ def _compile():
     if not _DY_AB_JS.exists():
         raise JsSignerUnavailable(
             f"签名脚本缺失: {_DY_AB_JS}（应从 DouYin_Spider/static/dy_ab.js vendoring 进来）"
-        )
-
-    if not Path(_node_bin()).is_file() and which('node') is None:
-        raise JsSignerUnavailable(
-            'Node.js 不可用（打包客户端需内嵌 runtime/node，或设置 DOUYIN_NODE_BIN）'
         )
 
     # Windows 下 subprocess 默认编码可能不是 utf-8，导致 JS 输出乱码/解析失败。

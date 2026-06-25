@@ -29,6 +29,14 @@ def _setup_django() -> None:
     django.setup()
 
 
+def _worker_log_backup_days() -> int:
+    """douyin_worker.log 按天分片后保留天数（默认 7，LOG_BACKUP_DAYS 可覆盖）。"""
+    try:
+        return max(1, int(os.environ.get('LOG_BACKUP_DAYS', '7')))
+    except (TypeError, ValueError):
+        return 7
+
+
 def _setup_logging() -> None:
     if os.environ.get('ZQ_ENV') == 'client':
         from env import CLIENT_DATA_DIR
@@ -46,7 +54,7 @@ def _setup_logging() -> None:
                 str(worker_log_file),
                 when='midnight',
                 interval=1,
-                backupCount=30,
+                backupCount=_worker_log_backup_days(),
                 encoding='utf-8',
             ),
         ],

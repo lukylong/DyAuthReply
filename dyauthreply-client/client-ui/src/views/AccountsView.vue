@@ -266,15 +266,6 @@ onMounted(load);
               </div>
             </div>
           </div>
-          <button
-            type="button"
-            class="btn-delete"
-            title="删除账号"
-            aria-label="删除账号"
-            @click="openDelete(acc)"
-          >
-            🗑
-          </button>
         </div>
 
         <div class="quota-setting">
@@ -312,6 +303,21 @@ onMounted(load);
             </button>
             <button type="button" class="btn-glass btn-action" @click="openImport(acc)">
               更新凭证
+            </button>
+            <button
+              type="button"
+              class="btn-glass btn-icon btn-delete"
+              title="删除账号"
+              aria-label="删除账号"
+              @click="openDelete(acc)"
+            >
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 6h18" />
+                <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                <line x1="10" y1="11" x2="10" y2="17" />
+                <line x1="14" y1="11" x2="14" y2="17" />
+              </svg>
             </button>
           </div>
         </div>
@@ -367,10 +373,10 @@ onMounted(load);
     >
       <div class="delete-modal-content">
         <p class="del-desc">
-          确认删除该抖音号吗？删除后将清除其本地登录凭证与托管配置，此操作不可恢复。
+          确认删除该抖音号吗？删除后将停止托管、清除其本地登录凭证与托管配置，此操作不可恢复。
         </p>
-        <p v-if="deleteTarget?.status === 1" class="msg-box warn-msg">
-          该账号当前在线，可能需要先「登出 / 关闭自动回复」后才能删除。
+        <p v-if="deleteTarget?.auto_reply_enabled" class="msg-box warn-msg">
+          该账号自动回复仍处于开启状态，请先在卡片上关闭「自动回复」后再删除。
         </p>
         <transition name="fade">
           <p v-if="deleteError" class="msg-box error-msg">{{ deleteError }}</p>
@@ -382,7 +388,7 @@ onMounted(load);
           <button
             type="button"
             class="btn-glass btn-danger-glass"
-            :disabled="deleting"
+            :disabled="deleting || deleteTarget?.auto_reply_enabled"
             @click="confirmDelete"
           >
             {{ deleting ? '删除中...' : '确认删除' }}
@@ -519,39 +525,11 @@ onMounted(load);
   opacity: 0.85;
 }
 
-.account-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
 .profile-group {
   display: flex;
   gap: 16px;
   align-items: center;
   min-width: 0;
-}
-
-.btn-delete {
-  flex-shrink: 0;
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  border: 1px solid rgba(0, 0, 0, 0.06);
-  background: rgba(0, 0, 0, 0.03);
-  color: var(--text-muted);
-  font-size: 0.95rem;
-  line-height: 1;
-  cursor: pointer;
-  display: grid;
-  place-items: center;
-  transition: var(--transition-quick);
-}
-.btn-delete:hover {
-  background: rgba(239, 68, 68, 0.1);
-  border-color: rgba(239, 68, 68, 0.25);
-  color: #b91c1c;
 }
 
 .avatar {
@@ -680,6 +658,7 @@ onMounted(load);
 
 .action-btns {
   display: flex;
+  align-items: center;
   gap: 8px;
 }
 
@@ -687,6 +666,28 @@ onMounted(load);
   padding: 8px 14px;
   font-size: 0.8rem;
   border-radius: 10px;
+}
+
+.btn-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 10px;
+}
+
+.btn-icon svg {
+  display: block;
+}
+
+.btn-delete {
+  color: var(--text-muted);
+}
+.btn-delete:hover {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.25);
+  color: #b91c1c;
 }
 
 /* iOS Toggle Switch */

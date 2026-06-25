@@ -463,8 +463,8 @@ def delete_douyin_account(request, account_id: str):
     from contextlib import suppress
 
     account = get_object_or_404(DouyinAccount, id=account_id)
-    if account.is_online():
-        raise HttpError(400, "在线账号无法直接删除，请先登出或禁用")
+    if account.auto_reply_enabled:
+        raise HttpError(400, "请先关闭该账号的自动回复后再删除")
 
     with suppress(Exception):
         command_publisher.send_session_control(account_id, 'stop')
@@ -487,7 +487,7 @@ def batch_delete_douyin_account(request, data: DouyinAccountBatchDeleteIn):
     for aid in data.ids:
         try:
             acc = DouyinAccount.objects.get(id=aid)
-            if acc.is_online():
+            if acc.auto_reply_enabled:
                 failed_ids.append(aid)
                 continue
             with suppress(Exception):

@@ -18,7 +18,9 @@ const stat = ref<DouyinReplyLogStat | null>(null);
 const filterAccountId = ref('');
 const filterResult = ref('');
 const page = ref(1);
+const pageSize = ref(10);
 const total = ref(0);
+const PAGE_SIZE_OPTIONS = [10, 20, 30, 50, 100];
 
 async function loadAccounts() {
   accounts.value = await listAccounts();
@@ -40,7 +42,7 @@ async function loadLogs() {
       account_id: filterAccountId.value || undefined,
       result: filterResult.value || undefined,
       page: page.value,
-      pageSize: 30,
+      pageSize: pageSize.value,
     });
     logs.value = res.items ?? [];
     total.value = res.total ?? logs.value.length;
@@ -59,7 +61,7 @@ function resultClass(result: string) {
   return 'muted';
 }
 
-watch([filterAccountId, filterResult], () => {
+watch([filterAccountId, filterResult, pageSize], () => {
   page.value = 1;
   loadLogs();
 });
@@ -127,6 +129,13 @@ onMounted(async () => {
             <option value="silent">运营静默时段</option>
           </select>
         </label>
+
+        <label class="control-label">
+          <span>每页</span>
+          <select class="select-glass" v-model.number="pageSize">
+            <option v-for="n in PAGE_SIZE_OPTIONS" :key="n" :value="n">{{ n }} 条</option>
+          </select>
+        </label>
       </div>
       <span class="toolbar-hint">当前条件下共 {{ total }} 条记录</span>
     </div>
@@ -187,15 +196,15 @@ onMounted(async () => {
     </section>
 
     <!-- Pagination -->
-    <div v-if="total > 30" class="pager">
+    <div v-if="total > pageSize" class="pager">
       <button type="button" class="btn-glass" :disabled="page <= 1" @click="page--; loadLogs()">
         ← 上一页
       </button>
-      <span class="pager-lbl">第 {{ page }} 页</span>
+      <span class="pager-lbl">第 {{ page }} / {{ Math.max(1, Math.ceil(total / pageSize)) }} 页</span>
       <button
         type="button"
         class="btn-glass"
-        :disabled="page * 30 >= total"
+        :disabled="page * pageSize >= total"
         @click="page++; loadLogs()"
       >
         下一页 →

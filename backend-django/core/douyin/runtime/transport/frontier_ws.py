@@ -432,7 +432,11 @@ class FrontierWsDecorator(AccountTransport):
     async def _process_message(self, m: Any) -> None:
         """处理消息落库，若为新消息且是入向，放入 scanned 队列并唤醒 worker。"""
         from datetime import datetime, timezone
-        from core.douyin.runtime.message_store import _upsert_conversation_and_message
+        from core.douyin.runtime.message_store import (
+            _upsert_conversation_and_message,
+            build_mutual_follow_trigger,
+            is_mutual_follow_notice,
+        )
 
         # 0. 过滤非用户/系统消息
         if not m.conversation_id or m.server_message_id <= 0:
@@ -440,6 +444,7 @@ class FrontierWsDecorator(AccountTransport):
         # 系统/已读回执(content_type=system) 或 无占位文本 → 丢弃；
         # 富媒体(图片/语音/视频/表情)有占位文本，保留并和文本一样进入回复引擎
         if getattr(m, "content_type", "text") == "system" or not m.text:
+            # 注意：互关提示“我们已互相关注，可以开始聊天了”是普通 text 消息，不在此分支。
             logger.debug(
                 f"[frontier.ws] 跳过系统/空消息 server_msg_id={m.server_message_id} "
                 f"content_type={getattr(m, 'content_type', '?')}"
@@ -449,6 +454,25 @@ class FrontierWsDecorator(AccountTransport):
         # 1. 确定方向
         direction = self._infer_message_direction(m)
         if direction == "out":
+            # 出向互关系统提示（我先关注、对方回关）：兜底放出为触发消息，给对方回欢迎语。
+            if is_mutual_follow_notice(m.text):
+                mf = await build_mutual_follow_trigger(
+                    self._account_id, m.conversation_id, m.server_message_id, m.text
+                )
+                if mf is not None:
+                    with suppress(asyncio.QueueFull):
+                        self._scanned_messages_queue.put_nowait(mf)
+                    self._signal.set()
+                    logger.info(
+                        f"[frontier.ws] 出向互关提示→兜底触发回复 account={self._account_id} "
+                        f"conv={m.conversation_id} srv_id={m.server_message_id}"
+                    )
+                else:
+                    logger.warning(
+                        f"[frontier.ws] 出向互关提示无本地会话映射，跳过兜底回复 "
+                        f"account={self._account_id} conv={m.conversation_id} srv_id={m.server_message_id}"
+                    )
+                return
             logger.info(
                 f"[frontier.ws] 跳过己方出站消息 account={self._account_id} "
                 f"sender_uid={getattr(m, 'sender_uid', 0)} text={(m.text or '')[:40]!r}"

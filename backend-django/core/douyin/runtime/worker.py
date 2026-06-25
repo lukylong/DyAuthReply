@@ -1593,10 +1593,12 @@ class DouyinWorker:
         account_id = str(account.id)
         peer = msg.peer_nickname or msg.peer_sec_uid or '?'
         preview = (msg.text or '')[:40].replace('\n', ' ')
+        # 出向互关兜底（我先关注、对方回关）：互关必回——忽略冷却 / 今日已回复 / 回声，仍尊重黑名单。
+        is_mutual_follow = bool((msg.raw or {}).get('mutual_follow_outbound'))
         if account_id in self._account_metrics:
             self._account_metrics[account_id]['last_message_at'] = timezone.now()
         logger.info(
-            f"[reply] ▶ 处理入向消息 account={account_id} peer={peer!r} "
+            f"[reply] ▶ 处理{'互关兜底' if is_mutual_follow else '入向'}消息 account={account_id} peer={peer!r} "
             f"msg_id={msg.message_id} text={preview!r}"
         )
 
@@ -1627,8 +1629,9 @@ class DouyinWorker:
 
         # 反向回声二次防线：万一 inbox 把自己刚发的消息误识别成入向（DOM 类名变化导致），
         # 这里再用最近 90s outbound 文本/reply_log 比对一次，命中即跳过并标记 processed。
+        # 互关兜底消息本身就是"我方/系统"文案，会与 outbound 撞车，故跳过此防线。
         echo_norm = _norm_for_compare(msg.text or '')
-        if echo_norm:
+        if echo_norm and not is_mutual_follow:
             outbound_msgs = await _recent_outbound_texts(account_id, msg.peer_sec_uid)
             outbound_logs = await _recent_outbound_replies_log(account_id, msg.conversation_id)
             echo_set = set(filter(None, outbound_msgs + outbound_logs))
@@ -1656,7 +1659,7 @@ class DouyinWorker:
             await _log_event(account_id, 'blacklist_hit', 'info', '跳过：命中黑名单', reason, self.worker_id)
             return
 
-        if _should_enforce_daily_peer_limit() and await _has_replied_to_peer_today(account_id, msg.peer_sec_uid):
+        if not is_mutual_follow and _should_enforce_daily_peer_limit() and await _has_replied_to_peer_today(account_id, msg.peer_sec_uid):
             logger.info(
                 f"[reply] ⏭ 跳过：同一用户今日已自动回复 account={account_id} "
                 f"peer={peer!r} peer_sec_uid={msg.peer_sec_uid}"
@@ -1689,9 +1692,9 @@ class DouyinWorker:
             f"cooldown={rule.cooldown_seconds}s send_mode={rule.send_mode}"
         )
 
-        # 冷却
+        # 冷却（互关兜底必回，忽略冷却）
         cooldown_seconds = int(getattr(rule, 'cooldown_seconds', 0) or 0)
-        if await _is_in_cooldown(msg.conversation_id, str(rule.id), cooldown_seconds):
+        if not is_mutual_follow and await _is_in_cooldown(msg.conversation_id, str(rule.id), cooldown_seconds):
             logger.info(
                 f"[reply] ⏭ 跳过：规则冷却中 account={account_id} "
                 f"rule={rule.name!r} conv={msg.conversation_id} cooldown={cooldown_seconds}s"

@@ -1830,6 +1830,8 @@ class HttpProtocolTransport(AccountTransport):
             _recent_outbound_texts,
             _silent_mark_read_in_db,
             _upsert_conversation_and_message,
+            build_mutual_follow_trigger,
+            is_mutual_follow_notice,
         )
 
         # 延迟 import storage cursor helpers，规避循环依赖
@@ -2277,8 +2279,8 @@ class HttpProtocolTransport(AccountTransport):
         pending: list[tuple[Any, Any, str]] = []
         for m in result.messages:
             if getattr(m, "content_type", "text") == "system":
-                # 系统消息（已读回执 / 输入中 / command_type≠空）跳过；
-                # 富媒体(图片/语音/视频/表情)有占位文本，保留并进入回复引擎
+                # 系统消息（已读回执 / 输入中 / command_type 信令）跳过，不进回复引擎。
+                # 注意：互关提示“我们已互相关注，可以开始聊天了”是普通 text 消息，不在此分支。
                 logger.debug(
                     f"[transport.http] 跳过系统消息 srv_id={m.server_message_id} "
                     f"content_type={getattr(m, 'content_type', '?')} text={m.text!r} "
@@ -2374,6 +2376,23 @@ class HttpProtocolTransport(AccountTransport):
         for m, received_at, external_msg_id, direction in pending:
             # 增量扫描时跳过出向（发送时已落库）；UI 历史补扫时保留出向记录。
             if direction == 'out' and not (is_baseline and include_recent_without_unread):
+                # 出向互关系统提示（我先关注、对方回关）：抖音算作我方消息会被丢弃，
+                # 这里兜底放出为触发消息，交回复引擎给对方回欢迎语。
+                if is_mutual_follow_notice(m.text):
+                    mf = await build_mutual_follow_trigger(
+                        account_id, m.conversation_id, m.server_message_id, m.text
+                    )
+                    if mf is not None:
+                        new_messages.append(mf)
+                        logger.info(
+                            f"[transport.http] 出向互关提示→兜底触发回复 account={account_id} "
+                            f"conv={m.conversation_id} srv_id={m.server_message_id}"
+                        )
+                    else:
+                        logger.warning(
+                            f"[transport.http] 出向互关提示无本地会话映射，跳过兜底回复 "
+                            f"account={account_id} conv={m.conversation_id} srv_id={m.server_message_id}"
+                        )
                 continue
 
             info = user_details_by_sec.get(m.sender_sec_uid, {}) if m.sender_sec_uid else {}

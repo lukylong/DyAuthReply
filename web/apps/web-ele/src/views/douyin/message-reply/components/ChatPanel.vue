@@ -227,6 +227,15 @@ function voiceDurationLabel(msg: DouyinMessageItem): string {
   return Number.isFinite(sec) && sec > 0 ? `${sec}″` : '';
 }
 
+// 语音直链（非加密资源，可直接作为 <audio> 源）。加载失败时回退占位。
+function voiceUrl(msg: DouyinMessageItem): string {
+  return msg.media?.url || '';
+}
+
+function showVoicePlayer(msg: DouyinMessageItem): boolean {
+  return !brokenMedia.value[msg.id] && Boolean(voiceUrl(msg));
+}
+
 function openMedia(url?: string) {
   if (url) window.open(url, '_blank', 'noopener');
 }
@@ -470,14 +479,39 @@ watch(
                 </div>
               </template>
 
-              <!-- 语音（不接播放器，展示占位+时长，可点开音频源） -->
+              <!-- 语音：内嵌播放器 + 时长 + AI 语音转文字；加载失败回退占位 -->
               <template v-else-if="mediaKind(msg) === 'voice'">
-                <span
-                  class="msg-voice"
-                  @click="openMedia(msg.media?.url)"
-                >
-                  🎤 语音 {{ voiceDurationLabel(msg) }}
-                </span>
+                <div class="msg-voice-wrap">
+                  <div v-if="showVoicePlayer(msg)" class="msg-voice-player">
+                    <audio
+                      class="msg-voice-audio"
+                      :src="voiceUrl(msg)"
+                      controls
+                      preload="none"
+                      @error="onMediaError(msg.id)"
+                    ></audio>
+                    <span
+                      v-if="voiceDurationLabel(msg)"
+                      class="msg-voice-duration"
+                    >
+                      {{ voiceDurationLabel(msg) }}
+                    </span>
+                  </div>
+                  <span
+                    v-else
+                    class="msg-voice"
+                    @click="openMedia(msg.media?.url)"
+                  >
+                    🎤 语音 {{ voiceDurationLabel(msg) }}
+                  </span>
+                  <div
+                    v-if="msg.media?.ai_text"
+                    class="msg-voice-aitext"
+                    title="语音转文字"
+                  >
+                    {{ msg.media.ai_text }}
+                  </div>
+                </div>
               </template>
 
               <!-- 文本 / 兜底 -->
@@ -777,6 +811,40 @@ watch(
   background: #f5f5f5;
   border-radius: 12px;
   cursor: pointer;
+}
+
+.msg-voice-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 240px;
+}
+
+.msg-voice-player {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.msg-voice-audio {
+  height: 36px;
+  max-width: 200px;
+}
+
+.msg-voice-duration {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: #8c8c8c;
+}
+
+.msg-voice-aitext {
+  padding: 6px 10px;
+  background: #f5f5f5;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #595959;
+  word-break: break-word;
 }
 
 .msg-media-fallback {

@@ -75,6 +75,62 @@ class ScannedMessage:
     raw: dict = field(default_factory=dict)
 
 
+# -------------------- 互关系统提示 --------------------
+# 抖音在双方互相关注后，会以**普通 text 消息**下发一条提示（如"我们已互相关注，可以开始聊天了"）。
+#   - 入向（对方关注我）：sender=对方，按普通消息正常触发回复，无需特殊处理。
+#   - 出向（我先关注、对方回关）：sender=我自己，正常会被"跳过己方出站消息"丢弃 → 漏回。
+# 这里用子串匹配（兼容措辞/标点变化）识别该提示，出向场景交 build_mutual_follow_trigger 兜底放出。
+MUTUAL_FOLLOW_NOTICE_KEYWORD = "互相关注"
+
+
+def is_mutual_follow_notice(text: Optional[str]) -> bool:
+    """识别互关系统提示文案。"""
+    return bool(text) and MUTUAL_FOLLOW_NOTICE_KEYWORD in text
+
+
+@sync_to_async
+def build_mutual_follow_trigger(
+    account_id: str,
+    platform_conversation_id: str,
+    server_message_id,
+    text: str,
+) -> Optional["ScannedMessage"]:
+    """为"出向互关系统提示"构造一条兜底触发消息（不另外落库）。
+
+    - message_id 用合成稳定值 `mf_<server_message_id>`：回复日志按 trigger_message_id 去重，
+      同一互关事件跨重启不会重复回复。
+    - 需要 DB 已有该平台会话映射：发送协议要求本地会话 ID，黑名单/昵称也依赖对方 sec_uid，
+      而出向消息只带"我自己"的 sec_uid。查不到本地会话则返回 None（调用方记 warning 跳过），
+      避免在缺对方 sec_uid 时伪造会话、产生重复脏会话。
+    - raw.mutual_follow_outbound=True 作为 worker 的"互关兜底"分支开关；
+      raw.conversation_id 为平台会话 ID，供 worker 直发。
+    """
+    plat = (platform_conversation_id or "").strip()
+    if not plat:
+        return None
+    from core.douyin.douyin_conversation_model import DouyinConversation
+
+    conv = DouyinConversation.objects.filter(
+        account_id=account_id,
+        platform_conversation_id=plat,
+    ).first()
+    if conv is None:
+        return None
+    return ScannedMessage(
+        message_id=f"mf_{server_message_id}",
+        conversation_id=str(conv.id),
+        peer_sec_uid=conv.peer_sec_uid or "",
+        peer_nickname=conv.peer_nickname or None,
+        text=text or "",
+        received_at=timezone.now().isoformat(),
+        raw={
+            "mutual_follow_outbound": True,
+            "conversation_id": plat,
+            "server_message_id": server_message_id,
+        },
+    )
+
+
 # -------------------- DB 辅助 --------------------
 def _hash_msg_id(peer_sec_uid: str, received_at_iso: str, content: str) -> str:
     h = hashlib.sha1()

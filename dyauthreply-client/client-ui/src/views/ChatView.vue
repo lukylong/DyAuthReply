@@ -192,6 +192,91 @@ function voiceDurationLabel(msg: MessageItem): string {
   return Number.isFinite(sec) && sec > 0 ? `${sec}″` : '';
 }
 
+// 语音直链（抖音音频 CDN 资源，非加密，可直接作为 <audio> 源）。
+function voiceUrl(msg: MessageItem): string {
+  return msg.media?.url || '';
+}
+
+// 有可用直链且未标记加载失败时，内联渲染播放器；否则回退占位。
+function showVoicePlayer(msg: MessageItem): boolean {
+  return !brokenMedia.value[msg.id] && Boolean(voiceUrl(msg));
+}
+
+// —— 自定义语音播放器（单实例，多条语音互斥播放）——
+const voiceAudioEl = ref<HTMLAudioElement | null>(null);
+const activeVoiceId = ref<string | null>(null);
+const voicePlaying = ref(false);
+const voiceCurrent = ref(0);
+const voiceDuration = ref(0);
+
+function voiceIsActive(msg: MessageItem): boolean {
+  return activeVoiceId.value === msg.id;
+}
+
+function voicePercent(msg: MessageItem): number {
+  if (!voiceIsActive(msg) || !voiceDuration.value) return 0;
+  return Math.min(100, (voiceCurrent.value / voiceDuration.value) * 100);
+}
+
+function fmtClock(sec: number): string {
+  const s = Math.max(0, Math.round(Number(sec) || 0));
+  const m = Math.floor(s / 60);
+  return `${m}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function voiceTimeLabel(msg: MessageItem): string {
+  if (voiceIsActive(msg) && voiceDuration.value) return fmtClock(voiceCurrent.value);
+  const ms = Number(msg.media?.duration_ms);
+  if (Number.isFinite(ms) && ms > 0) return fmtClock(ms / 1000);
+  return '0:00';
+}
+
+async function toggleVoice(msg: MessageItem) {
+  const el = voiceAudioEl.value;
+  const url = voiceUrl(msg);
+  if (!el || !url) return;
+  if (voiceIsActive(msg)) {
+    if (el.paused) await el.play().catch(() => onMediaError(msg.id));
+    else el.pause();
+    return;
+  }
+  el.src = url;
+  activeVoiceId.value = msg.id;
+  voiceCurrent.value = 0;
+  voiceDuration.value = (Number(msg.media?.duration_ms) || 0) / 1000;
+  try {
+    await el.play();
+  } catch {
+    onMediaError(msg.id);
+    activeVoiceId.value = null;
+  }
+}
+
+function seekVoice(msg: MessageItem, e: MouseEvent) {
+  const el = voiceAudioEl.value;
+  if (!voiceIsActive(msg) || !el || !el.duration) return;
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  el.currentTime = ratio * el.duration;
+  voiceCurrent.value = el.currentTime;
+}
+
+function onVoiceTimeUpdate() {
+  const el = voiceAudioEl.value;
+  if (!el) return;
+  voiceCurrent.value = el.currentTime;
+  if (Number.isFinite(el.duration) && el.duration > 0) voiceDuration.value = el.duration;
+}
+function onVoiceEnded() {
+  voicePlaying.value = false;
+  voiceCurrent.value = 0;
+  activeVoiceId.value = null;
+}
+
+onUnmounted(() => {
+  voiceAudioEl.value?.pause();
+});
+
 function openMedia(url?: string) {
   if (url) window.open(url, '_blank', 'noopener');
 }
@@ -916,11 +1001,48 @@ onUnmounted(() => {
                 </div>
               </template>
 
-              <!-- 语音（仅展示占位+时长） -->
+              <!-- 语音：自定义内联播放器（直链可用时），否则回退占位 -->
               <template v-else-if="mediaKind(msg) === 'voice'">
-                <span class="msg-voice" @click="openMedia(msg.media?.url)">
-                  🎤 语音 {{ voiceDurationLabel(msg) }}
-                </span>
+                <div class="msg-voice-wrap">
+                  <div
+                    v-if="showVoicePlayer(msg)"
+                    class="voice-player"
+                    :class="{ 'is-playing': voiceIsActive(msg) && voicePlaying }"
+                  >
+                    <button
+                      type="button"
+                      class="voice-btn"
+                      :aria-label="voiceIsActive(msg) && voicePlaying ? '暂停' : '播放'"
+                      @click="toggleVoice(msg)"
+                    >
+                      <svg
+                        v-if="voiceIsActive(msg) && voicePlaying"
+                        viewBox="0 0 24 24"
+                      >
+                        <rect x="6" y="5" width="4" height="14" rx="1" />
+                        <rect x="14" y="5" width="4" height="14" rx="1" />
+                      </svg>
+                      <svg v-else viewBox="0 0 24 24">
+                        <path d="M8 5.5v13a1 1 0 0 0 1.5.86l11-6.5a1 1 0 0 0 0-1.72l-11-6.5A1 1 0 0 0 8 5.5z" />
+                      </svg>
+                    </button>
+                    <div class="voice-track" @click="seekVoice(msg, $event)">
+                      <div
+                        class="voice-track-fill"
+                        :style="{ width: voicePercent(msg) + '%' }"
+                      >
+                        <span class="voice-track-knob" />
+                      </div>
+                    </div>
+                    <span class="voice-time">{{ voiceTimeLabel(msg) }}</span>
+                  </div>
+                  <span v-else class="msg-voice" @click="openMedia(msg.media?.url)">
+                    🎤 语音 {{ voiceDurationLabel(msg) }}
+                  </span>
+                  <span v-if="msg.media?.ai_text" class="msg-voice-aitext">
+                    {{ msg.media.ai_text }}
+                  </span>
+                </div>
               </template>
 
               <!-- 文本 / 兜底 -->
@@ -1016,6 +1138,18 @@ onUnmounted(() => {
       </button>
       <img :src="previewUrl" class="img-preview-img" alt="预览" @click.stop />
     </div>
+
+    <!-- 全局单实例音频，驱动所有语音播放条 -->
+    <audio
+      ref="voiceAudioEl"
+      preload="none"
+      @ended="onVoiceEnded"
+      @timeupdate="onVoiceTimeUpdate"
+      @loadedmetadata="onVoiceTimeUpdate"
+      @play="voicePlaying = true"
+      @pause="voicePlaying = false"
+      @error="activeVoiceId && onMediaError(activeVoiceId)"
+    ></audio>
   </div>
 </template>
 
@@ -1467,6 +1601,106 @@ onUnmounted(() => {
   font-size: 0.9rem;
   color: var(--text-primary);
   cursor: pointer;
+}
+
+.msg-voice-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.voice-player {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 168px;
+  max-width: 240px;
+  padding: 2px 2px 2px 0;
+  color: var(--text-primary);
+}
+
+.voice-btn {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  background: currentColor;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+  transition:
+    transform 0.1s ease,
+    filter 0.15s ease;
+}
+
+.voice-btn:hover {
+  filter: brightness(1.12);
+}
+
+.voice-btn:active {
+  transform: scale(0.92);
+}
+
+.voice-btn svg {
+  width: 13px;
+  height: 13px;
+  fill: #fff;
+}
+
+.voice-track {
+  position: relative;
+  flex: 1;
+  height: 5px;
+  border-radius: 3px;
+  cursor: pointer;
+  background: color-mix(in srgb, currentColor 20%, transparent);
+}
+
+.voice-track-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  min-width: 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, currentColor 70%, transparent);
+}
+
+.voice-track-knob {
+  position: absolute;
+  right: -5px;
+  top: 50%;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  transform: translateY(-50%) scale(0);
+  background: currentColor;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 0.12s ease;
+}
+
+.voice-player.is-playing .voice-track-knob,
+.voice-track:hover .voice-track-knob {
+  transform: translateY(-50%) scale(1);
+}
+
+.voice-time {
+  flex: none;
+  min-width: 30px;
+  text-align: right;
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.6;
+}
+
+.msg-voice-aitext {
+  font-size: 0.82rem;
+  color: var(--text-secondary, #888);
+  line-height: 1.4;
+  padding-left: 2px;
 }
 
 .msg-media-fallback {

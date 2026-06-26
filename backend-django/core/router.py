@@ -31,6 +31,7 @@ from core.data_source.data_source_api import router as data_source_router
 from core.douyin.douyin_account_api import router as douyin_account_router
 from core.douyin.douyin_account_group_api import router as douyin_account_group_router
 from core.douyin.douyin_blacklist_api import router as douyin_blacklist_router
+from core.douyin.douyin_card_api import router as douyin_card_router
 from core.douyin.douyin_event_api import router as douyin_event_router
 from core.douyin.douyin_quick_reply_api import router as douyin_quick_reply_router
 from core.douyin.douyin_reply_log_api import router as douyin_reply_log_router
@@ -83,6 +84,7 @@ core_router.add_router("/douyin", douyin_rule_router, tags=["Core-Douyin-Rule"])
 core_router.add_router("/douyin", douyin_template_router, tags=["Core-Douyin-Template"])
 core_router.add_router("/douyin", douyin_session_router, tags=["Core-Douyin-Session"])
 core_router.add_router("/douyin", douyin_blacklist_router, tags=["Core-Douyin-Blacklist"])
+core_router.add_router("/douyin", douyin_card_router, tags=["Core-Douyin-Card"])
 core_router.add_router("/douyin", douyin_quick_reply_router, tags=["Core-Douyin-QuickReply"])
 core_router.add_router("/douyin", douyin_event_router, tags=["Core-Douyin-Event"])
 core_router.add_router("/douyin", douyin_stat_router, tags=["Core-Douyin-Stat"])

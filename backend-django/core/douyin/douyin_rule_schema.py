@@ -39,6 +39,7 @@ class DouyinRuleSchemaIn(ModelSchema):
     account_ids: Optional[List[str]] = Field(default=None, description="绑定的账号 ID 列表；为空表示全局规则")
     force_move: bool = Field(default=False, description="账号已被其他规则绑定时，是否强制移动到本规则")
     template_id: Optional[str] = Field(None, description="引用模板ID")
+    card_ids: Optional[List[str]] = Field(default=None, description="关联的伪装卡片ID列表（多选）")
     links: Optional[List[Union[DouyinRuleLinkIn, str, dict[str, Any]]]] = None
 
     class Config:
@@ -66,6 +67,7 @@ class DouyinRuleSchemaPatch(Schema):
     reply_text: Optional[str] = None
     links: Optional[List[Union[DouyinRuleLinkIn, str, dict[str, Any]]]] = None
     template_id: Optional[str] = None
+    card_ids: Optional[List[str]] = None
     send_mode: Optional[str] = None
     channel: Optional[str] = None
     time_window_start: Optional[dtime] = None
@@ -100,6 +102,8 @@ class DouyinRuleSchemaOut(ModelSchema):
     account_nicknames: List[str] = []
     template_id: Optional[str] = None
     template_name: Optional[str] = None
+    card_ids: List[str] = []
+    cards: List[dict] = []
 
     class Config:
         model = DouyinRule
@@ -152,6 +156,31 @@ class DouyinRuleSchemaOut(ModelSchema):
             return obj.template.name if obj.template_id else None
         except Exception:
             return None
+
+    @staticmethod
+    def resolve_card_ids(obj):
+        return [str(x) for x in (obj.card_ids or [])]
+
+    @staticmethod
+    def resolve_cards(obj):
+        ids = [str(x) for x in (obj.card_ids or [])]
+        if not ids:
+            return []
+        from core.douyin.douyin_card_model import DouyinCard
+        from core.douyin.douyin_card_schema import build_cover_url
+
+        mapping = {
+            str(c.id): {
+                'id': str(c.id),
+                'title': c.title,
+                'cover_url': build_cover_url(c.cover_file_id),
+                'target_url': c.target_url,
+                'status': c.status,
+            }
+            for c in DouyinCard.objects.filter(id__in=ids, is_deleted=False)
+        }
+        # 保持 card_ids 顺序，过滤已删除卡片
+        return [mapping[i] for i in ids if i in mapping]
 
 
 class DouyinRuleBatchDeleteIn(Schema):

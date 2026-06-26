@@ -259,6 +259,9 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
         <RouterLink to="/rules" class="nav-item">
           <span class="icon">⚙️</span>自动回复规则
         </RouterLink>
+        <RouterLink to="/cards" class="nav-item">
+          <span class="icon">🪪</span>卡片管理
+        </RouterLink>
         <RouterLink to="/logs" class="nav-item">
           <span class="icon">📝</span>回复记录
         </RouterLink>

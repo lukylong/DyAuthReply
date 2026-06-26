@@ -25,6 +25,14 @@ export interface DouyinRule {
   links: string[];
   template_id?: null | string;
   template_name?: null | string;
+  card_ids?: string[];
+  cards?: Array<{
+    id: string;
+    title: string;
+    cover_url?: null | string;
+    target_url?: null | string;
+    status?: boolean;
+  }>;
   send_mode: DouyinRuleSendMode;
   send_mode_display?: string;
   channel?: DouyinRuleChannel;
@@ -61,6 +69,7 @@ export interface DouyinRuleCreateInput {
   cooldown_seconds?: number;
   remark?: null | string;
   sort?: number;
+  card_ids?: string[];
 }
 
 export type DouyinRuleUpdateInput = Partial<DouyinRuleCreateInput>;

@@ -8,12 +8,14 @@ import {
   deleteRule,
   dryRunMatch,
   listAccounts,
+  listCardsAll,
   listRules,
   listRulesByAccount,
   matchTypeLabel,
   parseAccountConflict,
   patchRule,
   type DouyinAccount,
+  type DouyinCardSimple,
   type DouyinRule,
   type DryRunMatchResult,
   type RuleLink,
@@ -29,6 +31,7 @@ const error = ref('');
 const { licenseStatus: license, ensureStatus } = useClientLicense();
 const accounts = ref<DouyinAccount[]>([]);
 const rules = ref<DouyinRule[]>([]);
+const cards = ref<DouyinCardSimple[]>([]);
 const filterAccountId = ref('');
 const showForm = ref(false);
 const editing = ref<DouyinRule | null>(null);
@@ -43,6 +46,7 @@ const form = ref({
   keywordsText: '',
   reply_text: '',
   links: [] as RuleLink[],
+  card_ids: [] as string[],
   send_mode: 'multi_message' as 'merged' | 'multi_message',
   priority: 0,
   cooldown_seconds: 300,
@@ -118,6 +122,14 @@ async function loadAccounts() {
   accounts.value = await listAccounts();
 }
 
+async function loadCards() {
+  try {
+    cards.value = await listCardsAll();
+  } catch {
+    cards.value = [];
+  }
+}
+
 async function loadRules() {
   loading.value = true;
   error.value = '';
@@ -144,6 +156,7 @@ function openCreate() {
     keywordsText: '',
     reply_text: '',
     links: [],
+    card_ids: [],
     send_mode: 'multi_message',
     priority: 0,
     cooldown_seconds: 300,
@@ -165,6 +178,7 @@ function openEdit(rule: DouyinRule) {
     keywordsText: (rule.keywords || []).join('\n'),
     reply_text: rule.reply_text || '',
     links: normalizeLinks(rule.links),
+    card_ids: Array.isArray(rule.card_ids) ? [...rule.card_ids] : [],
     send_mode:
       ruleHasLinks(normalizeLinks(rule.links)) || rule.send_mode === 'multi_message'
         ? 'multi_message'
@@ -276,6 +290,7 @@ async function submitForm() {
     cooldown_seconds: Number(form.value.cooldown_seconds) || 300,
     status: form.value.status,
     account_ids: [...form.value.account_ids],
+    card_ids: [...form.value.card_ids],
     weekday_mask: form.value.weekday_mask || '1111111',
     time_window_start: form.value.time_window_start || null,
     time_window_end: form.value.time_window_end || null,
@@ -325,6 +340,7 @@ async function confirmMoveAccounts() {
     cooldown_seconds: Number(form.value.cooldown_seconds) || 300,
     status: form.value.status,
     account_ids: [...form.value.account_ids],
+    card_ids: [...form.value.card_ids],
     weekday_mask: form.value.weekday_mask || '1111111',
     time_window_start: form.value.time_window_start || null,
     time_window_end: form.value.time_window_end || null,
@@ -457,6 +473,7 @@ onMounted(async () => {
   try {
     await loadAccounts();
     await loadRules();
+    await loadCards();
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
     loading.value = false;
@@ -692,7 +709,22 @@ onMounted(async () => {
           </div>
           <button type="button" class="btn-glass add-link-btn" @click="addLinkRow">+ 添加链接</button>
         </div>
-        
+
+        <div class="form-field">
+          <span class="field-label">关联卡片 (伪装链接卡片，可多选)</span>
+          <div v-if="cards.length === 0" class="link-empty">暂无卡片，请先到「卡片管理」创建。</div>
+          <div v-else class="card-checks">
+            <label v-for="c in cards" :key="c.id" class="card-check">
+              <input type="checkbox" :value="c.id" v-model="form.card_ids" />
+              <img v-if="c.cover_url" :src="c.cover_url" class="card-cover" alt="" />
+              <span class="card-title">{{ c.title }}</span>
+            </label>
+          </div>
+          <p v-if="form.card_ids.length > 0" class="field-hint">
+            命中后先发文案，再按顺序对每张卡片发送其落地页链接（抖音自动渲染为卡片）。
+          </p>
+        </div>
+
         <label class="form-field">
           <span class="field-label">下发策略</span>
           <select
@@ -1121,6 +1153,58 @@ onMounted(async () => {
   color: var(--text-muted);
   font-size: 0.78rem;
   margin-bottom: 6px;
+}
+
+.card-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.card-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  min-width: 160px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  font-size: 0.86rem;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: var(--transition-quick);
+}
+
+.card-check:hover {
+  background: var(--glass-bg-hover);
+  border-color: var(--glass-border-active);
+}
+
+.card-check input[type='checkbox'] {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent-blue);
+}
+
+.card-cover {
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  object-fit: cover;
+  flex-shrink: 0;
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.card-title {
+  flex: 1;
+  min-width: 0;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
 }
 
 .link-row {

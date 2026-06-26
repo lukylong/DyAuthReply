@@ -524,6 +524,22 @@ DOWNLOAD_EXTENSION_URL = os.environ.get('DOWNLOAD_EXTENSION_URL', f"{_dl_base}/{
 # 管理后台入口（落地页提供跳转）
 DOWNLOAD_CONSOLE_URL = os.environ.get('DOWNLOAD_CONSOLE_URL', '/manage/')
 
+# 抖音伪装卡片落地页基础 URL：worker 发送的卡片 URL = <base>/c/<card_id>。
+# 抖音爬虫需从公网抓取该落地页 og 元信息，故必须是公网可达域名。
+# 优先级：环境变量 > env/*_env.py 已定义的值（如 client_env 从授权服务地址推导）> DOWNLOAD_PUBLIC_BASE_URL。
+DOUYIN_CARD_LANDING_BASE_URL = (
+    os.environ.get('DOUYIN_CARD_LANDING_BASE_URL', '')
+    or globals().get('DOUYIN_CARD_LANDING_BASE_URL', '')
+    or DOWNLOAD_PUBLIC_BASE_URL
+).rstrip('/')
+# 文件访问/卡片封面图等绝对 URL 前缀（file_manager proxy 等公开资源）。
+BASE_URL = (
+    os.environ.get('BASE_URL', '')
+    or globals().get('BASE_URL', '')
+    or DOWNLOAD_PUBLIC_BASE_URL
+    or 'http://localhost:8000'
+).rstrip('/')
+
 # ================================================= #
 # **************** 客户端升级通道配置 **************** #
 # ================================================= #

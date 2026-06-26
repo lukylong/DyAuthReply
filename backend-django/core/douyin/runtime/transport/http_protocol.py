@@ -32,6 +32,7 @@ from core.douyin.runtime.reply_helpers import (
     _resolve_rule_reply_fields,
     _normalize_send_mode,
     _write_reply_log,
+    resolve_card_landing_urls,
     write_manual_out_message,
 )
 from core.douyin.runtime.send_template_cache import load_cached_send_template
@@ -1701,7 +1702,9 @@ class HttpProtocolTransport(AccountTransport):
 
         base, links_src, raw_mode = _resolve_rule_reply_fields(rule)
         send_mode_effective = _normalize_send_mode(raw_mode, has_links=bool(links_src))
-        segments = _build_segments(rule, peer_nickname)
+        # 规则关联的伪装卡片落地页 URL（DB 查询，在 async 上下文预取后传入纯同步的 _build_segments）
+        card_urls = await sync_to_async(resolve_card_landing_urls)(rule)
+        segments = _build_segments(rule, peer_nickname, card_urls=card_urls)
         logger.info(
             f"[transport.http] send_reply 开始 account={account_id} peer={peer_nickname!r} "
             f"rule={rule.name!r} send_mode={send_mode_effective} segments={len(segments)} "

@@ -91,6 +91,12 @@ class DouyinRule(RootModel):
         help_text="链接列表，发送时根据 send_mode 处理",
     )
 
+    card_ids = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="关联的伪装卡片 ID 列表；命中后按顺序各发一条卡片落地页 URL",
+    )
+
     send_mode = models.CharField(
         max_length=16,
         choices=SEND_MODE_CHOICES,

@@ -11,6 +11,7 @@ from core.data_source.data_source_model import DataSource
 from core.douyin.douyin_account_group_model import DouyinAccountGroup
 from core.douyin.douyin_account_model import DouyinAccount
 from core.douyin.douyin_blacklist_model import DouyinBlacklist
+from core.douyin.douyin_card_model import DouyinCard
 from core.douyin.douyin_conversation_model import DouyinConversation
 from core.douyin.douyin_daily_stat_model import DouyinDailyStat
 from core.douyin.douyin_event_model import DouyinEvent

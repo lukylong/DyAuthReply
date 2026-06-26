@@ -11,6 +11,7 @@ from common.local_desktop_auth import LocalDesktopAuth
 from core.client.license_auth import _client_app_version
 from core.douyin.douyin_account_api import router as douyin_account_router
 from core.douyin.douyin_blacklist_api import router as douyin_blacklist_router
+from core.client.client_card_api import router as client_card_router
 from core.douyin.douyin_event_api import router as douyin_event_router
 from core.douyin.douyin_quick_reply_api import router as douyin_quick_reply_router
 from core.douyin.douyin_reply_log_api import router as douyin_reply_log_router
@@ -234,6 +235,7 @@ client_api.add_router('/client/v1/douyin', douyin_template_router, tags=['Client
 client_api.add_router('/client/v1/douyin', douyin_session_router, tags=['Client-Douyin-Session'])
 client_api.add_router('/client/v1/douyin', douyin_reply_log_router, tags=['Client-Douyin-ReplyLog'])
 client_api.add_router('/client/v1/douyin', douyin_blacklist_router, tags=['Client-Douyin-Blacklist'])
+client_api.add_router('/client/v1/douyin', client_card_router, tags=['Client-Douyin-Card'])
 client_api.add_router('/client/v1/douyin', douyin_quick_reply_router, tags=['Client-Douyin-QuickReply'])
 client_api.add_router('/client/v1/douyin', douyin_event_router, tags=['Client-Douyin-Event'])
 client_api.add_router('/client/v1', client_announcement_client_router, tags=['Client-Announcement'])

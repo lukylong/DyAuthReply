@@ -586,6 +586,7 @@ export interface DouyinRule {
   send_mode?: string;
   template_id?: string | null;
   template_name?: string | null;
+  card_ids?: string[];
   priority: number;
   status: boolean;
   cooldown_seconds?: number;
@@ -612,6 +613,7 @@ export interface DouyinRuleInput {
   links?: RuleLink[];
   send_mode?: string;
   template_id?: string | null;
+  card_ids?: string[];
   priority?: number;
   status?: boolean;
   cooldown_seconds?: number;
@@ -791,6 +793,87 @@ export function patchTemplate(templateId: string, data: Partial<DouyinTemplateIn
 export function deleteTemplate(templateId: string) {
   return request<{ success: boolean }>(`/douyin/template/${templateId}`, { method: 'DELETE' });
 }
+
+// ---------- 伪装卡片 ----------
+export interface DouyinCard {
+  id: string;
+  title: string;
+  description?: string;
+  cover_file_id?: string | null;
+  cover_url?: string | null;
+  target_url: string;
+  remark?: string | null;
+  status: boolean;
+  landing_url?: string | null;
+  sync_state?: string;
+}
+
+export interface DouyinCardInput {
+  title: string;
+  description?: string;
+  cover_file_id?: string | null;
+  target_url: string;
+  remark?: string | null;
+  status?: boolean;
+}
+
+export interface DouyinCardSimple {
+  id: string;
+  title: string;
+  cover_url?: string | null;
+  target_url?: string | null;
+}
+
+export function listCards(params?: { page?: number; pageSize?: number; title?: string }) {
+  return request<PageResult<DouyinCard>>(
+    withQuery('/douyin/card', {
+      page: params?.page ?? 1,
+      page_size: params?.pageSize ?? 100,
+      title: params?.title,
+    }),
+  );
+}
+
+export function listCardsAll() {
+  return request<DouyinCardSimple[]>('/douyin/card/all');
+}
+
+export function createCard(data: DouyinCardInput) {
+  return request<DouyinCard>('/douyin/card', {
+    method: 'POST',
+    body: JSON.stringify({ status: true, ...data }),
+  });
+}
+
+export function updateCard(cardId: string, data: DouyinCardInput) {
+  return request<DouyinCard>(`/douyin/card/${cardId}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteCard(cardId: string) {
+  return request<{ success: boolean }>(`/douyin/card/${cardId}`, { method: 'DELETE' });
+}
+
+/** 上传封面图：multipart，经客户端后端转发到公网 file_manager 托管，返回公网 cover_file_id + cover_url。 */
+export async function uploadCardCover(file: File): Promise<{ cover_file_id: string; cover_url: string }> {
+  const fd = new FormData();
+  fd.append('file', file);
+  const res = await fetch(`${API_PREFIX}/douyin/card/cover`, {
+    method: 'POST',
+    body: fd,
+  });
+  if (!res.ok) {
+    throw new Error(await parseError(res));
+  }
+  const json = await res.json();
+  if (json && typeof json === 'object' && 'code' in json && json.code === 2000) {
+    return json.data;
+  }
+  return json;
+}
+
 
 export function listReplyLogs(params?: {
   account_id?: string;

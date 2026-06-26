@@ -107,6 +107,11 @@ CLIENT_HTTP_PORT = int(_env('CLIENT_HTTP_PORT', '8765'))
 # 客户端默认授权服务地址（开发态默认本地；打包产物由 launcher defaults / 外部环境覆盖）
 CLIENT_LICENSE_SERVER_URL = _env('CLIENT_LICENSE_SERVER_URL', 'http://127.0.0.1:8000')
 
+# 抖音伪装卡片落地页基础 URL（客户端 worker 拼 <base>/c/<card_id>）。
+# 卡片落地页 + 封面托管在公网，故必须用公网域名，默认复用授权服务地址（公网后端就在那），
+# 不能用本机 127.0.0.1:8765（抖音爬虫抓不到）。可由环境变量单独覆盖。
+DOUYIN_CARD_LANDING_BASE_URL = _env('DOUYIN_CARD_LANDING_BASE_URL', CLIENT_LICENSE_SERVER_URL).rstrip('/')
+
 # 仅挂载客户端 URL（API + client-ui 静态资源）
 ROOT_URLCONF = 'application.client_urls'
 

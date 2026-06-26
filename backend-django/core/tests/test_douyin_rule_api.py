@@ -1,10 +1,13 @@
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 
 from core.douyin.douyin_rule_api import (
     _build_quick_enable_rule_payload,
+    _normalize_card_ids,
     _normalize_rule_payload,
+    _validate_cards_exist,
 )
 from core.douyin.douyin_rule_schema import DouyinRuleQuickEnableIn, DouyinRuleSchemaIn
+from ninja.errors import HttpError
 
 
 class DouyinRuleApiTests(SimpleTestCase):
@@ -79,3 +82,35 @@ class DouyinRuleNormalizePayloadTests(SimpleTestCase):
         )
         self.assertIsNone(data.account_id)
         self.assertIsNone(data.template_id)
+
+
+class DouyinRuleCardIdsTests(TestCase):
+    """规则关联卡片 card_ids 的归一化与存在性校验"""
+
+    def test_schema_in_accepts_card_ids(self):
+        data = DouyinRuleSchemaIn(
+            name='带卡片', match_type='default', keywords=[], reply_text='你好',
+            links=[], send_mode='multi_message', priority=0, status=True,
+            cooldown_seconds=60, channel='dm', weekday_mask='1111111',
+            card_ids=['id-1', 'id-2'],
+        )
+        self.assertEqual(data.card_ids, ['id-1', 'id-2'])
+
+    def test_normalize_card_ids_dedupe_and_order(self):
+        self.assertEqual(_normalize_card_ids(['b', 'a', 'b', '  ', 'c']), ['b', 'a', 'c'])
+
+    def test_validate_cards_exist_rejects_missing(self):
+        import uuid
+        with self.assertRaises(HttpError):
+            _validate_cards_exist([str(uuid.uuid4())])
+
+    def test_create_rule_persists_card_ids(self):
+        from core.douyin.douyin_card_model import DouyinCard
+        from core.douyin.douyin_rule_model import DouyinRule
+
+        c = DouyinCard.objects.create(title='卡', target_url='https://a.com', status=True)
+        rule = DouyinRule.objects.create(
+            name='r', match_type='default', card_ids=[str(c.id)],
+        )
+        rule.refresh_from_db()
+        self.assertEqual(rule.card_ids, [str(c.id)])

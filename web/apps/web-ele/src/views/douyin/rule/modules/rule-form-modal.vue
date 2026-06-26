@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import type { DouyinRule, DouyinRuleCreateInput, DouyinTemplate } from '#/api/core/douyin';
+import type { DouyinCardSimple, DouyinRule, DouyinRuleCreateInput, DouyinTemplate } from '#/api/core/douyin';
 
 import { computed, reactive, ref } from 'vue';
 
@@ -18,6 +18,7 @@ import {
 
 import {
   createDouyinRuleApi,
+  getAllCard,
   getAllTemplate,
   getSimpleDouyinAccountListApi,
   updateDouyinRuleApi,
@@ -31,6 +32,7 @@ const confirmLoading = ref(false);
 const formRef = ref<InstanceType<typeof ElForm>>();
 const editingId = ref<null | string>(null);
 const templates = ref<DouyinTemplate[]>([]);
+const cards = ref<DouyinCardSimple[]>([]);
 const accounts = ref<Array<{ id: string; nickname: string }>>([]);
 
 const form = reactive({
@@ -40,6 +42,7 @@ const form = reactive({
   keywords_text: '',
   regex_pattern: '',
   template_id: '' as '' | string,
+  card_ids: [] as string[],
   weekday_values: ['1', '2', '3', '4', '5', '6', '7'] as string[],
   time_window_start: '',
   time_window_end: '',
@@ -86,6 +89,7 @@ function resetForm() {
     keywords_text: '',
     regex_pattern: '',
     template_id: '',
+    card_ids: [],
     weekday_values: ['1', '2', '3', '4', '5', '6', '7'],
     time_window_start: '',
     time_window_end: '',
@@ -104,6 +108,9 @@ async function ensureOptionsLoaded() {
   if (templates.value.length === 0) {
     templates.value = await getAllTemplate();
   }
+  if (cards.value.length === 0) {
+    cards.value = await getAllCard();
+  }
 }
 
 function fillForm(row: DouyinRule) {
@@ -114,6 +121,7 @@ function fillForm(row: DouyinRule) {
     keywords_text: (row.keywords || []).join('\n'),
     regex_pattern: row.regex_pattern || '',
     template_id: row.template_id || '',
+    card_ids: row.card_ids ? [...row.card_ids] : [],
     weekday_values: maskToWeekdays(row.weekday_mask),
     time_window_start: row.time_window_start || '',
     time_window_end: row.time_window_end || '',
@@ -132,6 +140,7 @@ function buildPayload(): DouyinRuleCreateInput {
     keywords: form.match_type === 'contains' ? splitKeywords(form.keywords_text) : [],
     regex_pattern: form.match_type === 'regex' ? form.regex_pattern || null : null,
     template_id: form.template_id || null,
+    card_ids: form.card_ids || [],
     // 当前产品形态下，自动回复统一走模板内容；未选模板时才允许旧字段兜底为空。
     reply_text: '',
     links: [],
@@ -276,6 +285,27 @@ defineExpose({ open });
             <ElTag size="small" type="success">发送模式：{{ selectedTemplate.send_mode }}</ElTag>
             <ElTag size="small" type="info">规则默认作用于私信</ElTag>
           </div>
+        </div>
+      </ElFormItem>
+
+      <ElFormItem label="关联卡片">
+        <ElSelect
+          v-model="form.card_ids"
+          multiple
+          filterable
+          clearable
+          placeholder="可多选；命中后在文案之后依次发送各卡片"
+          style="width: 100%"
+        >
+          <ElOption
+            v-for="item in cards"
+            :key="item.id"
+            :label="item.title"
+            :value="item.id"
+          />
+        </ElSelect>
+        <div class="form-help">
+          关联卡片会作为伪装链接卡片发送：先发模板文案，再按顺序对每张卡片发送其落地页链接（抖音自动渲染为卡片）。
         </div>
       </ElFormItem>
 

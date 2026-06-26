@@ -1,6 +1,7 @@
 export * from './account';
 export * from './account-group';
 export * from './blacklist';
+export * from './card';
 export * from './event';
 export * from './quick-reply';
 export * from './reply-log';

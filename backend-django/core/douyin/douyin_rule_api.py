@@ -57,6 +57,36 @@ def _normalize_rule_payload(payload: dict) -> dict:
     return normalized
 
 
+def _normalize_card_ids(card_ids) -> list[str]:
+    """统一 card_ids 为去重、保序的字符串列表。"""
+    if not card_ids:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in card_ids:
+        cid = str(item or '').strip()
+        if cid and cid not in seen:
+            seen.add(cid)
+            out.append(cid)
+    return out
+
+
+def _validate_cards_exist(card_ids: list[str]) -> None:
+    """校验 card_ids 全部存在且未软删，否则 400。"""
+    if not card_ids:
+        return
+    from core.douyin.douyin_card_model import DouyinCard
+
+    existing = set(
+        str(x) for x in DouyinCard.objects.filter(
+            id__in=card_ids, is_deleted=False
+        ).values_list('id', flat=True)
+    )
+    missing = [cid for cid in card_ids if cid not in existing]
+    if missing:
+        raise HttpError(400, f"关联卡片不存在: {', '.join(missing)}")
+
+
 def _normalize_links(links) -> list[dict[str, str]]:
     """统一 links 为 [{title, url}, ...]（兼容纯 URL 字符串）。"""
     if not links:
@@ -283,6 +313,9 @@ def create_rule(request, data: DouyinRuleSchemaIn):
     account_ids = _normalize_account_ids(payload.pop('account_ids', None), payload.get('account_id'))
     if payload.get('template_id') and not DouyinTemplate.objects.filter(id=payload['template_id']).exists():
         raise HttpError(400, "引用模板不存在")
+    card_ids = _normalize_card_ids(payload.get('card_ids'))
+    _validate_cards_exist(card_ids)
+    payload['card_ids'] = card_ids
     _validate_rule_payload(payload)
     _validate_accounts_exist(account_ids)
     _resolve_account_conflicts(account_ids, exclude_id=None, force_move=force_move)
@@ -300,6 +333,9 @@ def update_rule(request, rule_id: str, data: DouyinRuleSchemaIn):
     account_ids = _normalize_account_ids(payload.pop('account_ids', None), payload.get('account_id'))
     if payload.get('template_id') and not DouyinTemplate.objects.filter(id=payload['template_id']).exists():
         raise HttpError(400, "引用模板不存在")
+    card_ids = _normalize_card_ids(payload.get('card_ids'))
+    _validate_cards_exist(card_ids)
+    payload['card_ids'] = card_ids
     _validate_rule_payload(payload)
     _validate_accounts_exist(account_ids)
     _resolve_account_conflicts(account_ids, exclude_id=rule_id, force_move=force_move)
@@ -332,6 +368,10 @@ def patch_rule(request, rule_id: str, data: DouyinRuleSchemaPatch):
     }
     if updates.get('template_id') and not DouyinTemplate.objects.filter(id=updates['template_id']).exists():
         raise HttpError(400, "引用模板不存在")
+    if 'card_ids' in raw:
+        card_ids = _normalize_card_ids(updates.get('card_ids'))
+        _validate_cards_exist(card_ids)
+        updates['card_ids'] = card_ids
     _validate_rule_payload(merged)
     if has_account_ids:
         _validate_accounts_exist(account_ids)

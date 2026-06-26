@@ -85,13 +85,17 @@ def _resolve_rule_reply_fields(rule: "DouyinRule") -> tuple[str, list, str | Non
     return base, links, raw_mode
 
 
-def _build_segments(rule: "DouyinRule", peer_nickname: str) -> list[str]:
+def _build_segments(rule: "DouyinRule", peer_nickname: str, *, card_urls: Optional[list[str]] = None) -> list[str]:
     """
     生成需要发送的消息段列表。
     优先级：rule.template.content > rule.reply_text；rule.template.links > rule.links
 
     multi_message：先文本，再每条链接各发一条独立消息（与主项目 sender 行为一致）。
     links[].title 仅用于后台展示/占位符 {{link_N_title}}，发送时一律忽略，只发 url。
+
+    card_urls：规则关联的伪装卡片落地页 URL 列表（由调用方在 async 上下文用
+    resolve_card_landing_urls() 预取后传入，本函数保持纯同步、不触 DB）。
+    卡片段排在文案之后、links 之前，各占一条独立消息（抖音自动渲染为卡片）。
     """
     base, links, raw_mode = _resolve_rule_reply_fields(rule)
 
@@ -108,12 +112,16 @@ def _build_segments(rule: "DouyinRule", peer_nickname: str) -> list[str]:
             url = lk.strip()
             normalized_links.append({'title': '', 'url': url})
 
-    send_mode = _normalize_send_mode(raw_mode, has_links=bool(normalized_links))
+    card_segs = [u for u in (card_urls or []) if isinstance(u, str) and u.strip()]
+    has_extra = bool(normalized_links) or bool(card_segs)
+    send_mode = _normalize_send_mode(raw_mode, has_links=has_extra)
     text = render_template(base, peer_nickname=peer_nickname, links=normalized_links)
     urls = [lk['url'] for lk in normalized_links]
 
     if send_mode == 'merged':
         merged = text
+        for u in card_segs:
+            merged += ('\n' if merged and not merged.endswith('\n') else '') + u
         for u in urls:
             merged += ('\n' if merged and not merged.endswith('\n') else '') + u
         return [merged] if merged.strip() else []
@@ -121,10 +129,33 @@ def _build_segments(rule: "DouyinRule", peer_nickname: str) -> list[str]:
     segs: list[str] = []
     if text.strip():
         segs.append(text.strip())
+    # 卡片段：发落地页 URL 本体，抖音抓 og 渲染为卡片气泡
+    for u in card_segs:
+        segs.append(u.strip())
     for lk in normalized_links:
         # 链接段发 URL 本体，抖音才会识别为可点击链接；title 仅用于后台展示/模板变量
         segs.append(lk['url'])
     return segs
+
+
+def resolve_card_landing_urls(rule: "DouyinRule") -> list[str]:
+    """[同步] 把 rule.card_ids 解析为启用卡片的落地页 URL 列表，保持 card_ids 顺序。
+
+    在 async 上下文调用方需用 sync_to_async 包装本函数后再把结果传给 _build_segments。
+    停用 / 已删除 / 不存在的卡片自动跳过。
+    """
+    card_ids = [str(x) for x in (getattr(rule, 'card_ids', None) or [])]
+    if not card_ids:
+        return []
+    from core.douyin.douyin_card_model import DouyinCard
+    from core.douyin.douyin_card_schema import build_landing_url
+
+    enabled = {
+        str(c.id)
+        for c in DouyinCard.objects.filter(id__in=card_ids, status=True, is_deleted=False).only('id')
+    }
+    # 保持 card_ids 原始顺序，过滤掉未启用/缺失的
+    return [build_landing_url(cid) for cid in card_ids if cid in enabled]
 
 
 # -------------------- DB 落库 --------------------

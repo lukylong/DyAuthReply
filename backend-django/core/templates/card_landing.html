@@ -1,0 +1,82 @@
+{% load static %}<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ title }}</title>
+  <meta name="description" content="{{ description }}" />
+
+  <!-- Open Graph：抖音/微信等抓取此处渲染卡片 -->
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="{{ title }}" />
+  <meta property="og:description" content="{{ description }}" />
+  {% if cover_url %}<meta property="og:image" content="{{ cover_url }}" />{% endif %}
+  <meta property="og:url" content="{{ landing_url }}" />
+
+  <!-- Twitter Card 兜底 -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="{{ title }}" />
+  <meta name="twitter:description" content="{{ description }}" />
+  {% if cover_url %}<meta name="twitter:image" content="{{ cover_url }}" />{% endif %}
+
+  <!-- 真人访问：自动跳转到真实链接 -->
+  <meta http-equiv="refresh" content="0; url={{ target_url }}" />
+  <script>
+    // 优先用 JS 跳转（replace 不留历史记录）
+    window.location.replace({{ target_url_json|safe }});
+  </script>
+  <style>
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: #f5f6fa;
+      color: #333;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+    .card {
+      background: #fff;
+      border-radius: 14px;
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.08);
+      padding: 28px 32px;
+      max-width: 360px;
+      text-align: center;
+    }
+    .card img {
+      width: 72px;
+      height: 72px;
+      border-radius: 12px;
+      object-fit: cover;
+      margin-bottom: 16px;
+    }
+    .card h1 {
+      font-size: 18px;
+      margin: 0 0 8px;
+    }
+    .card p {
+      font-size: 14px;
+      color: #888;
+      margin: 0 0 20px;
+    }
+    .card a {
+      display: inline-block;
+      padding: 10px 24px;
+      background: #fe2c55;
+      color: #fff;
+      text-decoration: none;
+      border-radius: 8px;
+      font-size: 15px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    {% if cover_url %}<img src="{{ cover_url }}" alt="" />{% endif %}
+    <h1>{{ title }}</h1>
+    {% if description %}<p>{{ description }}</p>{% endif %}
+    <a href="{{ target_url }}">正在跳转，点此继续 →</a>
+  </div>
+</body>
+</html>

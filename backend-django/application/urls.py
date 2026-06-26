@@ -101,11 +101,52 @@ def serve_download(request, name):
     return response
 
 
+def card_landing(request, card_id):
+    """抖音伪装卡片落地页：对爬虫返回 og 元信息渲染卡片，对真人 302/JS 跳转到真实链接。
+
+    无需登录（公开页）。仅按已存在且启用的卡片 UUID 渲染，target_url 协议白名单（http/https），
+    模板自动转义防 XSS，无写操作与注入面。
+    """
+    import json as _json
+    from urllib.parse import urlsplit
+
+    from core.douyin.douyin_card_model import DouyinCard
+    from core.douyin.douyin_card_schema import build_cover_url, build_landing_url
+
+    card = DouyinCard.objects.filter(id=str(card_id), status=True, is_deleted=False).first()
+    if card is None:
+        raise Http404("卡片不存在或已停用")
+
+    target_url = (card.target_url or '').strip()
+    if urlsplit(target_url).scheme.lower() not in ('http', 'https'):
+        raise Http404("卡片链接无效")
+
+    # JSON 编码后还需转义 HTML 敏感字符，否则 target_url 内的 </script> 会提前闭合
+    # <script> 标签导致 XSS（json.dumps 只处理 JS 字符串上下文，不处理 HTML 解析层）。
+    # 转义规则与 Django 内置 django.utils.html.json_script 一致。
+    target_url_json = _json.dumps(target_url).translate({
+        ord('<'): '\\u003C',
+        ord('>'): '\\u003E',
+        ord('&'): '\\u0026',
+        0x2028: '\\u2028',
+        0x2029: '\\u2029',
+    })
+
+    return render(request, 'card_landing.html', {
+        'title': card.title,
+        'description': card.description or '',
+        'cover_url': build_cover_url(card.cover_file_id),
+        'landing_url': build_landing_url(str(card.id)),
+        'target_url': target_url,
+        # 供 <script>location.replace(...) 安全注入（json 编码 + HTML 敏感字符转义）
+        'target_url_json': target_url_json,
+    })
+
+
 def serve_spa(request, path=''):
     # 忽略 API 和 WS（WebSocket）请求，由 Django 各自专门路由处理
     if path.startswith('api/') or path.startswith('ws/'):
         raise Http404("Not Found")
-
     # 如果访问的是 /manage 并且没有以 / 结尾，则重定向到 /manage/ 保证浏览器相对资源路径解析正确
     if not path and not request.path.endswith('/'):
         from django.shortcuts import redirect
@@ -130,6 +171,7 @@ def serve_spa(request, path=''):
 urlpatterns = [
     path('', download_landing),
     re_path(r'^downloads/(?P<name>.+)$', serve_download),
+    path('c/<uuid:card_id>', card_landing),
     path('api/', api.urls),
     re_path(r'^manage(?:/(?P<path>.*))?$', serve_spa),
 ]

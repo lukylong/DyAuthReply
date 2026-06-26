@@ -296,6 +296,36 @@ class ClientAuthDeactivateIn(Schema):
     reason: str = Field(default="客户端主动解绑")
 
 
+# ---- 客户端卡片同步（阶段②：客户端为真源，推送到公网托管落地页/封面）----
+class ClientCardUpsertIn(Schema):
+    activation_id: str
+    activation_token: str
+    id: str = Field(..., description="客户端本地卡片 UUID，作为公网卡片 id")
+    title: str
+    description: Optional[str] = ""
+    cover_file_id: Optional[str] = None
+    target_url: str
+    remark: Optional[str] = None
+    status: bool = True
+
+
+class ClientCardDeleteIn(Schema):
+    activation_id: str
+    activation_token: str
+    id: str
+
+
+class ClientCardSyncOut(Schema):
+    id: str
+    landing_url: str
+    ok: bool = True
+
+
+class ClientCardCoverOut(Schema):
+    cover_file_id: str
+    cover_url: str
+
+
 class ClientAuthPlanSummary(Schema):
     id: str
     code: str

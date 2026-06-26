@@ -130,9 +130,15 @@ class DualRunDecorator(AccountTransport):
         # 但本装饰器目的是"协议格式对账"，不要求 segments 与主路径完全一致；
         # 主路径自己会再调一次 _build_segments，那里产生的 segments 才是真发的。
         try:
-            from core.douyin.runtime.reply_helpers import _build_segments
+            from asgiref.sync import sync_to_async
 
-            segments = _build_segments(rule, peer_nickname)
+            from core.douyin.runtime.reply_helpers import (
+                _build_segments,
+                resolve_card_landing_urls,
+            )
+
+            card_urls = await sync_to_async(resolve_card_landing_urls)(rule)
+            segments = _build_segments(rule, peer_nickname, card_urls=card_urls)
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 f"[transport.dual_run] send_reply 影子编码：渲染 segments 失败 "

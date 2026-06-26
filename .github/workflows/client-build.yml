@@ -42,7 +42,7 @@ jobs:
             platform_label: macOS Apple Silicon
             rust_target: aarch64-apple-darwin
             artifact_name: dyauthreply-macos-aarch64
-            bundle: dmg
+            bundle: app,dmg
           - os: windows-latest
             platform_label: Windows x64
             rust_target: x86_64-pc-windows-msvc
@@ -134,7 +134,7 @@ jobs:
           shopt -s nullglob
           found=0
           bundle_root="dyauthreply-client/desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle"
-          if [ "${{ matrix.bundle }}" = "dmg" ]; then
+          if [ "${{ runner.os }}" = "macOS" ]; then
             # dmg 安装包 + macOS updater 产物（.app.tar.gz）及其签名
             patterns=("$bundle_root/dmg/*.dmg" "$bundle_root/macos/*.app.tar.gz" "$bundle_root/macos/*.app.tar.gz.sig")
           else
@@ -194,7 +194,7 @@ jobs:
           fi
           # 待上传资产列表：源文件 -> 稳定文件名
           declare -a uploads=()
-          if [ "${{ matrix.bundle }}" = "dmg" ]; then
+          if [ "${{ runner.os }}" = "macOS" ]; then
             uploads+=("$(ls dist-installers/*.dmg | head -n1)::DAssistant-macos-aarch64.dmg")
             # macOS updater 产物 + 签名（应用内更新下载的就是 .app.tar.gz）
             if ls dist-installers/*.app.tar.gz >/dev/null 2>&1; then

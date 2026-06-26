@@ -111,22 +111,19 @@ jobs:
           npm ci --prefix dyauthreply-client/client-ui
           npm ci --prefix dyauthreply-client/desktop
 
-      # 私钥写入临时文件并去掉 GitHub Secret 常见的尾随换行/空格，避免 base64 decode 失败
+      # 去掉 GitHub Secret 常见的尾随换行/空格，写回 GITHUB_ENV 供 tauri build 签名
       - name: Prepare minisign private key
         shell: bash
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          RAW_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          key_file="${RUNNER_TEMP}/tauri-signing.key"
-          printf '%s' "${TAURI_SIGNING_PRIVATE_KEY}" | tr -d '\r\n' > "$key_file"
-          chmod 600 "$key_file"
-          echo "TAURI_SIGNING_KEY_FILE=$key_file" >> "$GITHUB_ENV"
+          cleaned="$(printf '%s' "$RAW_KEY" | tr -d '\r\n')"
+          echo "TAURI_SIGNING_PRIVATE_KEY=$cleaned" >> "$GITHUB_ENV"
 
       - name: Build Tauri desktop app
         working-directory: dyauthreply-client/desktop
         env:
-          TAURI_SIGNING_PRIVATE_KEY_PATH: ${{ env.TAURI_SIGNING_KEY_FILE }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build -- --target ${{ matrix.rust_target }} --bundles ${{ matrix.bundle }}
 

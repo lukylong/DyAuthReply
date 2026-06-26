@@ -10,30 +10,36 @@ from common.fu_schema import FuFilters
 from core.douyin.douyin_card_model import DouyinCard
 
 
-def build_cover_url(cover_file_id: Optional[str]) -> Optional[str]:
-    """由 cover_file_id 拼 file_manager 公开访问 URL（auth=None 的 proxy 路由）。
+def _public_base_url() -> str:
+    """卡片封面图与落地页统一的公网基址。
 
-    用 settings.BASE_URL 作为前缀，前端/落地页都可直接访问。
+    封面图始终托管在公网 file_manager（客户端经代理上传），故 URL 必须指向公网域名，
+    不能用客户端本地的 BASE_URL（localhost:8000，本地没有该文件 → 破图）。
+    优先级：DOUYIN_CARD_LANDING_BASE_URL（客户端从授权服务地址推导）> DOWNLOAD_PUBLIC_BASE_URL > BASE_URL。
     """
-    if not cover_file_id:
-        return None
     from django.conf import settings
 
-    base = (getattr(settings, 'BASE_URL', '') or 'http://localhost:8000').rstrip('/')
-    return f"{base}/api/core/file_manager/proxy/{cover_file_id}"
-
-
-def build_landing_url(card_id: str) -> str:
-    """拼卡片落地页 URL：<公网域名>/c/<card_id>。"""
-    from django.conf import settings
-
-    base = (
+    return (
         getattr(settings, 'DOUYIN_CARD_LANDING_BASE_URL', '')
         or getattr(settings, 'DOWNLOAD_PUBLIC_BASE_URL', '')
         or getattr(settings, 'BASE_URL', '')
         or 'http://localhost:8000'
     ).rstrip('/')
-    return f"{base}/c/{card_id}"
+
+
+def build_cover_url(cover_file_id: Optional[str]) -> Optional[str]:
+    """由 cover_file_id 拼 file_manager 公开访问 URL（auth=None 的 proxy 路由）。
+
+    封面图存在公网，故用公网基址 [[_public_base_url]]，客户端与落地页都能正确访问。
+    """
+    if not cover_file_id:
+        return None
+    return f"{_public_base_url()}/api/core/file_manager/proxy/{cover_file_id}"
+
+
+def build_landing_url(card_id: str) -> str:
+    """拼卡片落地页 URL：<公网域名>/c/<card_id>。"""
+    return f"{_public_base_url()}/c/{card_id}"
 
 
 class DouyinCardFilters(FuFilters):

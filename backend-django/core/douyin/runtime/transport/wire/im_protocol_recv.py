@@ -545,6 +545,8 @@ def parse_content_json(content_json: str) -> ParsedContent:
         return ParsedContent("video", "[视频]", {"kind": "video"})
 
     # 未知：text 空，由上层过滤丢弃
+    # 【诊断】打印未识别消息的完整原始结构，用于补充解析逻辑（如伪装卡片/分享卡片）。
+    logger.info("[wire.recv][诊断] 未识别消息 content_json=%s", content_json)
     return ParsedContent("other", "")
 
 

@@ -23,6 +23,10 @@ env:
   PYTHONUTF8: '1'
   CLIENT_LICENSE_SERVER_URL: 'https://pro.zhenyangtang.com.cn'
   LICENSE_LEASE_PUBLIC_KEY_B64: ${{ secrets.LICENSE_LEASE_PUBLIC_KEY_B64 }}
+  # 公开下载/更新托管仓（latest.json 变体 + 签名包发布到其 client-latest Release）
+  DIST_REPO: lukylong/DyAuthReply-dist
+  # 应用内更新镜像清单（镜像在前、GitHub 原站兜底）。必须与客户端默认/Rust slug 规则一致。
+  UPDATE_MIRRORS: 'https://ghproxy.net/,https://gh-proxy.com/,https://ghfast.top/,https://github.com/'
 
 jobs:
   build:
@@ -109,6 +113,10 @@ jobs:
 
       - name: Build Tauri desktop app
         working-directory: dyauthreply-client/desktop
+        env:
+          # minisign 私钥 + 密码：注入后 tauri build 会对 updater 产物自动签名（createUpdaterArtifacts=true）
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build -- --target ${{ matrix.rust_target }} --bundles ${{ matrix.bundle }}
 
       - name: Collect installer files only
@@ -119,9 +127,11 @@ jobs:
           found=0
           bundle_root="dyauthreply-client/desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle"
           if [ "${{ matrix.bundle }}" = "dmg" ]; then
-            patterns=("$bundle_root/dmg/*.dmg")
+            # dmg 安装包 + macOS updater 产物（.app.tar.gz）及其签名
+            patterns=("$bundle_root/dmg/*.dmg" "$bundle_root/macos/*.app.tar.gz" "$bundle_root/macos/*.app.tar.gz.sig")
           else
-            patterns=("$bundle_root/nsis/*-setup.exe")
+            # NSIS 安装包（同时作为 Windows updater 产物）及其签名
+            patterns=("$bundle_root/nsis/*-setup.exe" "$bundle_root/nsis/*-setup.exe.sig")
           fi
           for pattern in "${patterns[@]}"; do
             for f in $pattern; do
@@ -168,29 +178,43 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
           DIST_REPO_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
-          DIST_REPO: lukylong/DyAuthReply-dist
         run: |
           set -euo pipefail
           if [ -z "${DIST_REPO_TOKEN:-}" ]; then
             echo "DIST_REPO_TOKEN 未配置，跳过公开仓同步"
             exit 0
           fi
+          # 待上传资产列表：源文件 -> 稳定文件名
+          declare -a uploads=()
           if [ "${{ matrix.bundle }}" = "dmg" ]; then
-            src=$(ls dist-installers/*.dmg | head -n1)
-            asset="DAssistant-macos-aarch64.dmg"
+            uploads+=("$(ls dist-installers/*.dmg | head -n1)::DAssistant-macos-aarch64.dmg")
+            # macOS updater 产物 + 签名（应用内更新下载的就是 .app.tar.gz）
+            if ls dist-installers/*.app.tar.gz >/dev/null 2>&1; then
+              uploads+=("$(ls dist-installers/*.app.tar.gz | head -n1)::DAssistant-macos-aarch64.app.tar.gz")
+            fi
+            if ls dist-installers/*.app.tar.gz.sig >/dev/null 2>&1; then
+              uploads+=("$(ls dist-installers/*.app.tar.gz.sig | head -n1)::DAssistant-macos-aarch64.app.tar.gz.sig")
+            fi
           else
-            src=$(ls dist-installers/*-setup.exe | head -n1)
-            asset="DAssistant-windows-x64-setup.exe"
+            uploads+=("$(ls dist-installers/*-setup.exe | head -n1)::DAssistant-windows-x64-setup.exe")
+            # Windows NSIS 安装包同时作为 updater 产物，附带签名
+            if ls dist-installers/*-setup.exe.sig >/dev/null 2>&1; then
+              uploads+=("$(ls dist-installers/*-setup.exe.sig | head -n1)::DAssistant-windows-x64-setup.exe.sig")
+            fi
           fi
-          cp "$src" "$asset"
           # 确保滚动 release 存在（首次或被删除时自动创建并标记为 latest）
           if ! gh release view client-latest --repo "$DIST_REPO" >/dev/null 2>&1; then
             gh release create client-latest --repo "$DIST_REPO" --latest \
               --title "D助手 客户端与插件下载" \
               --notes "安装包随新版本滚动更新，本 Release 始终为最新版。"
           fi
-          gh release upload client-latest "$asset" --repo "$DIST_REPO" --clobber
-          echo "已同步 $asset 到 $DIST_REPO (client-latest)"
+          for item in "${uploads[@]}"; do
+            src="${item%%::*}"
+            asset="${item##*::}"
+            cp "$src" "$asset"
+            gh release upload client-latest "$asset" --repo "$DIST_REPO" --clobber
+            echo "已同步 $asset 到 $DIST_REPO (client-latest)"
+          done
 
       # PR / manual runs: keep a short-lived artifact for debugging only.
       - name: Upload installer artifacts
@@ -201,3 +225,58 @@ jobs:
           if-no-files-found: error
           retention-days: 3
           path: dist-installers/*
+
+  # 两个平台构建并把签名包同步到 dist 仓后，统一生成多镜像 latest.json 变体并发布。
+  manifest:
+    name: Publish updater manifests
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/client-v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Generate and publish latest.json variants
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
+          DIST_REPO_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DIST_REPO_TOKEN:-}" ]; then
+            echo "DIST_REPO_TOKEN 未配置，跳过 manifest 发布"
+            exit 0
+          fi
+
+          version=$(python3 -c "import json;print(json.load(open('dyauthreply-client/desktop/src-tauri/tauri.conf.json'))['version'])")
+          pub_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          notes="${GITHUB_REF_NAME:-}"
+
+          mkdir -p sigs dist-manifests
+          # 从 dist 仓 client-latest 拉取各平台 updater 产物签名（由 build 阶段上传）
+          gh release download client-latest --repo "$DIST_REPO" \
+            --pattern 'DAssistant-windows-x64-setup.exe.sig' --dir sigs --clobber || true
+          gh release download client-latest --repo "$DIST_REPO" \
+            --pattern 'DAssistant-macos-aarch64.app.tar.gz.sig' --dir sigs --clobber || true
+
+          args=(--version "$version" --pub-date "$pub_date" --notes "$notes"
+                --mirrors "$UPDATE_MIRRORS" --out-dir dist-manifests)
+          if [ -f sigs/DAssistant-windows-x64-setup.exe.sig ]; then
+            args+=(--windows-url "https://github.com/$DIST_REPO/releases/latest/download/DAssistant-windows-x64-setup.exe"
+                   --windows-sig-file sigs/DAssistant-windows-x64-setup.exe.sig)
+          fi
+          if [ -f sigs/DAssistant-macos-aarch64.app.tar.gz.sig ]; then
+            args+=(--macos-url "https://github.com/$DIST_REPO/releases/latest/download/DAssistant-macos-aarch64.app.tar.gz"
+                   --macos-sig-file sigs/DAssistant-macos-aarch64.app.tar.gz.sig)
+          fi
+
+          python3 scripts/client/gen_update_manifest.py "${args[@]}"
+
+          ls -la dist-manifests/
+          gh release upload client-latest dist-manifests/latest*.json --repo "$DIST_REPO" --clobber
+          echo "已发布 latest.json 多镜像变体到 $DIST_REPO (client-latest)"

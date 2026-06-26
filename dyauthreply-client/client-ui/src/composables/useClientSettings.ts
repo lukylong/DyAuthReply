@@ -11,6 +11,8 @@ export interface ClientSettings {
     check_frequency: 'startup' | '6h' | 'daily' | 'weekly' | 'manual';
     last_check_time?: string;
     dismissed_version?: string;
+    /** 应用内更新镜像清单（前缀型 GitHub 加速代理，原站兜底）；留空用默认 */
+    update_mirrors?: string[];
   };
   notification: {
     system_enabled: boolean;
@@ -26,11 +28,20 @@ export interface ClientSettings {
   };
 }
 
+/** 默认应用内更新镜像清单（镜像在前、GitHub 原站兜底）。与 CI / Rust 端 slug 规则保持一致。 */
+export const DEFAULT_UPDATE_MIRRORS = [
+  'https://ghproxy.net/',
+  'https://gh-proxy.com/',
+  'https://ghfast.top/',
+  'https://github.com/',
+];
+
 const DEFAULT_SETTINGS: ClientSettings = {
   version_update: {
     enabled: true,
     auto_download: false,
     check_frequency: '6h',
+    update_mirrors: [...DEFAULT_UPDATE_MIRRORS],
   },
   notification: {
     system_enabled: true,
@@ -95,11 +106,22 @@ watch(
   { deep: true }
 );
 
+/** 取生效的更新镜像清单：用户配置非空则用之，否则回退默认清单。 */
+export function getUpdateMirrors(): string[] {
+  const list = settings.value.version_update.update_mirrors;
+  const cleaned = (list ?? [])
+    .map((s) => s.trim())
+    .filter((s) => /^https?:\/\//i.test(s));
+  return cleaned.length ? cleaned : [...DEFAULT_UPDATE_MIRRORS];
+}
+
 export function useClientSettings() {
   return {
     settings,
     saveSettings,
     resetSettings,
+    getUpdateMirrors,
     DEFAULT_SETTINGS,
+    DEFAULT_UPDATE_MIRRORS,
   };
 }

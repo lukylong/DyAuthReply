@@ -223,6 +223,48 @@ export function checkAppUpdate(current = '') {
   return request<AppUpdateInfo>(withQuery('/app-update/check', { current }));
 }
 
+// ==================== 应用内自动更新（tauri-plugin-updater + 多镜像竞速）====================
+
+/** 是否运行在 Tauri 桌面壳内（决定能否走应用内 updater）。 */
+export function inTauriRuntime(): boolean {
+  return isTauriRuntime();
+}
+
+/** Rust `check_app_update_mirrors` 返回结构。 */
+export interface TauriUpdateCheck {
+  available: boolean;
+  currentVersion: string;
+  version?: string | null;
+  notes?: string | null;
+  endpointUsed?: string | null;
+}
+
+/** 下载进度事件（与 Rust UpdateProgress 对齐）。 */
+export type UpdateProgress =
+  | { event: 'started'; contentLength?: number | null }
+  | { event: 'progress'; downloaded: number; contentLength?: number | null }
+  | { event: 'finished' };
+
+/** 镜像竞速 + check：检查是否有签名更新可用。仅在 Tauri 壳内可用。 */
+export async function checkUpdateViaTauri(mirrors: string[]): Promise<TauriUpdateCheck> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke<TauriUpdateCheck>('check_app_update_mirrors', { mirrors });
+}
+
+/**
+ * 下载并安装更新（镜像竞速 -> 下载带进度 -> 签名校验 -> 释放后端 -> 覆盖安装 -> 重启）。
+ * 成功后应用会自动重启，此 Promise 通常不会 resolve；失败会 reject。
+ */
+export async function runUpdateViaTauri(
+  mirrors: string[],
+  onProgress?: (p: UpdateProgress) => void,
+): Promise<void> {
+  const core = await import('@tauri-apps/api/core');
+  const channel = new core.Channel<UpdateProgress>();
+  if (onProgress) channel.onmessage = onProgress;
+  await core.invoke('download_and_install_update', { mirrors, onEvent: channel });
+}
+
 export async function openExternalUrl(url: string): Promise<void> {
   if (!url) return;
   const tauri = (window as unknown as { __TAURI__?: { opener?: { openUrl?: (u: string) => Promise<void> } } }).__TAURI__;

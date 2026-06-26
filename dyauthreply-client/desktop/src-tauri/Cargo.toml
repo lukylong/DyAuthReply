@@ -1,6 +1,6 @@
 [package]
 name = "dyauthreply"
-version = "0.1.15"
+version = "0.1.16"
 description = "DyAuthReply Desktop Client"
 authors = ["DyAuthReply"]
 edition = "2021"
@@ -17,8 +17,13 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-autostart = "2"
+# 应用内更新（镜像竞速探测用 reqwest，端点用 url，竞速并发用 futures）
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+url = "2"
+futures = "0.3"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

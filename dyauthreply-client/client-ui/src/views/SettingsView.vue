@@ -1,11 +1,29 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
-import { useClientSettings } from '../composables/useClientSettings';
+import { useClientSettings, DEFAULT_UPDATE_MIRRORS } from '../composables/useClientSettings';
 import { useVersionUpdate } from '../composables/useVersionUpdate';
 import { openExternalUrl } from '../api/client';
 
 const { settings, resetSettings } = useClientSettings();
 const { checkUpdate, isChecking, updateInfo, checkError } = useVersionUpdate();
+
+// 更新镜像编辑（每行一个；保存时清洗为字符串数组）
+const mirrorsText = ref(
+  (settings.value.version_update.update_mirrors ?? DEFAULT_UPDATE_MIRRORS).join('\n'),
+);
+
+function saveMirrors() {
+  const list = mirrorsText.value
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  settings.value.version_update.update_mirrors = list.length ? list : [...DEFAULT_UPDATE_MIRRORS];
+}
+
+function resetMirrors() {
+  settings.value.version_update.update_mirrors = [...DEFAULT_UPDATE_MIRRORS];
+  mirrorsText.value = DEFAULT_UPDATE_MIRRORS.join('\n');
+}
 
 const activeTab = ref<'version' | 'notification' | 'runtime'>('version');
 
@@ -197,7 +215,7 @@ const updateStatusType = computed<'info' | 'error' | 'success' | 'update'>(() =>
                   <span class="checkbox-icon"></span>
                   <div class="setting-info">
                     <span class="setting-name">自动下载更新</span>
-                    <span class="setting-desc">检测到新版本后自动下载安装包（暂未实现）</span>
+                    <span class="setting-desc">检测到新版本后自动下载并安装（应用内更新，完成后自动重启）</span>
                   </div>
                 </label>
               </div>
@@ -218,6 +236,28 @@ const updateStatusType = computed<'info' | 'error' | 'success' | 'update'>(() =>
                     {{ opt.label }}
                   </option>
                 </select>
+              </div>
+            </div>
+
+            <div v-if="settings.version_update.enabled" class="setting-item nested">
+              <div class="setting-info" style="padding-left: 0; width: 100%">
+                <label class="setting-name" for="update-mirrors">下载镜像加速</label>
+                <span class="setting-desc">
+                  应用内更新的下载镜像（每行一个，前缀型 GitHub 加速代理；保留 https://github.com/ 作为原站兜底）。留空恢复默认。
+                </span>
+                <textarea
+                  id="update-mirrors"
+                  v-model="mirrorsText"
+                  class="mirrors-input"
+                  rows="4"
+                  spellcheck="false"
+                  placeholder="https://ghproxy.net/"
+                  @change="saveMirrors"
+                  @blur="saveMirrors"
+                ></textarea>
+                <div class="mirrors-actions">
+                  <button type="button" class="btn-link" @click="resetMirrors">恢复默认镜像</button>
+                </div>
               </div>
             </div>
           </div>
@@ -616,6 +656,46 @@ const updateStatusType = computed<'info' | 'error' | 'success' | 'update'>(() =>
   font-size: 0.8125rem;
   color: var(--text-muted);
   line-height: 1.4;
+}
+
+/* 镜像编辑 */
+.mirrors-input {
+  margin-top: 8px;
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: rgba(255, 255, 255, 0.6);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+
+.mirrors-input:focus {
+  outline: none;
+  border-color: #0284c7;
+  box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.15);
+}
+
+.mirrors-actions {
+  margin-top: 6px;
+}
+
+.btn-link {
+  background: none;
+  border: none;
+  color: #0284c7;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+
+.btn-link:hover {
+  text-decoration: underline;
 }
 
 /* 下拉选择框 */

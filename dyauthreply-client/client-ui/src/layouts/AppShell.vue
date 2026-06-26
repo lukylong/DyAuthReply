@@ -1,11 +1,21 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router';
-import { checkAppUpdate, getHealth, openExternalUrl, type AppUpdateInfo } from '../api/client';
+import {
+  checkAppUpdate,
+  checkUpdateViaTauri,
+  getHealth,
+  inTauriRuntime,
+  openExternalUrl,
+  runUpdateViaTauri,
+  type AppUpdateInfo,
+  type UpdateProgress,
+} from '../api/client';
 import { useClientLicense } from '../composables/useClientLicense';
 import { APP_VERSION, useHiddenAdminEntry } from '../composables/useHiddenAdminEntry';
 import { useVersionUpdate } from '../composables/useVersionUpdate';
 import { useAnnouncementListener } from '../composables/useAnnouncementListener';
+import { getUpdateMirrors, useClientSettings } from '../composables/useClientSettings';
 import AppModal from '../components/AppModal.vue';
 
 const route = useRoute();
@@ -21,14 +31,80 @@ let healthTimer: ReturnType<typeof setInterval> | null = null;
 const { hasUpdate: hasVersionUpdate } = useVersionUpdate();
 useAnnouncementListener(); // 启动公告监听
 
+const { settings } = useClientSettings();
+
 const updateInfo = ref<AppUpdateInfo | null>(null);
 const updateModalOpen = ref(false);
 const checkingUpdate = ref(false);
 const updateHint = ref('');
 const openingDownload = ref(false);
+// 应用内 updater 状态
+const inAppUpdate = ref(false); // 本次是否走应用内 updater（false=外链下载兜底）
+const updating = ref(false); // 是否正在下载/安装
+const updateProgress = ref(0); // 0-100，-1 表示进度未知
+const updateProgressText = ref('');
+const updateError = ref('');
 const updateNoteLines = computed(() =>
   (updateInfo.value?.notes || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
 );
+
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function onUpdateProgress(p: UpdateProgress) {
+  if (p.event === 'started') {
+    updateProgress.value = p.contentLength ? 0 : -1;
+    updateProgressText.value = '开始下载…';
+  } else if (p.event === 'progress') {
+    if (p.contentLength && p.contentLength > 0) {
+      const pct = Math.min(100, Math.round((p.downloaded / p.contentLength) * 100));
+      updateProgress.value = pct;
+      updateProgressText.value = `下载中 ${pct}%（${formatBytes(p.downloaded)} / ${formatBytes(p.contentLength)}）`;
+    } else {
+      updateProgress.value = -1;
+      updateProgressText.value = `已下载 ${formatBytes(p.downloaded)}`;
+    }
+  } else if (p.event === 'finished') {
+    updateProgress.value = 100;
+    updateProgressText.value = '下载完成，正在安装并重启…';
+  }
+}
+
+async function startInAppUpdate() {
+  if (updating.value) return;
+  updating.value = true;
+  updateError.value = '';
+  updateProgress.value = 0;
+  updateProgressText.value = '准备下载…';
+  try {
+    await runUpdateViaTauri(getUpdateMirrors(), onUpdateProgress);
+    // 成功后应用会自动重启，正常不会执行到这里
+  } catch (e) {
+    // 应用内更新失败 → 回退到外链下载（AC5）
+    updating.value = false;
+    inAppUpdate.value = false;
+    updateError.value =
+      '应用内更新失败，请使用浏览器下载安装包手动更新。' +
+      (e instanceof Error ? `（${e.message}）` : '');
+    if (!updateInfo.value?.download_url && !updateInfo.value?.release_page) {
+      try {
+        const fallback = await checkAppUpdate(APP_VERSION);
+        updateInfo.value = fallback;
+      } catch {
+        // 外链信息也拿不到，仅展示错误提示
+      }
+    }
+  }
+}
 
 async function checkHealth() {
   try {
@@ -40,21 +116,68 @@ async function checkHealth() {
   }
 }
 
+function setNoUpdateHint(manual: boolean) {
+  if (!manual) return;
+  updateHint.value = '已是最新版本';
+  window.setTimeout(() => {
+    updateHint.value = '';
+  }, 2500);
+}
+
 async function runUpdateCheck(manual: boolean) {
-  if (checkingUpdate.value) return;
+  if (checkingUpdate.value || updating.value) return;
   checkingUpdate.value = true;
   if (manual) updateHint.value = '正在检查更新…';
+  // 重置应用内更新临时状态
+  updateError.value = '';
+  updateProgress.value = 0;
+  updateProgressText.value = '';
+
+  // 先取授权服务器信息：提供 mandatory 标记、更新说明与外链下载兜底地址（AC5）
+  let serverInfo: AppUpdateInfo | null = null;
   try {
-    const info = await checkAppUpdate(APP_VERSION);
-    updateInfo.value = info;
-    if (info.has_update) {
+    serverInfo = await checkAppUpdate(APP_VERSION);
+  } catch {
+    serverInfo = null;
+  }
+
+  try {
+    // 优先走应用内 updater（仅桌面壳）
+    if (inTauriRuntime()) {
+      try {
+        const tauri = await checkUpdateViaTauri(getUpdateMirrors());
+        if (tauri.available) {
+          inAppUpdate.value = true;
+          updateInfo.value = {
+            current_version: tauri.currentVersion || APP_VERSION,
+            latest_version: tauri.version || serverInfo?.latest_version || '',
+            has_update: true,
+            mandatory: serverInfo?.mandatory ?? false,
+            notes: serverInfo?.notes || tauri.notes || '',
+            download_url: serverInfo?.download_url || '',
+            release_page: serverInfo?.release_page || '',
+          };
+          updateModalOpen.value = true;
+          updateHint.value = '';
+          // 复用 auto_download：非手动检查且开启自动下载时，直接开始应用内更新
+          if (!manual && settings.value.version_update.auto_download) {
+            void startInAppUpdate();
+          }
+          return;
+        }
+      } catch {
+        // updater 不可达/失败 → 回退到服务器外链判断
+      }
+    }
+
+    // 回退：用授权服务器结果走外链下载弹窗
+    if (serverInfo?.has_update) {
+      inAppUpdate.value = false;
+      updateInfo.value = serverInfo;
       updateModalOpen.value = true;
       updateHint.value = '';
-    } else if (manual) {
-      updateHint.value = '已是最新版本';
-      window.setTimeout(() => {
-        updateHint.value = '';
-      }, 2500);
+    } else {
+      setNoUpdateHint(manual);
     }
   } catch (e) {
     if (manual) {
@@ -81,6 +204,7 @@ async function goDownloadUpdate() {
 
 function dismissUpdate() {
   if (updateInfo.value?.mandatory) return;
+  if (updating.value) return; // 更新进行中不可关闭
   updateModalOpen.value = false;
 }
 
@@ -178,15 +302,55 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
         <ul v-if="updateNoteLines.length" class="update-notes">
           <li v-for="(line, i) in updateNoteLines" :key="i">{{ line }}</li>
         </ul>
-        <p class="update-tip">
+
+        <!-- 下载进度（应用内更新进行中） -->
+        <div v-if="updating" class="update-progress">
+          <div class="progress-track">
+            <div
+              class="progress-fill"
+              :class="{ indeterminate: updateProgress < 0 }"
+              :style="updateProgress >= 0 ? { width: `${updateProgress}%` } : {}"
+            ></div>
+          </div>
+          <p class="progress-text">{{ updateProgressText }}</p>
+        </div>
+
+        <!-- 提示文案：应用内 vs 外链 -->
+        <p v-else-if="inAppUpdate" class="update-tip">
+          点击「立即更新」将自动下载、校验签名并覆盖安装，安装完成后应用会自动重启（数据不会丢失）。
+        </p>
+        <p v-else class="update-tip">
           点击「前往下载」将在浏览器中打开安装包，下载完成后直接安装即可覆盖更新（数据不会丢失）。
         </p>
+
+        <p v-if="updateError" class="update-mandatory">{{ updateError }}</p>
         <p v-if="updateInfo?.mandatory" class="update-mandatory">本次为强制更新，请更新后继续使用。</p>
+
         <div class="update-actions">
-          <button v-if="!updateInfo?.mandatory" type="button" class="btn-ghost" @click="dismissUpdate">
+          <button
+            v-if="!updateInfo?.mandatory && !updating"
+            type="button"
+            class="btn-ghost"
+            @click="dismissUpdate"
+          >
             稍后
           </button>
-          <button type="button" class="btn-primary" :disabled="openingDownload" @click="goDownloadUpdate">
+          <button
+            v-if="inAppUpdate"
+            type="button"
+            class="btn-primary"
+            :disabled="updating"
+            @click="startInAppUpdate"
+          >
+            {{ updating ? '更新中…' : '立即更新' }}
+          </button>
+          <button
+            v-else
+            type="button"
+            class="btn-primary"
+            :disabled="openingDownload"
+            @click="goDownloadUpdate"
+          >
             {{ openingDownload ? '正在打开…' : '前往下载' }}
           </button>
         </div>
@@ -419,6 +583,47 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
   font-size: 0.85rem;
   font-weight: 600;
   color: #b45309;
+}
+
+.update-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.progress-track {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.08);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #0ea5e9, #0284c7);
+  transition: width 0.25s ease;
+}
+
+.progress-fill.indeterminate {
+  width: 40%;
+  animation: progress-indeterminate 1.2s infinite ease-in-out;
+}
+
+@keyframes progress-indeterminate {
+  0% {
+    margin-left: -40%;
+  }
+  100% {
+    margin-left: 100%;
+  }
+}
+
+.progress-text {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
 }
 
 .update-actions {

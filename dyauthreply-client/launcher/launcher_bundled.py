@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import json
 import multiprocessing
 import os
 import signal
+import socket
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 # Windows: set UTF-8 before any Chinese log output (cp936/cp1252 crash otherwise)
@@ -84,7 +88,93 @@ else:
     os.environ['PYTHONPATH'] = str(BACKEND)
 
 from node_runtime import configure_node_env
-from instance_lock import acquire_instance_lock
+from instance_lock import (
+    _clear_stale_lock,
+    _pid_alive,
+    _read_lock_pid,
+    acquire_instance_lock,
+)
+from core.client.lifecycle import _terminate_pid
+
+
+def _port_listening(host: str, port: int) -> bool:
+    """端口是否已有进程在监听。"""
+    try:
+        with socket.create_connection((host, port), timeout=1.0):
+            return True
+    except OSError:
+        return False
+
+
+def _is_our_client_api(host: str, port: int) -> bool:
+    """占用端口的是否为本客户端 API（用于区分旧实例残留与其它程序占用）。"""
+    url = f'http://{host}:{port}/api/client/v1/health'
+    try:
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            if resp.status != 200:
+                return False
+            data = json.loads(resp.read().decode('utf-8'))
+            return bool(data.get('ok')) and data.get('service') == 'dyauthreply-client'
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError):
+        return False
+
+
+def _preempt_stale_instance(data_dir: Path, host: str, port: int) -> None:
+    """启动 API 前抢占端口/锁。
+
+    - 端口空闲：直接返回。
+    - 端口被本客户端旧实例占用（更新覆盖安装等场景的残留）：读 launcher.lock 持锁 PID
+      终止旧实例，轮询等待端口释放并清理 stale 锁后返回。
+    - 端口被其它程序占用：打印明确错误并退出（不静默失败）。
+    """
+    if not _port_listening(host, port):
+        return
+
+    if not _is_our_client_api(host, port):
+        print(
+            f'[launcher_bundled] 错误: {host}:{port} 已被其它程序占用，无法启动后端 API。'
+            ' 请关闭占用该端口的程序后重试。',
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
+
+    print(
+        f'[launcher_bundled] 检测到旧实例仍在 {host}:{port} 运行，开始抢占...',
+        flush=True,
+    )
+
+    lock_path = data_dir / 'launcher.lock'
+    holder_pid = _read_lock_pid(lock_path)
+    if holder_pid and holder_pid != os.getpid() and _pid_alive(holder_pid):
+        print(f'[launcher_bundled] 终止旧实例进程树 PID={holder_pid}', flush=True)
+        _terminate_pid(holder_pid)
+    else:
+        print(
+            '[launcher_bundled] 警告: 未能从 launcher.lock 读取到有效的旧实例 PID，'
+            '仅等待端口自行释放。',
+            file=sys.stderr,
+            flush=True,
+        )
+
+    deadline = time.time() + 15.0
+    while time.time() < deadline:
+        if not _port_listening(host, port):
+            print('[launcher_bundled] 旧实例已退出，端口已释放。', flush=True)
+            _clear_stale_lock(lock_path)
+            return
+        time.sleep(0.5)
+
+    print(
+        f'[launcher_bundled] 错误: 等待旧实例释放 {host}:{port} 超时（15s）。'
+        f' 请手动结束旧进程或删除 {lock_path} 后重试。',
+        file=sys.stderr,
+        flush=True,
+    )
+    sys.exit(1)
+
+
+_preempt_stale_instance(data_dir, args.host, args.port)
 
 _instance_lock = acquire_instance_lock(data_dir)
 if _instance_lock is None:

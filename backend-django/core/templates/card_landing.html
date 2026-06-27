@@ -3,30 +3,23 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- 抖音/微信等抓取卡片元信息：优先读 <title> 与 name=description（参考开源 huoxing-links 做法），
+       og:* 作兼容补充。落地页**不做整页跳转**，避免爬虫执行跳转脚本后抓到目标站信息，
+       从而保证卡片标题/描述来自本页（= 卡片自定义的标题/描述）。 -->
   <title>{{ title }}</title>
   <meta name="description" content="{{ description }}" />
 
-  <!-- Open Graph：抖音/微信等抓取此处渲染卡片 -->
   <meta property="og:type" content="website" />
   <meta property="og:title" content="{{ title }}" />
   <meta property="og:description" content="{{ description }}" />
   {% if cover_url %}<meta property="og:image" content="{{ cover_url }}" />{% endif %}
   <meta property="og:url" content="{{ landing_url }}" />
 
-  <!-- Twitter Card 兜底 -->
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="{{ title }}" />
   <meta name="twitter:description" content="{{ description }}" />
   {% if cover_url %}<meta name="twitter:image" content="{{ cover_url }}" />{% endif %}
 
-  {% if not is_crawler %}
-  <!-- 真人访问：自动跳转到真实链接（爬虫不输出，避免抓成目标站信息） -->
-  <meta http-equiv="refresh" content="0; url={{ target_url }}" />
-  <script>
-    // 优先用 JS 跳转（replace 不留历史记录）
-    window.location.replace({{ target_url_json|safe }});
-  </script>
-  {% endif %}
   <style>
     body {
       margin: 0;
@@ -74,11 +67,29 @@
   </style>
 </head>
 <body>
-  <div class="card">
+  <div class="card" id="card" role="button" tabindex="0">
     {% if cover_url %}<img src="{{ cover_url }}" alt="" />{% endif %}
     <h1>{{ title }}</h1>
     {% if description %}<p>{{ description }}</p>{% endif %}
-    <a href="{{ target_url }}">正在跳转，点此继续 →</a>
+    <a id="go" href="{{ target_url }}">点击继续 →</a>
   </div>
+  <script>
+    // 不做整页跳转（避免爬虫执行后抓到目标站信息）。
+    // 真人访问：尝试 window.open 打开真实链接（新开上下文，当前落地页 URL 不变）；
+    // 被拦截或失败时，整页点击兜底跳转。
+    (function () {
+      var target = {{ target_url_json|safe }};
+      function go() { try { window.location.href = target; } catch (e) {} }
+      // 首次进入尝试新开窗口；移动端/抖音内置浏览器多会被拦，靠点击兜底
+      try { window.open(target, '_blank'); } catch (e) {}
+      var card = document.getElementById('card');
+      if (card) {
+        card.addEventListener('click', function (ev) {
+          if (ev.target && ev.target.id === 'go') return; // <a> 自身处理
+          go();
+        });
+      }
+    })();
+  </script>
 </body>
 </html>

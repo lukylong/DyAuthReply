@@ -19,12 +19,14 @@
   <meta name="twitter:description" content="{{ description }}" />
   {% if cover_url %}<meta name="twitter:image" content="{{ cover_url }}" />{% endif %}
 
-  <!-- 真人访问：自动跳转到真实链接 -->
+  {% if not is_crawler %}
+  <!-- 真人访问：自动跳转到真实链接（爬虫不输出，避免抓成目标站信息） -->
   <meta http-equiv="refresh" content="0; url={{ target_url }}" />
   <script>
     // 优先用 JS 跳转（replace 不留历史记录）
     window.location.replace({{ target_url_json|safe }});
   </script>
+  {% endif %}
   <style>
     body {
       margin: 0;

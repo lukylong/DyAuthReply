@@ -132,6 +132,17 @@ def card_landing(request, card_id):
         0x2029: '\\u2029',
     })
 
+    # 识别爬虫/链接预览抓取器（抖音/字节/微信/常见 bot）：只给 og、不输出跳转脚本，
+    # 避免 0 秒跳转让爬虫跟到 target_url 抓成目标站信息（导致卡片中间显示网址而非描述）。
+    ua = (request.META.get('HTTP_USER_AGENT') or '').lower()
+    _BOT_MARKERS = (
+        'bot', 'spider', 'crawl', 'bytespider', 'bytedance', 'toutiao',
+        'douyin', 'aweme', 'facebookexternalhit', 'twitterbot', 'slackbot',
+        'telegrambot', 'whatsapp', 'linepreview', 'embedly', 'preview',
+        'micromessenger',  # 微信内置浏览器/抓取
+    )
+    is_crawler = any(m in ua for m in _BOT_MARKERS)
+
     return render(request, 'card_landing.html', {
         'title': card.title,
         'description': card.description or '',
@@ -140,6 +151,7 @@ def card_landing(request, card_id):
         'target_url': target_url,
         # 供 <script>location.replace(...) 安全注入（json 编码 + HTML 敏感字符转义）
         'target_url_json': target_url_json,
+        'is_crawler': is_crawler,
     })
 
 

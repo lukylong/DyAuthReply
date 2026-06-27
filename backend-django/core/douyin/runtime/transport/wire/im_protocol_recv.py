@@ -545,8 +545,6 @@ def parse_content_json(content_json: str) -> ParsedContent:
         return ParsedContent("video", "[视频]", {"kind": "video"})
 
     # 未知：text 空，由上层过滤丢弃
-    # 【诊断】打印未识别消息的完整原始结构，用于补充解析逻辑（如伪装卡片/分享卡片）。
-    logger.info("[wire.recv][诊断] 未识别消息 content_json=%s", content_json)
     return ParsedContent("other", "")
 
 
@@ -598,6 +596,24 @@ def decode_im_message(buf: bytes) -> Optional[IMMessage]:
 
     parsed = parse_content_json(content_json)
     text = parsed.text
+    # 未识别(text 为空且非系统)消息：打印 msg_type + 字段号 + ext_kv + content_json 摘要，
+    # 便于排查新消息类型（如企业卡片）。content_json 截断，避免 base64 封面刷屏。
+    if not text and parsed.content_type not in ("system",):
+        try:
+            _ext_dump = []
+            for _raw in (fields.get(_MSG_F_EXT_KV) or []):
+                if isinstance(_raw, (bytes, bytearray)) and _raw:
+                    _kv = {}
+                    for _fn, _wt2, _v in iter_fields(_raw):
+                        _kv.setdefault(_fn, []).append(_v)
+                    _ext_dump.append((get_first_str(_kv, 1), get_first_str(_kv, 2)))
+            _field_nums = sorted(fields.keys())
+        except Exception:  # noqa: BLE001
+            _ext_dump, _field_nums = [], []
+        logger.info(
+            "[wire.recv] 未识别消息 msg_type=%s content_type=%s field_nums=%s ext_kv=%s content_json=%.300s",
+            msg_type, parsed.content_type, _field_nums, _ext_dump, content_json,
+        )
     ext_list = fields.get(_MSG_F_EXT_KV) or []
     
     # Try to extract true server creation time from ext_kv

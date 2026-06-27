@@ -107,6 +107,8 @@ def encode_send_message_request_pb2(
     s_v_web_id: str = "",
     user_agent: str = _DEFAULT_UA,
     client_msg_id: Optional[str] = None,
+    content_override: Optional[dict] = None,
+    message_type: int = 7,
 ) -> tuple[bytes, str, int]:
     """构造 send_message 的 HTTP protobuf body（含完整 bd-ticket-guard 鉴权）。
 
@@ -127,7 +129,7 @@ def encode_send_message_request_pb2(
     """
     if not conversation_id:
         raise ValueError("conversation_id 不能为空")
-    if not text:
+    if not text and content_override is None:
         raise ValueError("text 不能为空")
     prik = bd_ticket.get("private_key") or ""
     if not prik:
@@ -140,12 +142,16 @@ def encode_send_message_request_pb2(
         SEND_MESSAGE_CMD_ID, bd_ticket, s_v_web_id=s_v_web_id, user_agent=user_agent
     )
 
-    msg_content = {
-        "mention_users": [],
-        "aweType": 700,
-        "richTextInfos": [],
-        "text": text,
-    }
+    # content_override：发送非文本消息（如伪装卡片），直接用调用方给的完整 content dict。
+    if content_override is not None:
+        msg_content = content_override
+    else:
+        msg_content = {
+            "mention_users": [],
+            "aweType": 700,
+            "richTextInfos": [],
+            "text": text,
+        }
     content_json = json.dumps(msg_content, ensure_ascii=False, separators=(",", ":"))
 
     body = req.body.send_message_body
@@ -156,7 +162,7 @@ def encode_send_message_request_pb2(
     body.ext.append(R.ExtValue(key="s:client_message_id", value=cm_id))
     body.ext.append(R.ExtValue(key="s:stime", value=str(_now_ms())))
     body.ext.append(R.ExtValue(key="s:mentioned_users", value=""))
-    body.message_type = 7
+    body.message_type = int(message_type)
     body.ticket = ticket or ""
     body.client_message_id = cm_id
 

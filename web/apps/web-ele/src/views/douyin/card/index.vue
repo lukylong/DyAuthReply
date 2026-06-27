@@ -185,7 +185,7 @@ onMounted(load);
 </script>
 
 <template>
-  <Page title="卡片管理" description="卡片用于伪装链接卡片自动回复：抖音抓取落地页 og 信息渲染卡片，用户点击跳转到目标链接">
+  <Page>
     <ElSpace wrap class="toolbar">
       <ElInput
         v-model="search.title"

@@ -10,6 +10,7 @@
   <meta name="description" content="{{ description }}" />
 
   <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="{{ description|default:title }}" />
   <meta property="og:title" content="{{ title }}" />
   <meta property="og:description" content="{{ description }}" />
   {% if cover_url %}<meta property="og:image" content="{{ cover_url }}" />{% endif %}

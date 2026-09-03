@@ -95,16 +95,32 @@ class Command(BaseCommand):
                 bd_ticket = get_bd() or {}
             except Exception as e:  # noqa: BLE001
                 self.stderr.write(self.style.WARNING(f"get_bd_ticket 失败: {e}"))
-        if not bd_ticket.get('private_key'):
-            self.stderr.write(self.style.ERROR("缺少 bd_ticket.private_key，无法签名发送（账号登录态可能不全）"))
+        missing_bd = [
+            key for key in ('private_key', 'ticket', 'ts_sign') if not bd_ticket.get(key)
+        ]
+        if missing_bd:
+            self.stderr.write(self.style.ERROR(
+                f"缺少 bd-ticket-guard 凭证: {', '.join(missing_bd)}"
+            ))
             return
 
         s_v_web_id = ''
         try:
-            cookies = await signer.get_cookies()
-            s_v_web_id = (cookies or {}).get('s_v_web_id', '')
+            cookies = {str(k).lower(): str(v) for k, v in (await signer.get_cookies()).items()}
+            s_v_web_id = cookies.get('s_v_web_id', '')
         except Exception:  # noqa: BLE001
             pass
+        if not s_v_web_id:
+            self.stderr.write(self.style.ERROR("缺少 s_v_web_id，无法组装 verifyFp/fp"))
+            return
+
+        try:
+            identity_token, identity_device_id = (
+                await transport._get_identity_security_token(account)
+            )
+        except Exception as e:  # noqa: BLE001
+            self.stderr.write(self.style.ERROR(f"身份安全 token 获取失败: {e}"))
+            return
 
         from core.douyin.runtime.transport.http_protocol import _ENDPOINTS, _BASE_IM_HEADERS
         endpoint = _ENDPOINTS['send_message']
@@ -135,6 +151,8 @@ class Command(BaseCommand):
                     s_v_web_id=s_v_web_id,
                     content_override=card_i,
                     message_type=mt,
+                    identity_security_token=identity_token,
+                    identity_security_device_id=identity_device_id,
                 )
             except Exception as e:  # noqa: BLE001
                 self.stderr.write(self.style.ERROR(f"  type={mt} 编码失败: {e}"))
@@ -147,6 +165,8 @@ class Command(BaseCommand):
                     body=body,
                     headers=_BASE_IM_HEADERS,
                     use_xhr=True,
+                    base_params='',
+                    post_sign_params={'verifyFp': s_v_web_id, 'fp': s_v_web_id},
                 )
             except Exception as e:  # noqa: BLE001
                 self.stderr.write(self.style.ERROR(f"  type={mt} 请求异常: {e}"))
@@ -180,4 +200,3 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(
             "全部发送完毕。请到对方抖音查看：哪条 type 渲染成了卡片（标题带 (tN)、描述带 [type=N] 便于辨认）。"
         ))
-

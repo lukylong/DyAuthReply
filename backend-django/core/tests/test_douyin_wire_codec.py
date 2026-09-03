@@ -112,11 +112,11 @@ class IMProtocolEnvelopePrefixTests(unittest.TestCase):
     sniff 报告里 send_message 请求 hex 前缀（37 字节）：
         08 64                              cmd_id=100
         10 9d 4e                           seq_id=10013
-        1a 05 31 2e 33 2e 30               sdk_version="1.3.0"
+        1a 05 30 2e 31 2e 38               sdk_version="0.1.8"
         22 00                              token=""
         28 03                              field 5 = 3
         30 00                              field 6 = 0
-        3a 0e 66 31 65 39 36 64 65 3a 6d 61 73 74 65 72   build_id="f1e96de:master"
+        3a 19 ...                           build_id="0d50935:feat/pc-im-groupB"
         42 ?? ??                           field 8 wrapper (length follows)
 
     无论 text / client_msg_id 怎么变，这 35 字节 + `0x42` 都不变。
@@ -126,11 +126,11 @@ class IMProtocolEnvelopePrefixTests(unittest.TestCase):
     EXPECTED_PREFIX = bytes.fromhex(
         "08 64 "
         "10 9d 4e "
-        "1a 05 31 2e 33 2e 30 "
+        "1a 05 30 2e 31 2e 38 "
         "22 00 "
         "28 03 "
         "30 00 "
-        "3a 0e 66 31 65 39 36 64 65 3a 6d 61 73 74 65 72".replace(" ", "")
+        "3a 19 30 64 35 30 39 33 35 3a 66 65 61 74 2f 70 63 2d 69 6d 2d 67 72 6f 75 70 42".replace(" ", "")
     )
 
     def test_envelope_prefix_matches_sniff(self):
@@ -153,13 +153,12 @@ class IMProtocolEnvelopePrefixTests(unittest.TestCase):
             conversation_id="0:1:80549827440:3061476426516824",
             text="hi",
         )
-        # 找到 0x42 之后的 length varint，跳过它，应当看到 0xA2 0x06
-        idx = body.find(b"\x42", 30)
-        self.assertGreater(idx, 0)
-        # length varint
-        _len, after_len = decode_varint(body, idx + 1)
-        self.assertEqual(body[after_len], 0xA2)
-        self.assertEqual(body[after_len + 1], 0x06)
+        # 新 build_number 末尾含 ASCII "B" (0x42)，不能再用 bytes.find
+        # 定位 envelope field 8，必须按 protobuf 字段迭代。
+        field8 = next(value for number, _wire, value in iter_fields(body) if number == 8)
+        self.assertIsInstance(field8, bytes)
+        self.assertEqual(field8[0], 0xA2)
+        self.assertEqual(field8[1], 0x06)
 
     def test_send_request_validates_inputs(self):
         with self.assertRaises(ValueError):

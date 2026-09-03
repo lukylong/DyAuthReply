@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Optional
 
@@ -56,8 +57,6 @@ from core.douyin.runtime.transport.wire import (
     encode_get_by_conversation_request,
     encode_get_by_user_request,
     encode_list_conversations_request,
-    encode_send_message_request,
-    encode_send_message_request_from_template,
 )
 from core.douyin.runtime.transport.wire.codec import get_first_int
 
@@ -271,9 +270,35 @@ _ENDPOINTS: dict[str, dict[str, str]] = {
 _BASE_IM_HEADERS: dict[str, str] = {
     "content-type": "application/x-protobuf",
     "accept": "application/x-protobuf",
-    "origin": "https://creator.douyin.com",
-    "referer": "https://creator.douyin.com/",
+    "origin": "https://www.douyin.com",
+    "referer": "https://www.douyin.com/",
 }
+
+IDENTITY_SECURITY_URL = (
+    "https://www.douyin.com/passport/safe/get_identity_security_token/"
+)
+_IDENTITY_SECURITY_REFERER = "https://www.douyin.com/chat?isPopup=1"
+
+
+def identity_security_base_params(trace_id: str) -> str:
+    """构造 PC IM 身份安全 token 查询串（不含 msToken/a_bogus）。
+
+    字段顺序必须与浏览器一致；JsSignProvider 随后追加 msToken
+    并对整串计算 a_bogus。
+    """
+    return "&".join([
+        "passport_jssdk_version=4.2.3",
+        "passport_jssdk_type=lite",
+        "is_from_ttaccountsdk=1",
+        "aid=6383",
+        "language=zh",
+        "scene=web_im",
+        "auto_retry_req=0",
+        "skip_verify=false",
+        "identity_token_force_get_tag=0",
+        f"biz_trace_id={trace_id}",
+        "id_token_version=1.2.10",
+    ])
 
 # creator.douyin.com 域下的 JSON 业务接口（user_detail 等）共用 headers
 _BASE_CREATOR_JSON_HEADERS: dict[str, str] = {
@@ -432,6 +457,8 @@ class HttpProtocolTransport(AccountTransport):
         # 信息隔离防线：start() 绑定该实例服务的账号 id；之后所有 verb 校验传入账号
         # 必须与绑定账号一致，杜绝误用他账号 transport 造成消息穿插。
         self._bound_account_id: Optional[str] = None
+        # key=account_id, value=(identity token, device id, monotonic timestamp)
+        self._identity_security_cache: dict[str, tuple[str, str, float]] = {}
 
     def _assert_account_bound(self, account: "DouyinAccount", verb: str) -> None:
         """校验传入账号与本 transport 绑定账号一致（信息隔离硬约束）。"""
@@ -1427,6 +1454,65 @@ class HttpProtocolTransport(AccountTransport):
         return 0
 
     # ---------------- 协议路径实现 (Phase 3.2b) ----------------
+    async def _get_identity_security_token(
+        self,
+        account: "DouyinAccount",
+        *,
+        force: bool = False,
+    ) -> tuple[str, str]:
+        """获取 PC IM 发送必需的短期 identity-security 凭证。"""
+        account_id = str(account.id)
+        now = time.monotonic()
+        cached = self._identity_security_cache.get(account_id)
+        if cached and not force and now - cached[2] < 240:
+            return cached[0], cached[1]
+
+        try:
+            cookies = await self._sign.get_cookies()
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"读取身份安全 Cookie 失败: {exc}") from exc
+        cookies = {str(k).lower(): str(v) for k, v in (cookies or {}).items()}
+        trace_id = uuid.uuid4().hex[:8]
+        headers = {
+            "accept": "application/json, text/javascript",
+            "referer": _IDENTITY_SECURITY_REFERER,
+            "x-tt-passport-csrf-token": (
+                cookies.get("passport_csrf_token", "")
+                or cookies.get("passport_csrf_token_default", "")
+            ),
+            "x-tt-passport-trace-id": trace_id,
+        }
+        resp: SignedResponse = await self._sign.signed_fetch(
+            method="GET",
+            url=IDENTITY_SECURITY_URL,
+            headers=headers,
+            base_params=identity_security_base_params(trace_id),
+        )
+        if not resp.ok:
+            raise RuntimeError(f"身份安全 token http status={resp.status}")
+        try:
+            payload = json.loads(resp.text or resp.content.decode("utf-8") or "{}")
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("身份安全 token 接口返回不可解析响应") from exc
+        data = payload.get("data") or {}
+        token = str(data.get("identity_security_token") or "")
+        device_id = str(data.get("device_id") or "")
+        if payload.get("message") not in (None, "success") or not token:
+            missing = [
+                name for name in (
+                    "uifid",
+                    "passport_mfa_token",
+                    "x_tt_token",
+                    "passport_csrf_token",
+                ) if not cookies.get(name)
+            ]
+            hint = ""
+            if data.get("error_code") == 3 and missing:
+                hint = f"; 当前会话缺少/未同步 Cookie: {', '.join(missing)}"
+            raise RuntimeError(f"身份安全 token 获取失败: {payload!r}{hint}")
+        self._identity_security_cache[account_id] = (token, device_id, now)
+        return token, device_id
+
     async def _post_send_message(
         self,
         account: "DouyinAccount",
@@ -1463,47 +1549,36 @@ class HttpProtocolTransport(AccountTransport):
             except Exception:  # noqa: BLE001
                 bd_ticket = {}
 
-        template_body = await _load_latest_successful_send_template(
-            str(account.id),
-            conversation_id,
+        missing_bd = [
+            key for key in ("private_key", "ticket", "ts_sign") if not bd_ticket.get(key)
+        ]
+        if missing_bd:
+            raise RuntimeError(
+                f"{log_tag} 缺少 bd-ticket-guard 凭证: {', '.join(missing_bd)}"
+            )
+
+        from core.douyin.runtime.transport.wire.im_send_pb2 import (
+            encode_send_message_request_pb2,
         )
 
-        encoder = "legacy"
-        if bd_ticket.get("private_key"):
-            from core.douyin.runtime.transport.wire.im_send_pb2 import (
-                encode_send_message_request_pb2,
-            )
+        cookies = await self._sign.get_cookies()
+        cookies = {str(k).lower(): str(v) for k, v in (cookies or {}).items()}
+        s_v_web_id = cookies.get("s_v_web_id", "")
+        if not s_v_web_id:
+            raise RuntimeError(f"{log_tag} 缺少 s_v_web_id，无法组装 verifyFp/fp")
+        identity_token, identity_device_id = await self._get_identity_security_token(account)
 
-            s_v_web_id = ""
-            try:
-                cookies = await self._sign.get_cookies()
-                s_v_web_id = (cookies or {}).get("s_v_web_id", "")
-            except Exception:  # noqa: BLE001
-                s_v_web_id = ""
-
-            # thread_sensitive=False：protobuf 编码 + EC request_sign 为 CPU 计算、不碰 ORM，
-            # 放独立线程池避免阻塞 Django 共享线程。
-            body, client_msg_id, seq_id = await sync_to_async(
-                encode_send_message_request_pb2, thread_sensitive=False
-            )(
-                conversation_id=conversation_id,
-                text=normalized,
-                bd_ticket=bd_ticket,
-                s_v_web_id=s_v_web_id,
-            )
-            encoder = "pb2"
-        elif template_body:
-            body, client_msg_id, seq_id = encode_send_message_request_from_template(
-                template_body=template_body,
-                conversation_id=conversation_id,
-                text=normalized,
-            )
-            encoder = "template"
-        else:
-            body, client_msg_id, seq_id = encode_send_message_request(
-                conversation_id=conversation_id,
-                text=normalized,
-            )
+        body, client_msg_id, seq_id = await sync_to_async(
+            encode_send_message_request_pb2, thread_sensitive=False
+        )(
+            conversation_id=conversation_id,
+            text=normalized,
+            bd_ticket=bd_ticket,
+            s_v_web_id=s_v_web_id,
+            identity_security_token=identity_token,
+            identity_security_device_id=identity_device_id,
+        )
+        encoder = "pb2-2026"
 
         logger.info(
             f"[transport.http] {log_tag} → POST {endpoint['url']} "
@@ -1518,6 +1593,8 @@ class HttpProtocolTransport(AccountTransport):
             body=body,
             headers=_BASE_IM_HEADERS,
             use_xhr=True,
+            base_params="",
+            post_sign_params={"verifyFp": s_v_web_id, "fp": s_v_web_id},
         )
 
         if not resp.ok:

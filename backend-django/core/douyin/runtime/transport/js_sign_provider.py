@@ -20,11 +20,12 @@
     bd_ticket(priK/...)  —— 仅「发送/建会话」需要；监控只读接口可不带
 
 signed_fetch 收到的 url 是**裸 endpoint**（无 query），本类负责补齐：
-    最终 query = host 公共参数 + msToken + a_bogus
+    最终 query = 签名前参数 + msToken + a_bogus + 签名后参数
     imapi 写接口额外注入 bd-ticket-guard 头（有 bd_ticket 凭证时）
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import suppress
 from typing import TYPE_CHECKING, Optional, Union
@@ -56,6 +57,7 @@ _IMAPI_WRITE_PATHS = (
     "/v2/conversation/create",
     "/v1/conversation/create",
 )
+_IDENTITY_SECURITY_PATH = "/passport/safe/get_identity_security_token/"
 
 
 class JsSignProvider:
@@ -159,6 +161,7 @@ class JsSignProvider:
         use_xhr: bool = False,  # noqa: ARG002  本地无浏览器，xhr/fetch 区分无意义
         base_params: Optional[str] = None,
         extra_params: Optional[dict[str, str]] = None,
+        post_sign_params: Optional[dict[str, str]] = None,
     ) -> SignedResponse:
         """JS 签名 + httpx 直发。
 
@@ -168,6 +171,8 @@ class JsSignProvider:
                 aid=2906、app_name=aweme_creator_platform），需用本参数传入续期专用参数集。
             extra_params: 追加到查询串的额外键值（值会做 URL 编码），如 certificate=<base64(CSR)>。
                 这些参数会一并参与 a_bogus 计算，确保与浏览器一致。
+            post_sign_params: 在 a_bogus 后追加、不参与签名的键值。PC IM send
+                的 verifyFp/fp 必须放在这里以保持浏览器字段顺序。
 
         Raises:
             SignerUnavailable: 引擎/客户端未就绪、签名抛错或 httpx 网络异常（上层 fallback）。
@@ -186,7 +191,7 @@ class JsSignProvider:
         #  → ④ dy_ab.js 对最终查询串算 a_bogus（extra_params 一并入参，与浏览器对齐）
         base = base_params if base_params is not None else _common_params_for(host, self._user_agent)
         token = resolve_mstoken(self._cookies)
-        params_with_token = f"{base}&msToken={token}"
+        params_with_token = f"{base}&msToken={token}" if base else f"msToken={token}"
         if extra_params:
             extra = "&".join(f"{k}={quote(str(v), safe='')}" for k, v in extra_params.items())
             params_with_token = f"{params_with_token}&{extra}"
@@ -214,6 +219,11 @@ class JsSignProvider:
         except js_signer.JsSignerUnavailable as e:
             raise SignerUnavailable(f"JS a_bogus 失败: {e}") from e
         final_url = f"{url}?{params_with_token}&a_bogus={a_bogus}"
+        if post_sign_params:
+            post = "&".join(
+                f"{k}={quote(str(v), safe='')}" for k, v in post_sign_params.items()
+            )
+            final_url = f"{final_url}&{post}"
 
         # 组装请求头：默认 + UA + Cookie + （imapi 写接口）bd-ticket-guard
         req_headers: dict[str, str] = {
@@ -262,32 +272,40 @@ class JsSignProvider:
     async def _maybe_inject_bd_ticket(
         self, req_headers: dict[str, str], *, host: str, path: str
     ) -> None:
-        """对 imapi 写接口注入 bd-ticket-guard 头（仅当持有 priK/ticket/ts_sign）。
+        """对 PC IM 写接口注入完整 bd-ticket-guard 头。
 
-        TODO(待 clone 后核对 DouYin_Spider/builder/header.py 与 douyin_api.send_msg)：
-          确认完整头集合——除 `bd-ticket-guard-client-data` 外，是否还需要
-          `bd-ticket-guard-version` / `bd-ticket-guard-ree-public-key` / `-web-version`。
-          当前先注入最核心的 client-data，gate 验证后据抓包补齐。
+        本地当前使用 ECDSA 回退算法（web-sign-type=0）；该分支不需要
+        服务端 ECDH 证书，与参考实现的 fallback 分支一致。
         """
         is_write = "imapi.douyin.com" in host and any(path.startswith(p) for p in _IMAPI_WRITE_PATHS)
-        if not is_write:
+        is_identity = "www.douyin.com" in host and path == _IDENTITY_SECURITY_PATH
+        if not (is_write or is_identity):
             return
         prik = self._bd_ticket.get("private_key") or ""
         ticket = self._bd_ticket.get("ticket") or ""
         ts_sign = self._bd_ticket.get("ts_sign") or ""
         if not (prik and ticket and ts_sign):
             logger.warning(
-                f"[sign.js] imapi 写接口缺 bd-ticket 凭证（priK/ticket/ts_sign），"
-                f"发送大概率被拒。account={self._account_id} path={path}"
+                f"[sign.js] 强校验接口缺 bd-ticket 凭证（priK/ticket/ts_sign），"
+                f"account={self._account_id} path={path}"
             )
             return
         try:
-            client_data = await sync_to_async(
-                js_signer.build_bd_ticket_client_data, thread_sensitive=False
-            )(path, ticket, ts_sign, prik)
+            client_data, ree_key = await asyncio.gather(
+                sync_to_async(js_signer.build_bd_ticket_client_data, thread_sensitive=False)(
+                    path, ticket, ts_sign, prik
+                ),
+                sync_to_async(js_signer.get_ree_key, thread_sensitive=False)(prik),
+            )
         except js_signer.JsSignerUnavailable as e:
             raise SignerUnavailable(f"bd-ticket-guard 签名失败: {e}") from e
         req_headers["bd-ticket-guard-client-data"] = client_data
+        req_headers["bd-ticket-guard-ree-public-key"] = ree_key
+        req_headers["bd-ticket-guard-version"] = "2"
+        req_headers["bd-ticket-guard-web-version"] = (
+            "1" if ts_sign.startswith("ts.1") else "2"
+        )
+        req_headers["bd-ticket-guard-web-sign-type"] = "0"
 
     # ---------------- cookie / 凭证 ----------------
     async def get_cookies(self, *, domain_contains: str = "douyin.com") -> dict[str, str]:  # noqa: ARG002
@@ -317,7 +335,7 @@ class JsSignProvider:
     def get_bd_ticket(self) -> dict[str, str]:
         """返回完整 bd-ticket 凭证（private_key/ticket/ts_sign/client_cert）。
 
-        供 pb2 发送编码器组装 Request.token/ts_sign/sdk_cert/reuqest_sign 使用。
+        供 HTTP bd-ticket-guard 头签名使用；新 protobuf envelope 不再嵌入它们。
         """
         return dict(self._bd_ticket)
 

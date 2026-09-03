@@ -10,7 +10,7 @@ vendored 自 cv-cat/DouYin_Spider（static/dy_ab.js），用 PyExecJS 在 Node �
     get_ab(query, data="")              -> a_bogus（web 公共参数签名）
     get_req_sign(payload, prik)         -> bd-ticket-guard 的 req_sign（私信发送/建会话必需）
     get_ree_key(prik)                   -> ree_key
-    build_bd_ticket_client_data(...)    -> bd-ticket-guard-client-data 头的值（base64url）
+    build_bd_ticket_client_data(...)    -> bd-ticket-guard-client-data 头的值（base64）
 
 调用约定严格对照 DouYin_Spider/utils/dy_util.py（已被其作者验证可用）：
     dy_js.call('get_ab', query, data)
@@ -544,12 +544,12 @@ def build_bd_ticket_client_data(
     *,
     timestamp: Optional[int] = None,
 ) -> str:
-    """生成 `bd-ticket-guard-client-data` 头的值（base64url(JSON)）。
+    """生成 `bd-ticket-guard-client-data` 头的值（标准 base64(JSON)）。
 
     完整复刻 DouYin_Spider/utils/dy_util.py:generate_bd_ticket_client_data：
         res_sign = f"ticket={ticket}&path={api}&timestamp={ts}"
         payload  = {ts_sign, req_content:"ticket,path,timestamp", req_sign, timestamp}
-        return base64.urlsafe_b64encode(json.dumps(payload, sep=(',',':')))
+        return base64.b64encode(json.dumps(payload, sep=(',',':')))
 
     Args:
         api: 接口 path（如 "/v1/message/send"）。
@@ -567,4 +567,4 @@ def build_bd_ticket_client_data(
         "timestamp": ts,
     }
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("utf-8")
+    return base64.b64encode(raw.encode("utf-8")).decode("utf-8")

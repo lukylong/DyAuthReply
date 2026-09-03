@@ -16,11 +16,11 @@
 Envelope（外层固定字段，所有 IM 接口共用）：
   field 1  varint  cmd_id            send_message=100, get_by_conversation=302...
   field 2  varint  seq_id            客户端递增序号
-  field 3  string  sdk_version       "1.3.0"
+  field 3  string  sdk_version       "0.1.8"
   field 4  string  token             空 / 鉴权 token，留空即可
   field 5  varint  ?                 sniff 抓到 3
   field 6  varint  ?                 sniff 抓到 0
-  field 7  string  build_id          "f1e96de:master" — 平台升级会变
+  field 7  string  build_id          "0d50935:feat/pc-im-groupB" — 平台升级会变
   field 8  bytes   body              内嵌业务 message
 
 SendMessageRequest (envelope.field 8 的内层 message)：
@@ -81,8 +81,8 @@ GET_CONVERSATION_LIST_CMD_ID = 1001
 
 # envelope 中的 build_id —— 跟随抖音前端打包版本，平台升级时这里会失效
 # sniff 报告里看到的值；改 build 必须同步改这里（或者上层运行时 inject）
-IM_BUILD_ID = "f1e96de:master"
-IM_SDK_VERSION = "1.3.0"
+IM_BUILD_ID = "0d50935:feat/pc-im-groupB"
+IM_SDK_VERSION = "0.1.8"
 
 # envelope field 5/6 的固定 magic（sniff 报告里所有 send 请求都用这俩值）
 _ENVELOPE_FIELD5 = 3

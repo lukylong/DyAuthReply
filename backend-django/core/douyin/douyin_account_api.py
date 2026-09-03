@@ -509,7 +509,7 @@ def import_credential(request, account_id: str, data: DouyinCredentialImportIn):
 
     - cookie：首次导入必填（监控/接收 + 发送都需要）；之后补凭据时可留空，
       留空则复用已导入的 Cookie。
-    - web_protect / keys 选填：bd-ticket-guard 凭证，仅「发送私信」需要；
+    - server_data（兼容 web_protect）/ keys 选填：bd-ticket-guard 发送凭证；
       只做消息监控可不填。本次未提供的字段会保留上次导入的旧值（增量合并）。
     """
     import logging
@@ -527,7 +527,7 @@ def import_credential(request, account_id: str, data: DouyinCredentialImportIn):
 
     account = get_object_or_404(DouyinAccount, id=account_id)
 
-    # 一键导入串：先展开为 cookie/web_protect/keys/ua，单项字段若显式提供则覆盖（单项优先）。
+    # 一键导入串：先展开为 cookie/server_data/keys/ua，旧 web_protect 字段保持兼容。
     cookie = data.cookie or ""
     web_protect = data.web_protect or ""
     keys = data.keys or ""
@@ -654,17 +654,17 @@ def import_credential(request, account_id: str, data: DouyinCredentialImportIn):
     msg = (
         "登录态已导入：可监控与发送私信。"
         if can_send
-        else "登录态已导入：可监控/接收；发送私信还需补 web_protect 与 keys（bd-ticket-guard）。"
+        else "登录态已导入：可监控/接收；发送私信还需重新登录并导入 server_data 与 keys。"
     )
     return DouyinAccountActionOut(success=True, message=msg)
 
 
 @router.post(
     "/account/check-credential",
-    response={200: "CheckCredentialOut"},
+    response={200: CheckCredentialOut},
     summary="预检凭证（不保存，用于前端提示）",
 )
-def check_credential(request, data: "CheckCredentialIn"):
+def check_credential(request, data: CheckCredentialIn):
     """预检凭证是否有效、是否重复，但不实际导入。
 
     用于前端"检查 Cookie"按钮，提前发现问题。
@@ -774,7 +774,7 @@ def check_credential(request, data: "CheckCredentialIn"):
             "nickname": bundle_nickname or None,
             "suggestions": [
                 "✓ 未检测到重复，可以安全导入",
-                f"凭证能力：{'可发送私信' if can_send else '仅接收（需补 web_protect 和 keys 才能发送）'}"
+                f"凭证能力：{'可发送私信' if can_send else '仅接收（需重新登录并导入 server_data 和 keys）'}"
             ]
         }
 

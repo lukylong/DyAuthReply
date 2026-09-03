@@ -222,11 +222,10 @@ def douyin_cleanup_stale_sessions():
 
 
 def douyin_ticket_autorenew():
-    """bd-ticket 自动续期（默认关闭）。
+    """bd-ticket 登录响应凭证年龄巡检（默认关闭）。
 
-    需 PoC（manage.py douyin_renew_poc）人工确认续期端点与字段语义后，再置
-    settings.DOUYIN_TICKET_AUTORENEW_ENABLED=True 开启；否则本任务直接跳过，
-    凭证生命周期仍由探活告警 + 引导重导入保底。
+    历史函数名为了保持 scheduler 配置兼容而保留。新流程不请求
+    user_token/v2，只统计需要重新登录并导入 server_data + keys 的账号。
 
     任务代码：scheduler.tasks.douyin_ticket_autorenew
     建议 cron：*/30 * * * *（每 30 分钟）。

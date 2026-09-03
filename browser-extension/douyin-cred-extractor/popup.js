@@ -1,9 +1,10 @@
 /**
- * 抖音登录态提取器 —— popup 逻辑 v2.0.0
+ * 抖音登录态提取器 —— popup 逻辑 v2.1.0
  *
- * 抓取三件套（与 DyAuthReply 后台「导入登录态」对话框字段一一对应）：
+ * 抓取登录态（与 DyAuthReply 后台「导入登录态」对话框对应）：
  *   cookie       —— 用 chrome.cookies API 读取，能拿到 document.cookie 取不到的 HttpOnly sessionid
- *   web_protect  —— 页面 localStorage['security-sdk/s_sdk_sign_data_key/web_protect']
+ *   server_data  —— 登录响应写入的 bd_ticket_guard_server_data Cookie
+ *   web_protect  —— 旧版 localStorage 字段（兼容保留）
  *   keys         —— 页面 localStorage['security-sdk/s_sdk_crypt_sdk']
  *
  * v2.0.0 重大修复：账号身份信息（昵称/头像/sec_uid）改为通过 creator API 获取，
@@ -12,6 +13,7 @@
 
 const LS_KEYS = 'security-sdk/s_sdk_crypt_sdk';
 const LS_WEB_PROTECT = 'security-sdk/s_sdk_sign_data_key/web_protect';
+const SERVER_DATA_STORAGE_PREFIX = 'ticket_guard_server_data_';
 
 const $ = (id) => document.getElementById(id);
 
@@ -102,13 +104,59 @@ async function collectCookies(tabUrl, cookieStoreId) {
       '无法识别当前窗口的 cookie 存储。请确认扩展已启用 cookies 权限，并在 chrome://extensions 重新加载后再试。',
     );
   }
-  const cookies = await chrome.cookies.getAll({ url: tabUrl, storeId }).catch(() => []);
+  const [cookies, domainCookies] = await Promise.all([
+    chrome.cookies.getAll({ url: tabUrl, storeId }).catch(() => []),
+    chrome.cookies.getAll({ domain: 'douyin.com', storeId }).catch(() => []),
+  ]);
   const byName = new Map();
   for (const c of cookies) {
     if (!c || !c.name) continue;
     byName.set(c.name, pickBetterCookie(byName.get(c.name), c, tabUrl));
   }
+  // server_data 可能只写在 passport/login 子域，不会出现在当前页 URL 查询结果。
+  // 只跨子域补这一个精确字段，避免把其他账号 Cookie 意外混入。
+  for (const c of domainCookies) {
+    if (c?.name !== 'bd_ticket_guard_server_data' || !c.value) continue;
+    byName.set(c.name, pickBetterCookie(byName.get(c.name), c, tabUrl));
+  }
   return [...byName.values()].map((c) => `${c.name}=${c.value}`).join('; ');
+}
+
+function decodeTicketGuardServerData(raw, source = '') {
+  if (!raw) return { raw: '', data: {}, source };
+  try {
+    const normalized = raw.replaceAll('-', '+').replaceAll('_', '/');
+    const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+    const data = JSON.parse(decodeURIComponent(escape(atob(padded))));
+    return { raw, data: data && typeof data === 'object' ? data : {}, source };
+  } catch {
+    return { raw, data: {}, source };
+  }
+}
+
+function ticketGuardServerDataFromCookie(cookie) {
+  return decodeTicketGuardServerData(
+    extractCookieField(cookie, 'bd_ticket_guard_server_data'),
+    'cookie',
+  );
+}
+
+async function loadCapturedServerData(cookieStoreId) {
+  const key = `${SERVER_DATA_STORAGE_PREFIX}${cookieStoreId || '0'}`;
+  const stored = await chrome.storage.session.get(key).catch(() => ({}));
+  const record = stored[key] || {};
+  return decodeTicketGuardServerData(String(record.value || ''), 'response_header');
+}
+
+function chooseNewestServerData(cookieData, headerData) {
+  const valid = (item) => Boolean(
+    item?.data?.ticket && item.data.ts_sign && item.data.client_cert,
+  );
+  if (!valid(headerData)) return cookieData;
+  if (!valid(cookieData)) return headerData;
+  const cookieTime = Number(cookieData.data.create_time || 0);
+  const headerTime = Number(headerData.data.create_time || 0);
+  return headerTime >= cookieTime ? headerData : cookieData;
 }
 
 /** 列出各 cookie 存储里的 sessionid，用于诊断「两号抓成一样」 */
@@ -336,10 +384,11 @@ async function fetchLoggedInAccount(tabId) {
   }
 }
 
-/** 把三件套打包成单行「一键导入串」：DYCRED1.<base64url(JSON)>。 */
-function buildBundle({ cookie, web_protect, keys, ua, sec_uid, nickname, unique_id }) {
+/** 把凭证打包成单行「一键导入串」：DYCRED1.<base64url(JSON)>。 */
+function buildBundle({ cookie, ticket_guard_server_data, web_protect, keys, ua, sec_uid, nickname, unique_id }) {
   const json = JSON.stringify({
     cookie,
+    ticket_guard_server_data: ticket_guard_server_data || '',
     web_protect,
     keys,
     ua,
@@ -371,6 +420,17 @@ function validateJsonField(raw, needKey) {
   } catch {
     return ['bad', 'JSON 解析失败'];
   }
+}
+
+function validateTicketSource(webProtect, serverData) {
+  if (serverData.raw) {
+    if (serverData.data.ticket && serverData.data.ts_sign && serverData.data.client_cert) {
+      const source = serverData.source === 'response_header' ? '响应头' : 'Cookie';
+      return ['ok', `server_data ${source} ✓`];
+    }
+    return ['bad', 'server_data 解析失败'];
+  }
+  return validateJsonField(webProtect, 'ticket');
 }
 
 function esc(s) {
@@ -534,14 +594,14 @@ async function grab() {
       return;
     }
 
-    // 强烈建议在 creator.douyin.com 抓取（必需获取发送凭证）
+    // creator 域仍用于读取账号身份与 keys；server_data 则从全 douyin.com Cookie 存储补取。
     const url = new URL(tab.url);
     if (url.hostname !== 'creator.douyin.com') {
       $('tabHint').innerHTML =
         '<b>⚠️ 建议在 creator.douyin.com 抓取</b><br>' +
         `当前页面：<b>${url.hostname}</b><br><br>` +
         '<b style="color:#ff6b00;">强烈建议</b>切换到 <b>creator.douyin.com</b> 再抓取，原因：<br>' +
-        '1. <b>web_protect / keys</b> 只在 creator 站点有（发送私信必需）<br>' +
+        '1. <b>keys</b> 需从 creator 页面 localStorage 读取（发送私信必需）<br>' +
         '2. 避免多域名 Cookie 混乱<br>' +
         '3. 后台对接的是 creator 站点<br><br>' +
         '<b>推荐页面</b>：<a href="https://creator.douyin.com/creator-micro/data/following/chat" target="_blank">creator.douyin.com/creator-micro/data/following/chat</a>（私信管理）<br>' +
@@ -562,14 +622,19 @@ async function grab() {
 
     await loadLastFingerprint(cookieStoreId);
 
-    const [cookie, ls, diag] = await Promise.all([
+    const [cookie, ls, diag, capturedServerData] = await Promise.all([
       collectCookies(tab.url, cookieStoreId),
       collectPageInfo(tab.id),
       diagnoseSessionIds(tab.url, cookieStoreId),
+      loadCapturedServerData(cookieStoreId),
     ]);
 
     const fp = accountFingerprint(cookie);
     const uidTt = extractCookieField(cookie, 'uid_tt');
+    const serverData = chooseNewestServerData(
+      ticketGuardServerDataFromCookie(cookie),
+      capturedServerData,
+    );
 
     // ===== v2.0.0 核心修复：通过 creator API 获取真实登录账号信息 =====
     const isCreator = /creator\.douyin\.com/.test(tab.url);
@@ -684,10 +749,11 @@ async function grab() {
     saveFingerprint(fp, currentNickname, cookieStoreId);
 
     $('cookie').value = cookie;
-    $('web_protect').value = ls.web_protect;
+    $('web_protect').value = ls.web_protect || serverData.raw;
     $('keys').value = ls.keys;
     $('bundle').value = buildBundle({
       cookie,
+      ticket_guard_server_data: serverData.raw,
       web_protect: ls.web_protect,
       keys: ls.keys,
       ua: ls.ua,
@@ -697,7 +763,7 @@ async function grab() {
     });
 
     setBadge($('cookieStatus'), ...validateCookie(cookie));
-    setBadge($('wpStatus'), ...validateJsonField(ls.web_protect, 'ticket'));
+    setBadge($('wpStatus'), ...validateTicketSource(ls.web_protect, serverData));
     setBadge($('keysStatus'), ...validateJsonField(ls.keys, 'ec_privateKey'));
 
     $('result').hidden = false;
@@ -720,12 +786,12 @@ async function grab() {
     flashOk(who ? `抓取成功：${who} ${srcLabel}` : '抓取成功（未读到 sessionid）');
     showToast(who ? `已抓取：${who}` : '已抓取，但未读到 sessionid');
 
-    // 发送凭证（web_protect/keys）按 origin 存于 localStorage，creator 与 www 各一份。
-    // 当前页没取到时给出明确指引（cookie 仍可用于「仅接收」导入）。
-    if (!ls.web_protect || !ls.keys) {
+    // 新流程优先用登录响应 server_data，旧 web_protect 仅作兼容。
+    if (!(serverData.data.ticket || ls.web_protect) || !ls.keys) {
       $('tabHint').innerHTML =
-        '当前页面未取到 <b>web_protect / keys</b>（发送私信所需）。Cookie 仍可用于「仅接收」导入；' +
-        '若要发送私信，请在 <b>creator.douyin.com 的「私信」页面</b>打开后再抓取（这两项按站点单独存储）。';
+        '发送凭证不完整：需要 <b>bd_ticket_guard_server_data + keys</b>。' +
+        '请重新登录抖音，再打开 <b>creator.douyin.com 私信页</b>重新抓取；' +
+        '仅 Cookie 的导入仍可用于「仅接收」。';
       $('tabHint').hidden = false;
     }
   } catch (e) {

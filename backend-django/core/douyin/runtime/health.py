@@ -409,186 +409,75 @@ def _maybe_warn_ticket_aging(account_id: str) -> None:
         title="凭证临期提醒",
         detail=(
             f"bd-ticket 已使用约 {age_hours:.1f} 小时（阈值 {warn_hours}h），"
-            f"建议尽快重新导入 web_protect/keys，避免发送私信中途失效。"
+            f"建议尽快重新登录并导入 server_data/keys，避免发送私信中途失效。"
         ),
         occurred_at=timezone.now(),
     )
     logger.info(f"[health] 凭证临期提醒 account={account_id} age={age_hours:.1f}h")
 
 
-# ──────────────────────── bd-ticket 自动续期（默认关闭，PoC 验证通过后开启） ────────────────────────
-
-# 续期端点与响应里可刷新的字段名（与 douyin_renew_poc 一致）。
-# 真实端点为 GET，需带 certificate=base64(CSR) 与 creator 专属公共参数（见 http_protocol）。
-_RENEW_URL_DEFAULT = "https://creator.douyin.com/aweme/v1/creator/im/user_token/v2/"
-_RENEW_FIELD_KEYS = ("ts_sign", "client_cert", "ticket", "token", "sdk_cert")
+# ──────────────────────── bd-ticket 登录响应凭证巡检 ────────────────────────
 
 
 def run_ticket_autorenew() -> dict:
-    """bd-ticket 自动续期（同步，scheduler 入口）。
+    """保留旧 scheduler 入口，但只做凭证年龄巡检，不再调用续期接口。
 
-    默认关闭（DOUYIN_TICKET_AUTORENEW_ENABLED=False）：PoC（douyin_renew_poc）人工确认
-    续期端点与字段语义后，才把此开关打开。关闭时直接返回，依赖 P1/P2 的探活告警保底。
-
-    任务代码：scheduler.tasks.douyin_ticket_autorenew
+    平台已把 ticket / ts_sign / client_cert 的签发移到登录响应
+    ``bd-ticket-guard-server-data``；旧 ``im/user_token/v2`` 只能返回 userid。
+    到达刷新阈值的账号会被标记为需要重新登录并导入，而不会用空响应覆盖现有凭证。
     """
     from django.conf import settings
+
     if not getattr(settings, "DOUYIN_TICKET_AUTORENEW_ENABLED", False):
-        return {"success": True, "message": "自动续期未启用（默认关闭，依赖告警保底）", "renewed": 0}
+        return {
+            "success": True,
+            "message": "旧续期端点已停用；凭证由登录响应导入，年龄巡检未启用",
+            "strategy": "login_response_reimport",
+            "renewed": 0,
+            "reimport_required": 0,
+        }
     try:
-        return asyncio.run(_autorenew_all_async())
+        return _audit_ticket_reimport_required()
     except Exception as e:  # noqa: BLE001
-        logger.error(f"[renew] 自动续期任务异常: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
+        logger.error(f"[ticket-audit] 凭证年龄巡检异常: {e}", exc_info=True)
+        return {
+            "success": False,
+            "strategy": "login_response_reimport",
+            "renewed": 0,
+            "error": str(e),
+        }
 
 
-async def _autorenew_all_async() -> dict:
-    from asgiref.sync import sync_to_async
+def _audit_ticket_reimport_required() -> dict:
+    """统计超过阈值的发送凭证，并复用现有临期告警；不发起任何网络请求。"""
     from django.conf import settings
 
     refresh_hours = int(getattr(settings, "DOUYIN_TICKET_REFRESH_AGE_HOURS", 18) or 18)
-    accounts = await sync_to_async(_load_online_accounts)()
-    renewed = 0
-    failed = 0
-    for acc in accounts:
-        account_id = str(acc.id)
-        ct = await sync_to_async(_bd_ticket_create_time)(account_id)
-        if not ct:
-            continue  # 仅接收号 / 无 bd-ticket，无需续期
-        if (time.time() - ct) / 3600.0 < refresh_hours:
-            continue  # 还没到续期阈值
-        ok = await _renew_one(acc)
-        if ok:
-            renewed += 1
-        else:
-            failed += 1
-    logger.info(f"[renew] 自动续期完成 renewed={renewed} failed={failed}")
-    return {"success": True, "renewed": renewed, "failed": failed}
+    checked = 0
+    reimport_required = 0
+    for account in _load_online_accounts():
+        account_id = str(account.id)
+        create_time = _bd_ticket_create_time(account_id)
+        if not create_time:
+            continue
+        checked += 1
+        if (time.time() - create_time) / 3600.0 < refresh_hours:
+            continue
+        reimport_required += 1
+        _maybe_warn_ticket_aging(account_id)
 
-
-async def _renew_one(account) -> bool:
-    """对单账号尝试续期：调用续期端点，解析刷新字段，写回 storage 的 _bd_ticket。
-
-    真实形态：GET user_token/v2，带 certificate=base64(CSR) 与 creator 专属公共参数。
-    缺 csr（老登录态未存）则跳过，靠告警保底。
-    """
-    import base64
-    import json
-    from asgiref.sync import sync_to_async
-    from django.conf import settings
-    from core.douyin.runtime.transport.http_protocol import (
-        CREATOR_USER_TOKEN_URL,
-        _BASE_CREATOR_JSON_HEADERS,
-        HttpProtocolTransport,
-        creator_token_base_params,
+    logger.info(
+        "[ticket-audit] 完成 checked=%s reimport_required=%s strategy=login_response_reimport",
+        checked,
+        reimport_required,
     )
-    from core.douyin.runtime.storage import load_storage_state
-    from core.douyin.runtime.transport.sign_types import SignerUnavailable
-
-    account_id = str(account.id)
-    url = getattr(settings, "DOUYIN_TICKET_RENEW_URL", _RENEW_URL_DEFAULT)
-    state = await sync_to_async(load_storage_state)(account_id) or {}
-    csr = str(((state.get("_bd_ticket") or {}).get("csr") or "")).strip()
-    if not csr:
-        prik = str(((state.get("_bd_ticket") or {}).get("private_key") or "")).strip()
-        if prik:
-            try:
-                from cryptography import x509
-                from cryptography.x509.oid import NameOID
-                from cryptography.hazmat.primitives import hashes, serialization
-                from cryptography.hazmat.primitives.serialization import load_pem_private_key
-                key = load_pem_private_key(prik.encode("utf-8"), password=None)
-                builder = x509.CertificateSigningRequestBuilder().subject_name(x509.Name([
-                    x509.NameAttribute(NameOID.COMMON_NAME, "douyin.com")
-                ]))
-                csr_obj = builder.sign(key, hashes.SHA256())
-                csr = csr_obj.public_bytes(serialization.Encoding.PEM).decode("utf-8")
-                # 写回存储以便下次直接读取
-                await sync_to_async(_write_back_bd_ticket)(account_id, {"csr": csr})
-                logger.info(f"[renew] 已成功为无 csr 的账号离线生成并补齐 ec_csr：account={account_id}")
-            except Exception as e:
-                logger.warning(f"[renew] 自动生成 csr 失败 account={account_id} err={e}")
-                return False
-        else:
-            logger.info(f"[renew] 跳过续期：account={account_id} storage 无 csr 且无私钥（仅接收账号无需续期）")
-            return False
-    certificate = base64.b64encode(csr.encode("utf-8")).decode("ascii")
-    transport = HttpProtocolTransport()
-    try:
-        await transport.start(account)
-        if not transport._signer_healthy():  # noqa: SLF001
-            return False
-        resp = await transport._sign.signed_fetch(  # noqa: SLF001
-            method="GET", url=url, body=None, headers=_BASE_CREATOR_JSON_HEADERS,
-            base_params=creator_token_base_params(getattr(account, "user_agent", "") or ""),
-            extra_params={"certificate": certificate},
-        )
-    except SignerUnavailable:
-        return False
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"[renew] 续期请求异常 account={account_id}: {e}")
-        return False
-    finally:
-        try:
-            await transport.stop(account)
-        except Exception:  # noqa: BLE001
-            pass
-
-    if not resp.ok:
-        logger.warning(f"[renew] 续期 HTTP 非 2xx account={account_id} status={resp.status}")
-        return False
-    try:
-        payload = json.loads(resp.text)
-    except Exception:  # noqa: BLE001
-        logger.warning(f"[renew] 续期响应非 JSON account={account_id}")
-        return False
-
-    fields = _extract_renew_fields(payload)
-    if not fields:
-        logger.info(f"[renew] 续期响应无可刷新字段 account={account_id}（保持告警保底）")
-        return False
-
-    ok = await sync_to_async(_write_back_bd_ticket)(account_id, fields)
-    if ok:
-        logger.info(f"[renew] ✅ 账号续期成功 account={account_id} fields={list(fields.keys())}")
-    return ok
-
-
-def _extract_renew_fields(payload) -> dict:
-    """从续期响应里抽取可写回的 bd-ticket 字段（仅取已知非空字段）。
-
-    将 v2 实测响应字段映射回 im_send_pb2 读取的 v1 字段：
-      - sdk_cert -> client_cert
-      - token -> ticket
-      - ts_sign -> ts_sign
-    """
-    out: dict[str, str] = {}
-
-    def _walk(obj):
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                lk = k.lower()
-                if lk in _RENEW_FIELD_KEYS and isinstance(v, str) and v:
-                    # 将 v2 的 sdk_cert/token 映射到 storage v1 对应的字段名
-                    if lk == "sdk_cert":
-                        target = "client_cert"
-                    elif lk == "token":
-                        target = "ticket"
-                    else:
-                        target = lk
-                    out.setdefault(target, v)
-                _walk(v)
-        elif isinstance(obj, list):
-            for it in obj:
-                _walk(it)
-
-    _walk(payload)
-    return out
-
-
-def _write_back_bd_ticket(account_id: str, fields: dict) -> bool:
-    from core.douyin.runtime.storage import update_bd_ticket
-    return update_bd_ticket(account_id, **fields)
+    return {
+        "success": True,
+        "strategy": "login_response_reimport",
+        "checked": checked,
+        "renewed": 0,
+        "reimport_required": reimport_required,
+    }
 
 
 # ──────────────────────── 僵尸会话清理 + worker 存活巡检 ────────────────────────

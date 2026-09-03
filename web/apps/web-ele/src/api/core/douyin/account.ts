@@ -171,11 +171,11 @@ export async function triggerDouyinLogoutApi(accountId: string) {
 }
 
 export interface DouyinCredentialImportInput {
-  /** 一键导入串（浏览器扩展产出，DYCRED1. 开头）；提供后自动展开为 cookie/web_protect/keys */
+  /** 一键导入串（浏览器扩展产出，DYCRED1. 开头）；自动展开 cookie/server_data/keys */
   bundle?: string;
   /** 浏览器复制的 Cookie 整行（首次导入必填，须含 sessionid；补凭据时可留空复用已导入 Cookie） */
   cookie?: string;
-  /** bd-ticket-guard 的 web_protect JSON（发送私信才需要） */
+  /** bd-ticket server_data（base64）或兼容的 web_protect JSON */
   web_protect?: string;
   /** 含 ec_privateKey 的 keys JSON（发送私信才需要） */
   keys?: string;
@@ -250,4 +250,3 @@ export async function getCredentialStatusApi() {
     '/api/core/douyin/account/credential-status',
   );
 }
-

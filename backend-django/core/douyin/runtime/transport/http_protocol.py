@@ -308,19 +308,17 @@ _BASE_CREATOR_JSON_HEADERS: dict[str, str] = {
     "referer": "https://creator.douyin.com/",
 }
 
-# bd-ticket 取/续票端点（Proxyman 实测）：GET creator.douyin.com/.../im/user_token/v2/
-# 请求需带 certificate=base64(CSR PEM) 与下方 creator 专属公共参数（device_platform=web、
-# aid=2906、app_name=aweme_creator_platform），响应返回 token / ts_sign / sdk_cert（status_code=0）。
-# 与默认 webapp/aid=6383 公共参数集不同，故单列。
-CREATOR_USER_TOKEN_URL = "https://creator.douyin.com/aweme/v1/creator/im/user_token/v2/"
+# creator 域 JSON 业务接口使用 aid=2906 的公共参数；与
+# www.douyin.com webapp/aid=6383 参数集不同。bd-ticket 凭证已改为
+# 从登录响应 bd-ticket-guard-server-data 导入，这里不再定义续期端点。
 _CREATOR_MEDIA_USER_INFO_URL = (
     "https://creator.douyin.com/web/api/media/user/info/"
 )
-_CREATOR_TOKEN_REFERER = "https://creator.douyin.com/creator-micro/data/following/chat"
+_CREATOR_API_REFERER = "https://creator.douyin.com/creator-micro/data/following/chat"
 
 
-def creator_token_base_params(user_agent: str) -> str:
-    """构造 user_token/v2 的 creator 专属公共参数串（不含 msToken / a_bogus / certificate）。
+def creator_api_base_params(user_agent: str) -> str:
+    """构造 creator JSON 业务接口的公共参数串（不含 msToken / a_bogus）。
 
     严格对照 Proxyman 抓到的浏览器真实请求字段；browser_version 取 UA 去掉 "Mozilla/" 前缀。
     """
@@ -336,7 +334,7 @@ def creator_token_base_params(user_agent: str) -> str:
         "aid=2906",
         "app_name=aweme_creator_platform",
         "device_platform=web",
-        f"referer={quote(_CREATOR_TOKEN_REFERER, safe='')}",
+        f"referer={quote(_CREATOR_API_REFERER, safe='')}",
         f"user_agent={quote(ua, safe='')}",
         "cookie_enabled=true",
         "screen_width=1920",
@@ -725,8 +723,8 @@ class HttpProtocolTransport(AccountTransport):
                 method="GET",
                 url=_CREATOR_MEDIA_USER_INFO_URL,
                 headers=_BASE_CREATOR_JSON_HEADERS,
-                # 与 user_detail / user_token 一致：creator 域用 aid=2906，勿用 webapp/6383
-                base_params=creator_token_base_params(ua),
+                # creator 域用 aid=2906，勿用 webapp/6383
+                base_params=creator_api_base_params(ua),
                 timeout_ms=10_000,
             )
         except Exception as e:  # noqa: BLE001
@@ -998,7 +996,7 @@ class HttpProtocolTransport(AccountTransport):
                 url=endpoint["url"],
                 body=body_json,
                 headers=_BASE_CREATOR_JSON_HEADERS,
-                base_params=creator_token_base_params(ua),
+                base_params=creator_api_base_params(ua),
             )
         except SignerUnavailable as e:
             # 不算 signer 重大事件 —— 主路径的 signed_fetch 仍是真正的健康标尺

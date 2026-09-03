@@ -1,15 +1,25 @@
 {
   "manifest_version": 3,
   "name": "抖音登录态提取器 (DyAuthReply)",
-  "version": "2.0.0",
-  "description": "一键抓取抖音 Cookie / web_protect / keys，用于 DyAuthReply 后台「导入登录态」。v2.0.0: 账号身份改用 creator API 验证，解决私信页抓错用户信息的问题",
+  "version": "2.1.0",
+  "description": "一键抓取抖音 Cookie / bd-ticket server_data / keys，用于 DyAuthReply 导入登录态",
   "incognito": "split",
-  "permissions": ["cookies", "scripting", "activeTab", "tabs", "storage"],
+  "permissions": [
+    "cookies",
+    "scripting",
+    "activeTab",
+    "tabs",
+    "storage",
+    "webRequest"
+  ],
   "host_permissions": [
     "*://*.douyin.com/*"
   ],
   "action": {
     "default_title": "抓取抖音登录态",
     "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
   }
 }

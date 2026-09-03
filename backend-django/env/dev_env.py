@@ -234,8 +234,8 @@ DOUYIN_PROBE_RECONFIRM_DELAY_S = float(_env('DOUYIN_PROBE_RECONFIRM_DELAY_S', '3
 # signer 半开熔断冷却秒数：失败累计达阈值后降级，冷却到期放一次试探，成功即自愈（无需重启）。
 DOUYIN_SIGNER_DEGRADE_COOLDOWN_S = float(_env('DOUYIN_SIGNER_DEGRADE_COOLDOWN_S', '60'))
 
-# 自动续期（默认关闭门控，PoC 验证通过后再开）：超过 REFRESH_AGE 小时尝试续期 bd-ticket。
-DOUYIN_TICKET_AUTORENEW_ENABLED = _env('DOUYIN_TICKET_AUTORENEW_ENABLED', 'true').lower() == 'true'
+# 历史配置名保持兼容：开启后仅做凭证年龄巡检，不再请求已退役的续期端点。
+DOUYIN_TICKET_AUTORENEW_ENABLED = _env('DOUYIN_TICKET_AUTORENEW_ENABLED', 'false').lower() == 'true'
 DOUYIN_TICKET_REFRESH_AGE_HOURS = float(_env('DOUYIN_TICKET_REFRESH_AGE_HOURS', '18'))
 
 # ---- 多 worker 分片 + 租约（P4 横向扩展，面向 200+ 账号） ----

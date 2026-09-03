@@ -156,7 +156,7 @@ class DouyinCredentialImportIn(Schema):
     bundle: Optional[str] = Field(
         None,
         description=(
-            "一键导入串（浏览器扩展产出，DYCRED1. 开头）。提供后自动展开为 cookie/web_protect/keys，"
+            "一键导入串（浏览器扩展产出，DYCRED1. 开头）。提供后自动展开为 cookie/server_data/keys，"
             "无需再逐项粘贴；与单项字段并存时，单项非空值优先。"
         ),
     )
@@ -165,7 +165,7 @@ class DouyinCredentialImportIn(Schema):
         description="浏览器复制的 Cookie 整行（首次导入必填，须含 sessionid；补凭据时可留空以复用已导入 Cookie）",
     )
     web_protect: Optional[str] = Field(
-        None, description="bd-ticket-guard 的 web_protect JSON（发送私信需要）"
+        None, description="bd-ticket server_data（base64）或兼容的 web_protect JSON（发送私信需要）"
     )
     keys: Optional[str] = Field(
         None, description="含 ec_privateKey 的 keys JSON（发送私信需要）"
@@ -187,7 +187,7 @@ class QuickCreateAccountIn(Schema):
         description="浏览器复制的 Cookie 整行（必须含 sessionid）",
     )
     web_protect: Optional[str] = Field(
-        None, description="bd-ticket-guard 的 web_protect JSON（发送私信需要）"
+        None, description="bd-ticket server_data（base64）或兼容的 web_protect JSON（发送私信需要）"
     )
     keys: Optional[str] = Field(
         None, description="含 ec_privateKey 的 keys JSON（发送私信需要）"
@@ -231,7 +231,7 @@ class CheckCredentialIn(Schema):
     """预检凭证输入"""
     bundle: Optional[str] = Field(None, description="一键导入串（DYCRED1.开头）")
     cookie: Optional[str] = Field(None, description="浏览器 Cookie")
-    web_protect: Optional[str] = Field(None, description="web_protect JSON")
+    web_protect: Optional[str] = Field(None, description="server_data（base64）或兼容 web_protect JSON")
     keys: Optional[str] = Field(None, description="keys JSON")
 
 
@@ -281,4 +281,3 @@ class WorksOut(Schema):
     items: List[WorkItemOut] = Field(default_factory=list)
     max_cursor: str = "0"
     has_more: bool = False
-

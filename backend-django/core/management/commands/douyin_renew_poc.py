@@ -1,224 +1,97 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-bd-ticket 自动续期 PoC（验证驱动，零副作用）：用现有有效 cookie(+ 私钥) 调
-`creator.douyin.com/aweme/v1/creator/im/user_token/v2`，验证抖音是否允许仅凭
-cookie/私钥**刷新** ts_sign / sdk_cert / token，从而免去反复手动重导 web_protect/keys。
+"""bd-ticket 凭证来源审计（兼容保留历史命令名）。
 
-本命令**只发请求、只打印响应、不写回任何 storage**，用于判定续期是否可行：
-  - 若响应里出现 ts_sign / sdk_cert / token / ticket 等可刷新字段 → PoC 候选通过，
-    再人工核对字段语义后，才在 health 里接入自动续期（见 plan 的 p2-renew-integrate）。
-  - 若返回 401/风控/无相关字段 → PoC 不通过，保持「探活告警 + 引导重导入」保底方案。
-
-真实请求形态（Proxyman 实测，2026-06）：
-  GET creator.douyin.com/aweme/v1/creator/im/user_token/v2/
-      ?aid=2906&app_name=aweme_creator_platform&device_platform=web&...
-      &certificate=<base64(CSR PEM)>&msToken=...&a_bogus=...
-  certificate 即 keys 里的 ec_csr（base64 后提交）；响应 status_code=0 时返回
-  token / ts_sign / sdk_cert。本命令默认就用该形态（GET + creator 公共参数 + certificate）。
-
-典型用法：
-  A) 用已导入账号验证（自动取该账号 storage 里的 csr）：
-     python manage.py douyin_renew_poc <account_id> --raw
-  B) 用抓包 Cookie 头 + CSR 文件验证：
-     python manage.py douyin_renew_poc --cookie-header "sessionid=...; ..." \
-         --ua "Mozilla/5.0 ..." --csr-file csr.pem --raw
-  其它：
-     --method POST                # 默认 GET（真实形态）；试探其它方法时可切换
-     --no-certificate             # 不带 certificate（对照试验：验证 certificate 是否必需）
-     --csr-file <file>            # 显式提供 CSR PEM（覆盖账号 storage 里的 csr）
-     --url <full_url>             # 覆盖默认端点
-     --proxy http://127.0.0.1:9090 / --insecure   # 配合 Proxyman 抓包对照
+抖音已不再通过 ``im/user_token/v2`` 返回 token / sdk_cert / ts_sign；这些字段由登录
+响应的 ``bd-ticket-guard-server-data`` 响应头或同名 Cookie 下发。本命令只在本地审计
+已保存凭证或待导入 Cookie，不发起网络请求，也不写回 storage。
 """
 from __future__ import annotations
 
-import asyncio
-import base64
 import json
+from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
 
 from core.douyin.douyin_account_model import DouyinAccount
+from core.douyin.runtime.credential import (
+    parse_bd_ticket_from_cookie,
+    parse_cookie_header,
+    parse_keys,
+    parse_ticket_guard_server_data,
+)
+from core.douyin.runtime.storage import load_storage_state
 
-# 续期响应里「可能」出现的、值得关注的刷新字段（命中即视为 PoC 候选通过）
-_RENEW_KEYS = ("ts_sign", "sdk_cert", "client_cert", "token", "ticket", "user_token")
-
-
-def _parse_cookie_header(raw: str) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for part in (raw or "").split(";"):
-        part = part.strip()
-        if not part or "=" not in part:
-            continue
-        name, _, value = part.partition("=")
-        if name.strip():
-            out[name.strip()] = value.strip()
-    return out
-
-
-def _find_renew_fields(obj, found: set[str]) -> None:
-    """递归扫描 JSON，记录命中的续期相关字段名。"""
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if k.lower() in _RENEW_KEYS and v:
-                found.add(k)
-            _find_renew_fields(v, found)
-    elif isinstance(obj, list):
-        for it in obj:
-            _find_renew_fields(it, found)
+_REQUIRED_SEND_FIELDS = ("ticket", "ts_sign", "client_cert", "private_key")
 
 
 class Command(BaseCommand):
-    help = "bd-ticket 自动续期 PoC：调 user_token/v2 验证能否用 cookie 刷新续期凭证（只读，不写回）"
+    help = "审计 bd-ticket 登录响应凭证（旧 user_token/v2 已停用；本命令不发网络请求）"
 
     def add_arguments(self, parser):
-        parser.add_argument("account_id", nargs="?", default=None,
-                            help="DouyinAccount ID（需已导入有效 cookie）；给 --cookie-header 时可省略")
-        parser.add_argument("--cookie-header", default=None, help="抓包复制的 Cookie 整行")
-        parser.add_argument("--cookie-file", default=None, help="从文件读取 Cookie 整行")
-        parser.add_argument("--ua", default=None, help="User-Agent（建议从抓包请求头复制）")
-        parser.add_argument("--proxy", default=None, help="代理地址，如 http://127.0.0.1:9090")
-        parser.add_argument("--insecure", action="store_true", help="跳过 TLS 校验（配合 Proxyman MITM）")
-        parser.add_argument("--method", choices=["POST", "GET"], default="GET", help="请求方法（默认 GET，真实形态）")
-        parser.add_argument("--url", default=None, help="续期端点（默认 user_token/v2 真实端点）")
-        parser.add_argument("--csr-file", default=None, help="CSR PEM 文件（覆盖账号 storage 里的 csr）")
-        parser.add_argument("--no-certificate", action="store_true",
-                            help="不带 certificate 参数（对照试验）")
-        parser.add_argument("--body-file", default=None, help="自定义请求体 JSON 文件（POST 时默认空 {}）")
-        parser.add_argument("--raw", action="store_true", help="打印响应前 600 字节")
+        parser.add_argument("account_id", nargs="?", default=None, help="已导入的 DouyinAccount ID")
+        parser.add_argument("--cookie-header", default=None, help="待校验的 Cookie 整行")
+        parser.add_argument("--cookie-file", default=None, help="从文件读取待校验 Cookie")
+        parser.add_argument(
+            "--server-data",
+            default=None,
+            help="bd-ticket-guard-server-data（base64/URL 编码或兼容 JSON）",
+        )
+        parser.add_argument("--keys-file", default=None, help="含 ec_privateKey 的 keys JSON 文件")
+        parser.add_argument("--json", action="store_true", help="输出不含凭证值的 JSON 结果")
 
     def handle(self, *args, **options):
         account_id = options["account_id"]
+        state: dict = {}
+        sources: list[str] = []
+
+        if account_id:
+            if not DouyinAccount.objects.filter(id=account_id).exists():
+                raise CommandError(f"账号不存在: {account_id}")
+            state = load_storage_state(str(account_id)) or {}
+            sources.append("storage")
+
         cookie_header = options["cookie_header"]
         if not cookie_header and options["cookie_file"]:
-            from pathlib import Path
             cookie_header = Path(options["cookie_file"]).read_text(encoding="utf-8").strip()
+        if not account_id and not cookie_header and not options["server_data"]:
+            raise CommandError("请提供 account_id、--cookie-header/--cookie-file 或 --server-data")
 
-        csr_pem = ""  # 续期请求的 certificate 来源（base64 前的 CSR PEM 文本）
-        if account_id:
-            account = DouyinAccount.objects.filter(id=account_id).first()
-            if account is None:
-                raise CommandError(f"账号不存在: {account_id}")
-            if options["ua"]:
-                account.user_agent = options["ua"]
-            if options["proxy"]:
-                account.proxy_url = options["proxy"]
-            csr_pem = self._load_csr_from_storage(account_id)
+        bd = dict(state.get("_bd_ticket") or {})
+        if cookie_header:
+            cookie_bd = parse_bd_ticket_from_cookie(parse_cookie_header(cookie_header))
+            if cookie_bd:
+                bd.update(cookie_bd)
+                sources.append("login_response_cookie")
+        if options["server_data"]:
+            bd.update(parse_ticket_guard_server_data(options["server_data"]))
+            sources.append("login_response_header")
+        if options["keys_file"]:
+            bd.update(parse_keys(Path(options["keys_file"]).read_text(encoding="utf-8")))
+            sources.append("keys_file")
+
+        present = {field: bool(str(bd.get(field) or "").strip()) for field in _REQUIRED_SEND_FIELDS}
+        missing = [field for field, ok in present.items() if not ok]
+        result = {
+            "success": not missing,
+            "network_request": False,
+            "strategy": "login_response_reimport",
+            "sources": sources,
+            "fields_present": present,
+            "missing": missing,
+        }
+        rendered = json.dumps(result, ensure_ascii=False, sort_keys=True)
+        if options["json"]:
+            self.stdout.write(rendered)
         else:
-            if not cookie_header:
-                raise CommandError("未提供 account_id 时必须传 --cookie-header / --cookie-file")
-            from types import SimpleNamespace
-            account = SimpleNamespace(id="adhoc-renew-poc", user_agent=options["ua"] or "",
-                                      proxy_url=options["proxy"] or "", sec_uid="")
+            self.stdout.write("bd-ticket 来源审计（不发起网络请求）")
+            self.stdout.write(f"来源: {', '.join(sources) or '无'}")
+            self.stdout.write(f"字段: {json.dumps(present, ensure_ascii=False, sort_keys=True)}")
 
-        if options["csr_file"]:
-            from pathlib import Path
-            csr_pem = Path(options["csr_file"]).read_text(encoding="utf-8").strip()
-
-        body = b"{}"
-        if options["body_file"]:
-            from pathlib import Path
-            body = Path(options["body_file"]).read_bytes()
-
-        cookies = _parse_cookie_header(cookie_header) if cookie_header else None
-        ok = asyncio.run(self._run(account, options, cookies, body, csr_pem))
-        if not ok:
-            raise CommandError("PoC 未确认续期可行（详见上方输出）")
-
-    @staticmethod
-    def _load_csr_from_storage(account_id: str) -> str:
-        """从账号 storage 的 _bd_ticket 读取 csr（ec_csr）；无则空串。"""
-        try:
-            from core.douyin.runtime.storage import load_storage_state
-            state = load_storage_state(account_id) or {}
-        except Exception:  # noqa: BLE001
-            return ""
-        return str(((state.get("_bd_ticket") or {}).get("csr") or "")).strip()
-
-    async def _run(self, account, options, cookies, body: bytes, csr_pem: str) -> bool:
-        from core.douyin.runtime.transport.http_protocol import (
-            CREATOR_USER_TOKEN_URL,
-            _BASE_CREATOR_JSON_HEADERS,
-            creator_token_base_params,
-        )
-        from core.douyin.runtime.transport.js_sign_provider import JsSignProvider
-        from core.douyin.runtime.transport.sign_types import SignerUnavailable
-
-        provider = JsSignProvider(verify_tls=not options["insecure"])
-        await provider.start(account)
-        if cookies:
-            provider.set_cookies(cookies)
-        if not provider.is_ready or not (await provider.get_cookies()):
-            self.stdout.write(self.style.ERROR("provider 未就绪或无 cookie，无法验证"))
-            return False
-
-        url = options["url"] or CREATOR_USER_TOKEN_URL
-        method = options["method"]
-        ua = getattr(account, "user_agent", "") or ""
-
-        # creator user_token/v2 专属公共参数 + certificate（base64(CSR)）。
-        base_params = creator_token_base_params(ua)
-        extra_params: dict[str, str] = {}
-        if not options["no_certificate"]:
-            if not csr_pem:
-                self.stdout.write(self.style.WARNING(
-                    "⚠ 未取到 CSR（账号 storage 无 csr 且未给 --csr-file）：将不带 certificate 发送，"
-                    "结果可能为「用户未登录」。请重新导入含 ec_csr 的 keys，或用 --csr-file 提供。"))
-            else:
-                extra_params["certificate"] = base64.b64encode(csr_pem.encode("utf-8")).decode("ascii")
-
-        self.stdout.write(
-            f"→ {method} {url} account={account.id} "
-            f"certificate={'Y' if extra_params.get('certificate') else 'N'}"
-        )
-        try:
-            resp = await provider.signed_fetch(
-                method=method,
-                url=url,
-                body=None if method == "GET" else body,
-                headers=_BASE_CREATOR_JSON_HEADERS,
-                base_params=base_params,
-                extra_params=extra_params or None,
+        if missing:
+            raise CommandError(
+                "发送凭证不完整，缺少 " + ", ".join(missing)
+                + "；请重新登录后用新版扩展导入 server_data + keys"
             )
-        except SignerUnavailable as e:
-            self.stdout.write(self.style.ERROR(f"signed_fetch 失败: {e}"))
-            return False
-        finally:
-            await provider.stop(account)
-
-        self.stdout.write(f"← HTTP {resp.status} content_len={len(resp.content)} "
-                          f"content_type={resp.headers.get('content-type', '?')}")
-        if options["raw"]:
-            self.stdout.write(f"  text[:600]={resp.text[:600]!r}")
-
-        if resp.status in (401, 403):
-            self.stdout.write(self.style.WARNING(
-                f"🔴 PoC 不通过：HTTP {resp.status}（登录态/权限被拒）→ 无法仅凭 cookie 续期，保持告警保底。"))
-            return False
-        if not resp.ok:
-            self.stdout.write(self.style.WARNING(
-                f"🟡 PoC 存疑：HTTP {resp.status}（可能端点/方法不对）→ 可换 --method / --url 试探。"))
-            return False
-
-        payload = None
-        try:
-            payload = json.loads(resp.text)
-        except Exception:  # noqa: BLE001
-            self.stdout.write(self.style.WARNING("响应非 JSON，无法判定续期字段（可加 --raw 人工核对）"))
-            return False
-
-        status_code = payload.get("status_code") if isinstance(payload, dict) else None
-        found: set[str] = set()
-        _find_renew_fields(payload, found)
-        self.stdout.write(f"  status_code={status_code} 命中续期字段={sorted(found) or '无'}")
-
-        if found:
-            self.stdout.write(self.style.SUCCESS(
-                "✅ PoC 候选通过：响应含可刷新字段 " + ", ".join(sorted(found)) +
-                "。\n   下一步请人工核对字段语义，再接入 health 自动续期（p2-renew-integrate）。"))
-            return True
-
-        self.stdout.write(self.style.WARNING(
-            "🟡 PoC 未确认：HTTP 2xx 但响应无 ts_sign/sdk_cert/token 等续期字段 → "
-            "该端点可能不负责续期，保持告警保底；可用 --raw 查看完整响应再判断。"))
-        return False
+        if not options["json"]:
+            self.stdout.write(self.style.SUCCESS("发送凭证完整；旧 user_token/v2 路径未被调用"))

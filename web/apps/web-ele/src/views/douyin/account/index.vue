@@ -464,7 +464,7 @@ onMounted(loadData);
             </ElButton>
           </ElSpace>
           <ElTooltip
-            content="登录态通过「导入Cookie」获取（粘贴浏览器 Cookie + web_protect/keys），无需扫码"
+            content="登录态通过「导入Cookie」获取（浏览器 Cookie + 登录响应 server_data + keys）"
             placement="top"
           >
             <ElTag type="info">提示：通过「导入Cookie」导入登录态</ElTag>
@@ -729,7 +729,7 @@ onMounted(loadData);
               v-model="importForm.bundle"
               type="textarea"
               :rows="4"
-              placeholder="用「抖音登录态提取器」浏览器扩展抓取后，点『复制一键导入串』，在此粘贴（DYCRED1. 开头）。一次粘贴即含 Cookie + web_protect + keys。"
+              placeholder="用新版「抖音登录态提取器」重新登录后抓取，粘贴 DYCRED1. 导入串（含 Cookie + server_data + keys）。"
             />
           </ElFormItem>
           <div class="text-xs text-gray-400" style="margin-bottom: 8px">
@@ -748,12 +748,12 @@ onMounted(loadData);
                 placeholder="浏览器复制的 Cookie 整行（须含 sessionid；与一键导入串二选一，单项填了会覆盖串里的同名字段）"
               />
             </ElFormItem>
-            <ElFormItem label="web_protect">
+            <ElFormItem label="server_data">
               <ElInput
                 v-model="importForm.web_protect"
                 type="textarea"
                 :rows="2"
-                placeholder="bd-ticket-guard 的 web_protect JSON（发送私信才需要；仅监控可留空）"
+                placeholder="bd-ticket-guard-server-data（base64）；也兼容旧 web_protect JSON"
               />
             </ElFormItem>
             <ElFormItem label="keys">
@@ -827,8 +827,8 @@ onMounted(loadData);
           </template>
 
           <div class="text-xs text-gray-400">
-            仅监控/接收消息只需 Cookie；发送私信需额外的 web_protect 与 keys（bd-ticket-guard），
-            一键导入串已包含三者。补凭据时 Cookie 可留空（自动复用），未填字段保留上次的值。
+            仅监控/接收消息只需 Cookie；发送私信需登录响应 server_data 与 keys。
+            一键导入串已包含所需字段；旧 web_protect 仅用于兼容。
           </div>
         </ElForm>
         <template #footer>

@@ -42,7 +42,7 @@
     </div>
 
     <details class="adv">
-      <summary>查看 / 单独复制三项原始字段</summary>
+      <summary>查看 / 单独复制原始凭证</summary>
 
       <div class="field">
         <div class="field-hd">
@@ -55,7 +55,7 @@
 
       <div class="field">
         <div class="field-hd">
-          <span class="label">web_protect</span>
+          <span class="label">server_data / web_protect</span>
           <span id="wpStatus" class="badge"></span>
           <button class="btn btn-copy" data-copy="web_protect">复制</button>
         </div>
@@ -82,8 +82,8 @@
     <p>Chrome 同一配置下，所有<b>普通窗口</b>共享一套 douyin.com Cookie——两个普通标签页不可能同时是两个号。
        第二个号请用<b>无痕窗口</b>，并在 chrome://extensions 勾选「在无痕模式下启用」。
        抓取后核对下方「各窗口 sessionid」前缀必须不同。</p>
-    <p>Cookie 在 <b>douyin.com 全站共享</b>，但 <b>web_protect / keys 只在 creator 有</b>。
-       发送私信必须在 <b>creator.douyin.com</b> 抓取。</p>
+    <p><b>server_data</b> 由登录响应下发，<b>keys</b> 从 creator 页面读取。
+       缺失任一项时，请重新登录后在 <b>creator.douyin.com</b> 重新抓取。</p>
     <p>插件<b>只读取、不修改</b>任何数据；keys（私钥）在浏览器里是固定的，多次抓取值不变。</p>
   </footer>
 

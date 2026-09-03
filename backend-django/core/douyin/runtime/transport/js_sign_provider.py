@@ -166,10 +166,9 @@ class JsSignProvider:
         """JS 签名 + httpx 直发。
 
         Args:
-            base_params: 覆盖默认 host 公共参数串（不含 msToken/a_bogus）。bd-ticket 续期端点
-                （creator user_token/v2）的公共参数与 webapp/aid=6383 不同（device_platform=web、
-                aid=2906、app_name=aweme_creator_platform），需用本参数传入续期专用参数集。
-            extra_params: 追加到查询串的额外键值（值会做 URL 编码），如 certificate=<base64(CSR)>。
+            base_params: 覆盖默认 host 公共参数串（不含 msToken/a_bogus）。
+                creator JSON 接口的公共参数与 webapp/aid=6383 不同，需由调用方传入。
+            extra_params: 追加到查询串的额外键值（值会做 URL 编码）。
                 这些参数会一并参与 a_bogus 计算，确保与浏览器一致。
             post_sign_params: 在 a_bogus 后追加、不参与签名的键值。PC IM send
                 的 verifyFp/fp 必须放在这里以保持浏览器字段顺序。

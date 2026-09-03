@@ -1,10 +1,11 @@
 # 抖音创作者中心 IM 协议抓包分析
 
-更新时间：`2026-04-28`
+更新时间：`2026-09-03`
 
 分析来源：
 
-- 使用本机 Proxyman 抓取 `creator.douyin.com/creator-micro/data/following/chat`
+- 历史基线：本机 Proxyman 抓取 `creator.douyin.com/creator-micro/data/following/chat`
+- 当前校准：参考仓库 `lukylong/DouYin_Spider` master 的 passport 登录实现
 - 包含的用户操作：
   - 打开私信页
   - 点击聊天列表
@@ -33,19 +34,20 @@
 
 这两段使用的接口主机和接口名不完全相同。
 
-### 1.1 初始化阶段
+### 1.1 登录签发与初始化阶段
 
-核心接口：
+当前凭证来源：
 
-- `GET https://creator.douyin.com/aweme/v1/creator/im/user_token/`
-- `GET https://creator.douyin.com/aweme/v1/creator/im/user_token/v2/`
-- `POST https://imapi.snssdk.com/v2/message/get_by_user_init`
+- 登录前把 P-256 公钥放入 `bd_ticket_guard_client_data` Cookie。
+- 登录响应通过 `bd-ticket-guard-server-data` 响应头或同名 Cookie 下发
+  `ticket` / `ts_sign` / `client_cert` / `create_time`。
+- `POST https://imapi.snssdk.com/v2/message/get_by_user_init` 仍属于历史 creator 初始化链。
 
-说明：
+协议变化：
 
-- `user_token/v2` 比 `v1` 返回更多字段，包括 `sdk_cert`、`ts_sign`。
-- `get_by_user_init` 请求与响应都是 `application/x-protobuf`。
-- 这条链更像页面刚进入 IM 时的 bootstrap 初始化。
+- `GET .../im/user_token/v2` 当前只能取得 userid，不再作为发送凭证来源。
+- 本项目不再调用该端点续期，也不会把 userid-only 响应写回 `_bd_ticket`。
+- `get_by_user_init` 请求与响应仍为 `application/x-protobuf`。
 
 ### 1.2 用户交互阶段
 
@@ -66,9 +68,10 @@
 ## 2. 接口分层图
 
 ```text
+passport 登录响应
+  └─ bd-ticket-guard-server-data（响应头或 Cookie）
+
 creator.douyin.com
-  ├─ /aweme/v1/creator/im/user_token
-  ├─ /aweme/v1/creator/im/user_token/v2
   ├─ /aweme/v1/creator/im/user_detail
   ├─ /aweme/v1/creator/relation/info
   ├─ /aweme/v1/creator/relation/multi/is/follower
@@ -88,36 +91,20 @@ imapi.douyin.com
 
 ## 3. 已确认接口职责
 
-### 3.1 IM token 初始化
-
-#### `GET /aweme/v1/creator/im/user_token`
+### 3.1 bd-ticket 登录响应签发
 
 作用：
 
-- 返回基础 IM token 和 `user_id`
-- 是进入 IM 业务的基础准备接口
+- 客户端在登录前生成 P-256 密钥，把公钥通过 `bd_ticket_guard_client_data` Cookie 提交。
+- 登录成功响应把与该公钥绑定的 `ticket`、`ts_sign`、`client_cert` 放进
+  `bd-ticket-guard-server-data` 响应头或同名 Cookie。
+- 本地保存登录响应字段与对应 `private_key` 后，才具备发送能力。
 
-返回特征：
+兼容结论：
 
-- `status_code`
-- `token`
-- `user_id`
-
-#### `GET /aweme/v1/creator/im/user_token/v2`
-
-作用：
-
-- 返回更完整的新版本 IM 鉴权材料
-
-比 `v1` 多出的关键字段：
-
-- `sdk_cert`
-- `ts_sign`
-
-结论：
-
-- 协议化时不能只接 `v1`
-- `v2` 很可能是后续 IM API 或浏览器 SDK 的完整票据来源
+- 老 `web_protect` JSON 继续可导入。
+- 新导入串使用 `ticket_guard_server_data`，后端也会直接从 Cookie 中提取。
+- `user_token/v2` 仅作为历史抓包记录，不再参与运行时凭证获取或续期。
 
 ---
 

@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 """
 @File: runtime/credential.py
-@Desc: 抖音登录态凭证解析 —— 把「浏览器粘贴的 Cookie / web_protect / keys」转成
+@Desc: 抖音登录态凭证解析 —— 把「浏览器粘贴的 Cookie / server_data / keys」转成
         内部 storage_state 结构（沿用 Playwright 时代的加密存储，零迁移）。
 
 去浏览器化后，账号接入方式从「扫码登录」改为「粘贴 Cookie 录入」。本模块是纯函数层
 （无 Django / 无网络 / 无浏览器），负责三件套解析，对照 DouYin_Spider/builder/auth.py：
 
     cookie       —— 监控/接收 + 发送都需要（必填）
-    web_protect  —— bd-ticket-guard 的 ticket / ts_sign / client_cert（发送私信需要）
+    server_data  —— 登录响应下发的 ticket / ts_sign / client_cert（发送私信需要）
     keys         —— 含 ec_privateKey(priK)（发送私信需要）
 
 输出的 storage_state 结构与 storage.load_storage_state / JsSignProvider._load_account_credentials
@@ -20,7 +20,8 @@
       "_bd_ticket": {"private_key","ticket","ts_sign","client_cert","csr"}  # 可选
     }
 
-其中 csr（来自 keys 的 ec_csr）用于 bd-ticket 自动续期端点的 certificate 参数。
+兼容旧版 web_protect 导入；新版优先解析登录响应的
+``bd-ticket-guard-server-data`` 响应头/同名 Cookie。
 """
 from __future__ import annotations
 
@@ -75,18 +76,36 @@ def _unwrap_data_json(raw: str) -> dict[str, Any]:
     raise ValueError("JSON 顶层不是对象")
 
 
-def parse_web_protect(raw: str) -> dict[str, str]:
-    """解析 web_protect → {ticket, ts_sign, client_cert, create_time}（任一缺失则为空串）。
+def _decode_ticket_json(raw: str) -> dict[str, Any]:
+    """解析 JSON 或 URL-encoded base64/base64url JSON。"""
+    value = unquote((raw or "").strip())
+    if not value:
+        return {}
+    try:
+        return _unwrap_data_json(value)
+    except ValueError:
+        pass
+    try:
+        padded = value + "=" * (-len(value) % 4)
+        decoded = base64.b64decode(padded, altchars=b"-_").decode("utf-8")
+        return _unwrap_data_json(decoded)
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(f"不是合法的 bd-ticket server_data：{e}") from e
 
-    create_time 是抖音签发该 bd-ticket 时的 epoch 秒，用于「凭证临期提前告警」估算 ticket 年龄。
+
+def parse_ticket_guard_server_data(raw: str) -> dict[str, str]:
+    """解析登录响应的 bd-ticket server_data。
+
+    兼容响应头/Cookie 使用的 base64 JSON，以及旧版 web_protect
+    直接 JSON/双层 JSON。``token`` / ``sdk_cert`` 仅作历史字段别名兼容。
     """
     if not (raw or "").strip():
         return {}
-    inner = _unwrap_data_json(raw)
+    inner = _decode_ticket_json(raw)
     out = {
-        "ticket": str(inner.get("ticket") or ""),
+        "ticket": str(inner.get("ticket") or inner.get("token") or ""),
         "ts_sign": str(inner.get("ts_sign") or ""),
-        "client_cert": str(inner.get("client_cert") or ""),
+        "client_cert": str(inner.get("client_cert") or inner.get("sdk_cert") or ""),
     }
     create_time = inner.get("create_time")
     if create_time:
@@ -94,13 +113,16 @@ def parse_web_protect(raw: str) -> dict[str, str]:
     return out
 
 
-def parse_keys(raw: str) -> dict[str, str]:
-    """解析 keys → {private_key, csr}（ec_privateKey 必有；ec_csr 用于 bd-ticket 自动续期）。
+def parse_web_protect(raw: str) -> dict[str, str]:
+    """兼容旧入口：同时接受 web_protect JSON 与新 server_data。"""
+    return parse_ticket_guard_server_data(raw)
 
-    ec_csr 是浏览器生成的证书签名请求（CSR，PEM 文本）。bd-ticket 续期端点
-    （creator.douyin.com/.../im/user_token/v2）要求把它 base64 后作为 `certificate` 参数提交，
-    服务端据此重新签发 sdk_cert / token / ts_sign。早期导入只取了 private_key，这里补上 csr，
-    使后续无需重新抓取即可自动续期；缺失时为空串（老登录态续期会因此跳过，靠告警保底）。
+
+def parse_keys(raw: str) -> dict[str, str]:
+    """解析 keys → {private_key, csr}。
+
+    ``private_key`` 用于请求签名；``csr`` 仅作旧数据兼容保留，
+    不再调用已退役的 user_token/v2 续期端点。
     """
     if not (raw or "").strip():
         return {}
@@ -163,7 +185,12 @@ def parse_credential_bundle(raw: str) -> dict[str, str]:
 
     return {
         "cookie": str(payload.get("cookie") or ""),
-        "web_protect": str(payload.get("web_protect") or ""),
+        "web_protect": str(
+            payload.get("web_protect")
+            or payload.get("ticket_guard_server_data")
+            or payload.get("server_data")
+            or ""
+        ),
         "keys": str(payload.get("keys") or ""),
         "user_agent": str(payload.get("user_agent") or payload.get("ua") or ""),
         "sec_uid": str(payload.get("sec_uid") or ""),          # 新增
@@ -180,26 +207,23 @@ def _b64url_json(raw: str) -> dict[str, Any]:
         return {}
     try:
         pad = "=" * (-len(s) % 4)
-        return json.loads(base64.b64decode(s + pad))
+        return json.loads(base64.b64decode(s + pad, altchars=b"-_"))
     except Exception:  # noqa: BLE001
         return {}
 
 
 def parse_bd_ticket_from_cookie(cookies: dict[str, str]) -> dict[str, str]:
-    """从 cookie 自动提取 bd-ticket-guard 中**能自动得到**的部分。
-
-    可自动得到：`ts_sign`、`ree_public_key`（在 cookie 的 `bd_ticket_guard_client_data_v2`
-    里），以及浏览器最近算好的 `client_data` 快照。
-    **无法**自动得到：`ec_privateKey`(私钥)——浏览器用 Web Crypto 生成后存于本地
-    IndexedDB，出于安全从不写入 cookie/请求，因此发送私信所需的私钥必须另行从浏览器导出。
-    """
-    out: dict[str, str] = {}
-    v2 = _b64url_json(cookies.get("bd_ticket_guard_client_data_v2", ""))
+    """从 Cookie 提取登录响应下发的 bd-ticket 与客户端补充数据。"""
+    normalized = {str(k).lower(): str(v) for k, v in (cookies or {}).items()}
+    out = parse_ticket_guard_server_data(
+        normalized.get("bd_ticket_guard_server_data", "")
+    )
+    v2 = _b64url_json(normalized.get("bd_ticket_guard_client_data_v2", ""))
     if v2.get("ts_sign"):
-        out["ts_sign"] = str(v2["ts_sign"])
+        out.setdefault("ts_sign", str(v2["ts_sign"]))
     if v2.get("ree_public_key"):
         out["ree_public_key"] = str(v2["ree_public_key"])
-    snapshot = unquote(cookies.get("bd_ticket_guard_client_data", "") or "")
+    snapshot = unquote(normalized.get("bd_ticket_guard_client_data", "") or "")
     if snapshot:
         out["client_data_snapshot"] = snapshot
     return out
@@ -246,8 +270,11 @@ def merge_storage_state(
 
     state: dict[str, Any] = {"cookies": cookie_list, "origins": base.get("origins") or []}
 
-    # bd-ticket：旧值为基底 → cookie 自动解析覆盖 → 显式 web_protect/keys 覆盖
+    # bd-ticket：旧值为基底 → 登录响应 Cookie → 显式 server_data/keys。
     bd: dict[str, str] = dict(base.get("_bd_ticket") or {})
+    cookie_bd = parse_bd_ticket_from_cookie(cookies)
+    wp = parse_web_protect(web_protect)
+    ks = parse_keys(keys)
     if new_cookies:
         old_cookies = {
             c.get("name"): c.get("value", "")
@@ -256,26 +283,31 @@ def merge_storage_state(
         }
         old_sid = old_cookies.get("sessionid") or old_cookies.get("sessionid_ss") or ""
         new_sid = cookies.get("sessionid") or cookies.get("sessionid_ss") or ""
-        # session 已切换但未同步提供 web_protect/keys 时，旧签名材料必失效，必须丢弃
-        if old_sid and new_sid and old_sid != new_sid and not web_protect.strip() and not keys.strip():
+        # 跨账号切换时绝不复用旧私钥/ticket。只有新 Cookie/server_data
+        # 明确带回同一 ts_sign 时，才判定是同一签名绑定并保留 create_time。
+        incoming_ts = wp.get("ts_sign") or cookie_bd.get("ts_sign") or ""
+        old_ts = str(bd.get("ts_sign") or "")
+        same_binding = bool(old_ts and incoming_ts and old_ts == incoming_ts)
+        if old_sid and new_sid and old_sid != new_sid and not same_binding:
             bd = {}
 
     old_ts_sign = bd.get("ts_sign")
-    new_bd = parse_bd_ticket_from_cookie(cookies)
-    bd.update(new_bd)
-    
+    bd.update(cookie_bd)
+
     import time
-    if new_bd.get("ts_sign") and new_bd.get("ts_sign") != old_ts_sign:
+    if (
+        cookie_bd.get("ts_sign")
+        and cookie_bd.get("ts_sign") != old_ts_sign
+        and not cookie_bd.get("create_time")
+    ):
         bd["create_time"] = str(int(time.time()))
 
-    wp = parse_web_protect(web_protect)
     for key in ("ticket", "ts_sign", "client_cert", "create_time"):  # 显式 web_protect 覆盖自动值
         if wp.get(key):
             bd[key] = wp[key]
-    ks = parse_keys(keys)
     if ks.get("private_key"):  # 私钥只能显式提供（不在 cookie）
         bd["private_key"] = ks["private_key"]
-    if ks.get("csr"):  # CSR 供 bd-ticket 自动续期（certificate 参数），缺失则续期跳过
+    if ks.get("csr"):  # 旧导入数据兼容保留
         bd["csr"] = ks["csr"]
     if bd:
         state["_bd_ticket"] = bd

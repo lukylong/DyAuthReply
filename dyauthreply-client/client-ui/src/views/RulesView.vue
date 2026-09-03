@@ -1290,7 +1290,7 @@ onMounted(async () => {
 }
 
 .danger {
-  background: linear-gradient(135deg, #dc2626, #ef4444);
+  background: var(--danger);
 }
 .danger:hover {
   box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3) !important;
@@ -1325,7 +1325,7 @@ onMounted(async () => {
   border-color: #64748b;
 }
 .toggle-btn.toggle-on {
-  background: linear-gradient(135deg, #4f46e5, #6366f1);
+  background: var(--violet);
   border-color: #4338ca;
   box-shadow: inset 0 1px 2px rgba(67, 56, 202, 0.3), 0 1px 4px rgba(79, 70, 229, 0.35);
 }

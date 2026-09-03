@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref, computed } from 'vue';
 import { useRouter } from 'vue-router';
+import { AlertTriangle, CheckCircle2 } from 'lucide-vue-next';
 import { getHealth } from '../api/client';
 import { APP_VERSION, useHiddenAdminEntry } from '../composables/useHiddenAdminEntry';
 
@@ -86,13 +87,6 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
 
 <template>
   <div class="splash-container">
-    <!-- 背景动画 -->
-    <div class="liquid-bg-wrapper">
-      <div class="liquid-blob blob-1"></div>
-      <div class="liquid-blob blob-2"></div>
-      <div class="liquid-blob blob-3"></div>
-    </div>
-
     <div class="splash-content glass-panel">
       <!-- Logo区域 -->
       <div class="logo-section">
@@ -112,12 +106,14 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
         </div>
 
         <div v-else-if="status === 'ready'" class="success-indicator">
-          <div class="success-icon">✓</div>
+          <div class="success-icon">
+            <CheckCircle2 :size="28" />
+          </div>
           <div class="status-text success">{{ statusText }}</div>
         </div>
 
         <div v-else-if="status === 'failed'" class="error-indicator">
-          <div class="error-icon">⚠️</div>
+          <AlertTriangle class="error-icon" :size="48" />
           <div class="status-text error">{{ statusText }}</div>
           <div class="error-message">{{ errorMessage }}</div>
           <button type="button" class="btn-retry" @click="retry">
@@ -142,65 +138,7 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
   justify-content: center;
   position: relative;
   overflow: hidden;
-}
-
-.liquid-bg-wrapper {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  overflow: hidden;
-  background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 50%, #dbeafe 100%);
-}
-
-.liquid-blob {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(80px);
-  opacity: 0.3;
-  animation: float 20s infinite ease-in-out;
-}
-
-.blob-1 {
-  width: 500px;
-  height: 500px;
-  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
-  top: -10%;
-  left: -10%;
-  animation-delay: 0s;
-}
-
-.blob-2 {
-  width: 400px;
-  height: 400px;
-  background: linear-gradient(135deg, #10b981, #06b6d4);
-  bottom: -10%;
-  right: -10%;
-  animation-delay: 5s;
-}
-
-.blob-3 {
-  width: 350px;
-  height: 350px;
-  background: linear-gradient(135deg, #f59e0b, #ef4444);
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  animation-delay: 10s;
-}
-
-@keyframes float {
-  0%, 100% {
-    transform: translate(0, 0) scale(1);
-  }
-  25% {
-    transform: translate(30px, -30px) scale(1.1);
-  }
-  50% {
-    transform: translate(-20px, 20px) scale(0.9);
-  }
-  75% {
-    transform: translate(20px, 30px) scale(1.05);
-  }
+  background: var(--bg-app);
 }
 
 .splash-content {
@@ -238,7 +176,7 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
   width: 80px;
   height: 80px;
   border-radius: 50%;
-  background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(139, 92, 246, 0.1));
+  background: var(--brand-primary-soft);
   border: 2px solid rgba(59, 130, 246, 0.3);
   display: flex;
   align-items: center;
@@ -261,10 +199,7 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
 .logo-text {
   font-size: 2rem;
   font-weight: 900;
-  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: var(--brand-primary);
 }
 
 .app-title {
@@ -328,13 +263,11 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
   width: 48px;
   height: 48px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #10b981, #059669);
+  background: var(--success);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 1.5rem;
   color: white;
-  font-weight: bold;
   animation: scaleIn 0.4s ease-out;
 }
 
@@ -348,7 +281,7 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
 }
 
 .error-icon {
-  font-size: 3rem;
+  color: var(--danger);
   animation: shake 0.5s ease-out;
 }
 
@@ -401,7 +334,7 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
   padding: 10px 28px;
   border-radius: 12px;
   border: none;
-  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  background: var(--brand-primary);
   color: white;
   font-size: 0.9rem;
   font-weight: 600;
@@ -425,14 +358,5 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
   opacity: 0.6;
   cursor: default;
   user-select: none;
-}
-
-.glass-panel {
-  background: rgba(255, 255, 255, 0.7);
-  backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.8);
-  box-shadow:
-    0 20px 60px rgba(0, 0, 0, 0.1),
-    inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 </style>

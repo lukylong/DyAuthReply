@@ -403,7 +403,7 @@ onMounted(load);
 }
 
 .btn.primary {
-  background: linear-gradient(135deg, #0284c7, #4f46e5);
+  background: var(--brand-primary);
   color: #fff;
   font-weight: 600;
   border: none;

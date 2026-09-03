@@ -621,7 +621,7 @@ const updateStatusType = computed<'info' | 'error' | 'success' | 'update'>(() =>
 }
 
 .setting-checkbox:checked + .checkbox-icon {
-  background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%);
+  background: var(--brand-primary);
   border-color: #0284c7;
   box-shadow: 0 2px 8px rgba(2, 132, 199, 0.25);
 }
@@ -729,7 +729,7 @@ const updateStatusType = computed<'info' | 'error' | 'success' | 'update'>(() =>
 }
 
 .btn-primary {
-  background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%);
+  background: var(--brand-primary);
   border-color: #0284c7;
   color: #fff;
 }

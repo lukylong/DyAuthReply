@@ -231,6 +231,9 @@ DOUYIN_RECV_BACKOFF_CAP_S = float(_env('DOUYIN_RECV_BACKOFF_CAP_S', '120'))
 # scheduler 主动探活：首探判失效后是否再复核一次，两次都失效才打回（防误判）。
 DOUYIN_PROBE_RECONFIRM = _env('DOUYIN_PROBE_RECONFIRM', 'true').lower() == 'true'
 DOUYIN_PROBE_RECONFIRM_DELAY_S = float(_env('DOUYIN_PROBE_RECONFIRM_DELAY_S', '3'))
+# 客户端 worker 自带的周期性主动探活循环间隔（分钟）：仅 ZQ_ENV=client 时生效，
+# web 后台部署走独立的 scheduler.tasks.douyin_probe_credentials（APScheduler）。
+DOUYIN_PROBE_INTERVAL_MINUTES = float(_env('DOUYIN_PROBE_INTERVAL_MINUTES', '20'))
 # signer 半开熔断冷却秒数：失败累计达阈值后降级，冷却到期放一次试探，成功即自愈（无需重启）。
 DOUYIN_SIGNER_DEGRADE_COOLDOWN_S = float(_env('DOUYIN_SIGNER_DEGRADE_COOLDOWN_S', '60'))
 

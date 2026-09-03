@@ -746,6 +746,7 @@ class DouyinWorker:
                 self._loop_redis_commands(),
                 self._loop_db_commands(),
                 self._loop_renew_leases(),
+                self._loop_credential_probe(),
             )
         finally:
             logger.info("[worker] 进入关停流程")
@@ -1091,6 +1092,36 @@ class DouyinWorker:
                     logger.warning(f"[worker] 账号租约丢失（被其它 worker 接管），停掉本地托管 account={aid}")
                     await self._stop_account(aid)
             await self._sleep_or_stop(interval)
+
+    async def _loop_credential_probe(self) -> None:
+        """客户端模式下自带的周期性主动探活：直接复用 health._probe_all_async()
+        （已有合理的并发限流 + 二次复核逻辑，这里只负责按间隔触发）。
+
+        web 后台部署走独立的 scheduler.tasks.douyin_probe_credentials（APScheduler），
+        两边都跑会重复探活，故仅 ZQ_ENV=client 时启用本循环。
+        """
+        if os.environ.get('ZQ_ENV') != 'client':
+            logger.info("[worker] 客户端主动探活循环未启用（ZQ_ENV != client，由 web 后台 scheduler 覆盖）")
+            return
+
+        interval_minutes = float(getattr(settings, 'DOUYIN_PROBE_INTERVAL_MINUTES', 20) or 20)
+        interval_s = max(60.0, interval_minutes * 60.0)
+        logger.info(
+            f"[worker] 客户端主动探活循环已启用 interval={interval_minutes:.1f}min"
+        )
+        while not self._stop.is_set():
+            await self._sleep_or_stop(interval_s)
+            if self._stop.is_set():
+                break
+            if not getattr(settings, 'DOUYIN_PROBE_ENABLED', True):
+                logger.debug("[worker] 主动探活已禁用（DOUYIN_PROBE_ENABLED=False），跳过本轮")
+                continue
+            try:
+                from core.douyin.runtime.health import _probe_all_async
+                result = await _probe_all_async()
+                logger.info(f"[worker] 主动探活完成 result={result}")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[worker] 主动探活异常（不影响其它子循环）: {e}", exc_info=True)
 
     async def _get_or_create_transport(self, account: "DouyinAccount") -> AccountTransport:
         """

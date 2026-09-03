@@ -1582,7 +1582,7 @@ class HttpProtocolTransport(AccountTransport):
             f"[transport.http] {log_tag} → POST {endpoint['url']} "
             f"account={account.id} conv={conversation_id} "
             f"client_msg_id={client_msg_id} seq_id={seq_id} body_len={len(body)} "
-            f"encoder={encoder} template={'Y' if template_body else 'N'}"
+            f"encoder={encoder}"
         )
 
         resp: SignedResponse = await self._sign.signed_fetch(

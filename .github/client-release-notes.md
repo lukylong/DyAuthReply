@@ -1,5 +1,7 @@
 ## 本次更新
 
+- **修复卡片回复无法发送**：协议更新后发送日志仍引用已移除的旧模板变量，导致请求在发往抖音前直接异常；现已清理旧字段并补充发送链路回归测试
+- **影响范围**：同时修复卡片落地页、普通自动回复和手动文本发送共用的 HTTP 私信发送通道
 - **同步抖音 PC 私信新协议**：`im/user_token/v2` 仅返回 `user_id` 时也可继续建立私信会话，不再依赖旧响应中的 `token`、`sdk_cert`、`ts_sign`
 - **迁移发送凭证来源**：从登录回包 Cookie `bd-ticket-guard-server-data` 解析 `token`、`sdk_cert`、`ts_sign`，并兼容 `server_data` / `bd_ticket_guard_server_data` 别名
 - **凭证导入改为原子绑定**：扩展导入时一次性提交账号身份、Cookie 与签名材料，切换账号时清理旧签名，避免串号

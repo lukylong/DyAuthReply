@@ -5,7 +5,7 @@ import base64
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from core.douyin.runtime.transport.http_protocol import (
     HttpProtocolTransport,
@@ -199,4 +199,70 @@ class IdentitySecurityTests(unittest.IsolatedAsyncioTestCase):
                 "biz_trace_id=deadbeef",
                 "id_token_version=1.2.10",
             ],
+        )
+
+
+class _FakeSendSignProvider:
+    is_ready = True
+
+    def __init__(self):
+        self.calls = []
+
+    def get_bd_ticket(self):
+        return {"private_key": "PRIVATE", "ticket": "TICKET", "ts_sign": "SIGN"}
+
+    async def get_cookies(self):
+        return {"s_v_web_id": "verify-fp"}
+
+    async def signed_fetch(self, **kwargs):
+        self.calls.append(kwargs)
+        return SignedResponse(
+            status=200,
+            url=kwargs["url"],
+            headers={},
+            text="ok",
+            content=b"ok",
+        )
+
+
+class SendMessageRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_post_send_reaches_signed_transport_after_protocol_sync(self):
+        """协议同步后，发送日志不能再引用已移除的 template_body 局部变量。"""
+        signer = _FakeSendSignProvider()
+        transport = HttpProtocolTransport(sign_provider=signer)
+        transport._get_identity_security_token = AsyncMock(
+            return_value=("IDENTITY", "DEVICE")
+        )
+        decoded = SimpleNamespace(
+            status_code=0,
+            status_msg="OK",
+            server_msg_id=123,
+            client_msg_id="",
+            biz_status_code=0,
+            biz_status_text="",
+            biz_raw_check_code=0,
+        )
+
+        with (
+            patch(
+                "core.douyin.runtime.transport.http_protocol.decode_send_message_response",
+                return_value=decoded,
+            ),
+            patch(
+                "core.douyin.runtime.send_template_cache.save_cached_send_template"
+            ),
+        ):
+            result, client_msg_id = await transport._post_send_message(
+                SimpleNamespace(id="account-test"),
+                "0:1:test:peer",
+                "https://card.example/c/1",
+                log_tag="card_reply",
+            )
+
+        self.assertIs(result, decoded)
+        self.assertTrue(client_msg_id)
+        self.assertEqual(len(signer.calls), 1)
+        self.assertEqual(
+            signer.calls[0]["url"],
+            "https://imapi.douyin.com/v1/message/send",
         )

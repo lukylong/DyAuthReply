@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
+import { Bell, RefreshCw, Search, SlidersHorizontal, Zap } from 'lucide-vue-next';
 import { useClientSettings, DEFAULT_UPDATE_MIRRORS } from '../composables/useClientSettings';
 import { useVersionUpdate } from '../composables/useVersionUpdate';
 import { openExternalUrl } from '../api/client';
@@ -143,7 +144,7 @@ const updateStatusType = computed<'info' | 'error' | 'success' | 'update'>(() =>
   <div class="settings-page">
     <!-- 页面标题 -->
     <div class="page-header glass-panel">
-      <div class="header-icon">🎛️</div>
+      <div class="header-icon"><SlidersHorizontal :size="22" /></div>
       <div class="header-content">
         <h1 class="page-title">客户端设置</h1>
         <p class="page-subtitle">管理客户端的版本更新、通知和运行设置</p>
@@ -158,21 +159,21 @@ const updateStatusType = computed<'info' | 'error' | 'success' | 'update'>(() =>
           :class="['nav-tab', { active: activeTab === 'version' }]"
           @click="activeTab = 'version'"
         >
-          <span class="tab-icon">🔄</span>
+          <span class="tab-icon"><RefreshCw :size="16" /></span>
           <span class="tab-label">版本更新</span>
         </button>
         <button
           :class="['nav-tab', { active: activeTab === 'notification' }]"
           @click="activeTab = 'notification'"
         >
-          <span class="tab-icon">🔔</span>
+          <span class="tab-icon"><Bell :size="16" /></span>
           <span class="tab-label">通知设置</span>
         </button>
         <button
           :class="['nav-tab', { active: activeTab === 'runtime' }]"
           @click="activeTab = 'runtime'"
         >
-          <span class="tab-icon">⚡</span>
+          <span class="tab-icon"><Zap :size="16" /></span>
           <span class="tab-label">运行设置</span>
         </button>
       </nav>
@@ -269,7 +270,7 @@ const updateStatusType = computed<'info' | 'error' | 'success' | 'update'>(() =>
                 @click="handleCheckUpdate"
                 :disabled="isChecking"
               >
-                <span class="btn-icon">🔍</span>
+                <span class="btn-icon"><Search :size="15" /></span>
                 <span>{{ isChecking ? '检查中...' : '立即检查更新' }}</span>
               </button>
               <button
@@ -505,7 +506,8 @@ const updateStatusType = computed<'info' | 'error' | 'success' | 'update'>(() =>
 }
 
 .tab-icon {
-  font-size: 1.1rem;
+  display: inline-flex;
+  align-items: center;
   line-height: 1;
 }
 
@@ -739,7 +741,8 @@ const updateStatusType = computed<'info' | 'error' | 'success' | 'update'>(() =>
 }
 
 .btn-icon {
-  font-size: 1rem;
+  display: inline-flex;
+  align-items: center;
   line-height: 1;
 }
 

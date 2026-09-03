@@ -891,9 +891,9 @@ export function listReplyLogs(params?: {
   );
 }
 
-export function getReplyLogStat(accountId?: string) {
+export function getReplyLogStat(accountId?: string, scope?: 'all' | 'today') {
   return request<DouyinReplyLogStat>(
-    withQuery('/douyin/reply-log/stat/summary', { account_id: accountId }),
+    withQuery('/douyin/reply-log/stat/summary', { account_id: accountId, scope }),
   );
 }
 

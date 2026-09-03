@@ -8,6 +8,7 @@ from typing import List
 
 from django.db.models import Avg, Count, Q
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from ninja import Query, Router
 from ninja.pagination import paginate
 
@@ -41,11 +42,19 @@ def get_reply_log(request, log_id: str):
 
 
 @router.get("/reply-log/stat/summary", response=DouyinReplyLogStatOut, summary="回复日志统计概览")
-def stat_reply_log(request, account_id: str = None):
-    """按结果分桶统计：total/success/failed/skipped/... + 平均耗时"""
+def stat_reply_log(request, account_id: str = None, scope: str = "all"):
+    """按结果分桶统计：total/success/failed/skipped/... + 平均耗时
+
+    scope: "all"（默认，全量）或 "today"（仅统计当天创建的回复日志，按 Django 时区感知的今天范围过滤）
+    """
     queryset = DouyinReplyLog.objects.all()
     if account_id:
         queryset = queryset.filter(account_id=account_id)
+    if scope == "today":
+        # 项目 settings.USE_TZ = False，timezone.localdate() 在裸调用（不传 value）时
+        # 会因 timezone.now() 返回 naive datetime 而抛 ValueError（localtime 要求
+        # aware datetime）。用 timezone.now().date() 取当前日期，USE_TZ 开关下均可用。
+        queryset = queryset.filter(sys_create_datetime__date=timezone.now().date())
 
     counts = queryset.aggregate(
         total=Count('id'),

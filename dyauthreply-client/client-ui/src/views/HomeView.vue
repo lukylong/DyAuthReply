@@ -10,6 +10,7 @@ import {
 } from 'lucide-vue-next';
 import {
   getHealth,
+  getReplyLogStat,
   listAccounts,
   type DouyinAccount,
 } from '../api/client';
@@ -22,11 +23,29 @@ const { licenseStatus: license, ensureStatus } = useClientLicense();
 const currentStep = ref(1);
 const wizardRef = ref<HTMLElement | null>(null);
 
-// 今日回复统计：当前客户端本地接口（/douyin/reply-log/stat/summary）只能拿到全量累计数据，
-// 没有按“今日”过滤的维度，为避免展示误导性数字，先用占位符，等后端补充按日期过滤的统计接口后再接入。
-const todayReplyDisplay = '--';
-const todaySuccessDisplay = '--';
-const todayFailedDisplay = '--';
+// 今日回复统计：从 /douyin/reply-log/stat/summary?scope=today 拉取，请求失败时保留占位符，
+// 不影响概览页其余区块渲染。
+const todayReply = ref<number | null>(null);
+const todaySuccess = ref<number | null>(null);
+const todayFailed = ref<number | null>(null);
+const todayStatError = ref('');
+
+const todayReplyDisplay = computed(() => (todayReply.value === null ? '--' : todayReply.value));
+const todaySuccessDisplay = computed(() => (todaySuccess.value === null ? '--' : todaySuccess.value));
+const todayFailedDisplay = computed(() => (todayFailed.value === null ? '--' : todayFailed.value));
+
+async function loadTodayStat() {
+  try {
+    const stat = await getReplyLogStat(undefined, 'today');
+    todayReply.value = stat.total;
+    todaySuccess.value = stat.success;
+    todayFailed.value = stat.failed;
+    todayStatError.value = '';
+  } catch (e) {
+    todayStatError.value = e instanceof Error ? e.message : String(e);
+    console.error('加载今日回复统计失败:', e);
+  }
+}
 
 const onlineCount = computed(() => accounts.value.filter((a) => a.status === 1).length);
 const offlineCount = computed(() => accounts.value.length - onlineCount.value);
@@ -65,6 +84,9 @@ async function initDashboard() {
   } finally {
     loading.value = false;
   }
+
+  // 今日回复统计单独拉取、单独兜底：即使这一个请求失败，也不影响上面主区域已渲染的内容。
+  await loadTodayStat();
 }
 
 function goInstallExtension() {

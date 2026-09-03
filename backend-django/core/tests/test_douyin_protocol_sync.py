@@ -24,6 +24,7 @@ from core.douyin.runtime.transport.http_protocol import (
     _format_send_business_failure,
     identity_security_base_params,
 )
+from core.douyin.runtime.transport.frontier_ws import FrontierWsDecorator
 from core.douyin.runtime.transport.js_sign_provider import JsSignProvider
 from core.douyin.runtime.transport.sign import js_signer
 from core.douyin.runtime.transport.sign import secsdk_web_sign
@@ -669,7 +670,12 @@ class SendMessageRegressionTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         transport = HttpProtocolTransport(sign_provider=signer)
-        transport._conversation_send_context_cache["0:1:test:peer"] = (987, "", 1.0)
+        transport.remember_inbound_message_context(
+            SimpleNamespace(
+                conversation_id="0:1:test:peer",
+                conversation_short_id=987,
+            )
+        )
 
         context = await transport._resolve_send_conversation_context(
             SimpleNamespace(id="account-test"),
@@ -750,6 +756,56 @@ class SendMessageRegressionTests(unittest.IsolatedAsyncioTestCase):
                 SimpleNamespace(id="account-test"),
                 "0:1:test:peer",
             )
+
+
+class _ContextRecordingInner:
+    name = "http_protocol"
+
+    def __init__(self):
+        self.remembered = []
+
+    def remember_inbound_message_context(self, message):
+        self.remembered.append(message)
+
+    async def _resolve_user_details_by_sec_uids(self, account, sec_uids):
+        return {}
+
+
+class FrontierSendContextBridgeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ws_inbound_primes_send_context_before_worker_dispatch(self):
+        inner = _ContextRecordingInner()
+        transport = FrontierWsDecorator(inner)
+        transport._account_id = "account-test"
+        transport._account_sec_uid = "self-sec"
+        transport._get_existing_peer_info = AsyncMock(
+            return_value=("peer", None)
+        )
+        transport._get_account_orm = AsyncMock(return_value=None)
+        message = SimpleNamespace(
+            conversation_id="0:1:123:456",
+            conversation_short_id=987,
+            server_message_id=12345,
+            client_message_id="client-1",
+            sender_uid=456,
+            sender_sec_uid="peer-sec",
+            create_time_us=1_788_430_244_866_124,
+            msg_type=1,
+            text="hello",
+            content_json={},
+            content_type="text",
+            media=None,
+        )
+
+        with patch(
+            "core.douyin.runtime.message_store._upsert_conversation_and_message",
+            new=AsyncMock(return_value=("db-conv", "db-msg")),
+        ):
+            await transport._process_message(message)
+
+        self.assertEqual(inner.remembered, [message])
+        scanned = transport._scanned_messages_queue.get_nowait()
+        self.assertEqual(scanned.conversation_id, "db-conv")
+        self.assertEqual(scanned.raw["conversation_id"], "0:1:123:456")
 
 
 def _conversation_info_response(

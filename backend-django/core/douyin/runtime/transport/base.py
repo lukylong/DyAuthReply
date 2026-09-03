@@ -120,6 +120,15 @@ class AccountTransport(ABC):
         发送失败应抛异常，让上层做证据落盘 + 用户提示。
         """
 
+    def remember_inbound_message_context(self, message: Any) -> None:
+        """接收入站协议消息的会话元数据，供紧随其后的发送复用。
+
+        默认实现为空；需要 ``conversation_short_id`` 等发送上下文的协议实现
+        可以覆盖。该钩子必须是同步、轻量且不得发起网络请求，因为 WS 快路径
+        会在入站消息落库前调用它。
+        """
+        return None
+
     # ---------------- 事件流（可选） ----------------
     async def inbound_events(self) -> AsyncIterator[InboundEvent]:  # pragma: no cover - interface
         """

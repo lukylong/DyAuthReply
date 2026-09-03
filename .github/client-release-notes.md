@@ -1,5 +1,7 @@
 ## 本次更新
 
+- **修复新账号首条实时私信不回复**：WebSocket 已收到消息但 HTTP 兜底扫描尚未填充 `conversation_short_id` 时，自动回复会在真正发送前失败；现改为在消息交给 worker 前同步会话发送上下文。
+- **区分本地竞态与平台拒绝**：缺少 `conversation_short_id` 属于客户端链路问题并已修复；抖音返回 `biz_status_code=8610/raw_check_code=2` 时仍按平台发送校验拒绝处理，不会误报为发送成功。
 - **同步抖音创作者中心 PC IM 当前协议**：发送改为无 query 的 `v1/message/send`，先解析会话 `short_id` / `ticket`，并使用当前 `douyin_creator` 请求包与身份头。
 - **修复凭证采集缺口**：同时保存 `creator.douyin.com`、`imapi.douyin.com`、`www.douyin.com` 三个域的 Cookie 快照，补齐 UIFEID、浏览器指纹、`bd-ticket`、`dtrait` 和 Web 签名链路。
 - **适配 `im/user_token/v2` 新返回**：接口仅返回 `user_id` 时仍可建立收消息链路，不再把缺少旧 `token`、`sdk_cert`、`ts_sign` 当成登录失效。

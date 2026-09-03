@@ -163,6 +163,11 @@ class DualRunDecorator(AccountTransport):
             peer_nickname=peer_nickname,
         )
 
+    def remember_inbound_message_context(self, message: Any) -> None:
+        """把入站会话元数据透传给真实发送 transport。"""
+
+        self._inner.remember_inbound_message_context(message)
+
     # ---------------- 事件流：透传 ----------------
     async def inbound_events(self) -> AsyncIterator[InboundEvent]:
         async for evt in self._inner.inbound_events():

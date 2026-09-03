@@ -441,6 +441,18 @@ class FrontierWsDecorator(AccountTransport):
         # 0. 过滤非用户/系统消息
         if not m.conversation_id or m.server_message_id <= 0:
             return
+
+        # WS 帧已经携带 conversation_short_id。必须在把消息交给 worker 前
+        # 同步给 HTTP 发送层；否则新账号首条实时私信会先触发回复，而 25s HTTP
+        # 兜底扫描尚未来得及填充发送缓存，最终误报“缺少 conversation_short_id”。
+        try:
+            self._inner.remember_inbound_message_context(m)
+        except Exception as ex:  # noqa: BLE001
+            logger.warning(
+                f"[frontier.ws] 缓存入站发送上下文失败 account={self._account_id} "
+                f"conv={m.conversation_id} err={type(ex).__name__}: {ex}"
+            )
+
         # 系统/已读回执(content_type=system) 或 无占位文本 → 丢弃；
         # 富媒体(图片/语音/视频/表情)有占位文本，保留并和文本一样进入回复引擎
         if getattr(m, "content_type", "text") == "system" or not m.text:

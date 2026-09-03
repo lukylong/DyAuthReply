@@ -1577,6 +1577,11 @@ class HttpProtocolTransport(AccountTransport):
                 now,
             )
 
+    def remember_inbound_message_context(self, message: Any) -> None:
+        """缓存 WS/HTTP 入站帧里的发送上下文，避免实时回复与兜底扫描竞态。"""
+
+        self._remember_conversation_short_ids([message])
+
     async def _resolve_send_conversation_context(
         self,
         account: "DouyinAccount",

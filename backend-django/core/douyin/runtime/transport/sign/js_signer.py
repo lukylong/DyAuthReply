@@ -543,6 +543,8 @@ def build_bd_ticket_client_data(
     prik: str,
     *,
     timestamp: Optional[int] = None,
+    ecdh_key: Optional[bytes] = None,
+    t_trust: Optional[int] = None,
 ) -> str:
     """生成 `bd-ticket-guard-client-data` 头的值（标准 base64(JSON)）。
 
@@ -560,11 +562,19 @@ def build_bd_ticket_client_data(
     """
     ts = int(timestamp if timestamp is not None else time.time())
     res_sign = f"ticket={ticket}&path={api}&timestamp={ts}"
+    if ecdh_key:
+        from core.douyin.runtime.transport.sign.bd_ticket import hmac_request_sign
+
+        req_sign = hmac_request_sign(res_sign, ecdh_key)
+    else:
+        req_sign = get_req_sign(res_sign, prik)
     payload: dict[str, Any] = {
         "ts_sign": ts_sign,
         "req_content": "ticket,path,timestamp",
-        "req_sign": get_req_sign(res_sign, prik),
+        "req_sign": req_sign,
         "timestamp": ts,
     }
+    if t_trust is not None:
+        payload["t_trust"] = int(t_trust)
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return base64.b64encode(raw.encode("utf-8")).decode("utf-8")

@@ -1,5 +1,5 @@
 /**
- * 抖音登录态提取器 —— popup 逻辑 v2.1.0
+ * 抖音登录态提取器 —— popup 逻辑 v2.2.0
  *
  * 抓取登录态（与 DyAuthReply 后台「导入登录态」对话框对应）：
  *   cookie       —— 用 chrome.cookies API 读取，能拿到 document.cookie 取不到的 HttpOnly sessionid
@@ -14,6 +14,7 @@
 const LS_KEYS = 'security-sdk/s_sdk_crypt_sdk';
 const LS_WEB_PROTECT = 'security-sdk/s_sdk_sign_data_key/web_protect';
 const SERVER_DATA_STORAGE_PREFIX = 'ticket_guard_server_data_';
+const SESSION_DTRAIT_STORAGE_PREFIX = 'session_dtrait_';
 
 const $ = (id) => document.getElementById(id);
 
@@ -122,6 +123,29 @@ async function collectCookies(tabUrl, cookieStoreId) {
   return [...byName.values()].map((c) => `${c.name}=${c.value}`).join('; ');
 }
 
+async function cookieHeaderForUrl(url, cookieStoreId) {
+  const cookies = await chrome.cookies.getAll({ url, storeId: cookieStoreId }).catch(() => []);
+  return cookies
+    .filter((cookie) => cookie?.name)
+    .map((cookie) => `${cookie.name}=${cookie.value}`)
+    .join('; ');
+}
+
+async function collectScopedCookieHeaders(cookieStoreId) {
+  const targets = {
+    'creator.douyin.com': 'https://creator.douyin.com/creator-micro/data/following/chat',
+    'imapi.douyin.com': 'https://imapi.douyin.com/',
+    'www.douyin.com': 'https://www.douyin.com/',
+  };
+  const pairs = await Promise.all(
+    Object.entries(targets).map(async ([host, url]) => [
+      host,
+      await cookieHeaderForUrl(url, cookieStoreId),
+    ]),
+  );
+  return Object.fromEntries(pairs.filter(([, value]) => value));
+}
+
 function decodeTicketGuardServerData(raw, source = '') {
   if (!raw) return { raw: '', data: {}, source };
   try {
@@ -146,6 +170,17 @@ async function loadCapturedServerData(cookieStoreId) {
   const stored = await chrome.storage.session.get(key).catch(() => ({}));
   const record = stored[key] || {};
   return decodeTicketGuardServerData(String(record.value || ''), 'response_header');
+}
+
+async function loadCapturedSessionDtrait(cookieStoreId) {
+  const key = `${SESSION_DTRAIT_STORAGE_PREFIX}${cookieStoreId || '0'}`;
+  const stored = await chrome.storage.session.get(key).catch(() => ({}));
+  const record = stored[key] || {};
+  return {
+    value: String(record.value || ''),
+    path: String(record.path || ''),
+    capturedAt: Number(record.capturedAt || 0),
+  };
 }
 
 function chooseNewestServerData(cookieData, headerData) {
@@ -204,6 +239,14 @@ async function collectPageInfo(tabId) {
         keys: localStorage.getItem(kKeys) || '',
         web_protect: localStorage.getItem(kWp) || '',
         ua: navigator.userAgent || '',
+        dtrait_blob:
+          String(window.__dyauthreplyLatestDtraitBlob || '')
+          || document.documentElement?.getAttribute('data-dyauthreply-dtrait-blob')
+          || '',
+        dtrait_path:
+          String(window.__dyauthreplyLatestDtraitPath || '')
+          || document.documentElement?.getAttribute('data-dyauthreply-dtrait-path')
+          || '',
         account: {},
       };
 
@@ -385,16 +428,33 @@ async function fetchLoggedInAccount(tabId) {
 }
 
 /** 把凭证打包成单行「一键导入串」：DYCRED1.<base64url(JSON)>。 */
-function buildBundle({ cookie, ticket_guard_server_data, web_protect, keys, ua, sec_uid, nickname, unique_id }) {
+function buildBundle({
+  cookie,
+  cookie_headers,
+  ticket_guard_server_data,
+  web_protect,
+  keys,
+  ua,
+  sec_uid,
+  nickname,
+  unique_id,
+  dtrait_blob,
+  session_dtrait,
+  session_dtrait_path,
+}) {
   const json = JSON.stringify({
     cookie,
+    cookie_headers: cookie_headers || {},
     ticket_guard_server_data: ticket_guard_server_data || '',
     web_protect,
     keys,
     ua,
     sec_uid: sec_uid || '',         // 新增：用于后端跳过 profile 拉取
     nickname: nickname || '',       // 新增：前端已识别的昵称
-    unique_id: unique_id || ''      // 新增：抖音号
+    unique_id: unique_id || '',     // 新增：抖音号
+    dtrait_blob: dtrait_blob || '',
+    session_dtrait: session_dtrait || '',
+    session_dtrait_path: session_dtrait_path || '',
   });
   // UTF-8 安全的 base64url
   const b64 = btoa(unescape(encodeURIComponent(json)))
@@ -622,11 +682,13 @@ async function grab() {
 
     await loadLastFingerprint(cookieStoreId);
 
-    const [cookie, ls, diag, capturedServerData] = await Promise.all([
+    const [cookie, cookieHeaders, ls, diag, capturedServerData, capturedDtrait] = await Promise.all([
       collectCookies(tab.url, cookieStoreId),
+      collectScopedCookieHeaders(cookieStoreId),
       collectPageInfo(tab.id),
       diagnoseSessionIds(tab.url, cookieStoreId),
       loadCapturedServerData(cookieStoreId),
+      loadCapturedSessionDtrait(cookieStoreId),
     ]);
 
     const fp = accountFingerprint(cookie);
@@ -753,13 +815,17 @@ async function grab() {
     $('keys').value = ls.keys;
     $('bundle').value = buildBundle({
       cookie,
+      cookie_headers: cookieHeaders,
       ticket_guard_server_data: serverData.raw,
       web_protect: ls.web_protect,
       keys: ls.keys,
       ua: ls.ua,
       sec_uid: ls.account?.sec_uid || '',      // 新增
       nickname: ls.account?.nickname || '',    // 新增
-      unique_id: ls.account?.unique_id || ''   // 新增
+      unique_id: ls.account?.unique_id || '',  // 新增
+      dtrait_blob: ls.dtrait_blob || '',
+      session_dtrait: capturedDtrait.value,
+      session_dtrait_path: capturedDtrait.path,
     });
 
     setBadge($('cookieStatus'), ...validateCookie(cookie));

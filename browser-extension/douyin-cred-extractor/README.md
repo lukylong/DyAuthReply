@@ -2,13 +2,15 @@
 
 Chrome/Edge MV3 扩展，用于生成 DyAuthReply 后台可直接粘贴的 `DYCRED1.` 登录态导入串。
 
-## 当前凭证来源（v2.1.0）
+## 当前凭证来源（v2.2.0）
 
 | 字段 | 来源 | 用途 |
 | --- | --- | --- |
-| `cookie` | `chrome.cookies` API | 必填；监控、接收、发送共用，包含 HttpOnly `sessionid` |
+| `cookie` | `chrome.cookies` API | 兼容字段；包含 creator 页面可见的 HttpOnly `sessionid` |
+| `cookie_headers` | 按 creator/imapi/www URL 分别调用 `chrome.cookies` | 保留同名 Cookie 的域作用域，运行时按目标主机选择 |
 | `ticket_guard_server_data` | 登录响应写入的 `bd_ticket_guard_server_data` Cookie | 提供 `ticket` / `ts_sign` / `client_cert` |
 | `keys` | `localStorage['security-sdk/s_sdk_crypt_sdk']` | 提供发送签名所需 `ec_privateKey` |
+| `dtrait_blob` / `session_dtrait` | document-start 页面钩子 + 请求头监听 | 身份安全 token 的动态设备特征；优先用 blob 按路径重算 |
 | `web_protect` | 旧版 localStorage 字段 | 仅兼容已有浏览器登录态 |
 
 `im/user_token/v2` 现在只返回 userid，扩展不再依赖该端点。发送凭证来自登录响应的
@@ -23,12 +25,12 @@ Chrome/Edge MV3 扩展，用于生成 DyAuthReply 后台可直接粘贴的 `DYCR
 
 ## 使用
 
-1. 先在扩展页重载 v2.1.0，再重新登录抖音，让扩展捕获最新登录响应。
+1. 先在扩展页重载 v2.2.0，再重新打开 creator 页面，让 document-start 钩子捕获设备特征。
 2. 打开 [creator 私信管理页](https://creator.douyin.com/creator-micro/data/following/chat)。
 3. 打开扩展，确认 Cookie、server_data、keys 三个徽标均正常。
 4. 复制 `DYCRED1.` 一键导入串，在 DyAuthReply `/douyin/account` 的「导入登录态」中粘贴。
 
-一键导入串包含 `{cookie, ticket_guard_server_data, web_protect, keys, ua, ...}`。后台不会把
+一键导入串包含 `{cookie, cookie_headers, ticket_guard_server_data, dtrait_blob, keys, ua, ...}`。后台不会把
 server_data 当作续期响应，而是在导入时一次性解析并加密保存。
 
 如果只拿到 Cookie，账号仍可作为「仅接收」导入；要发送私信，必须同时具有

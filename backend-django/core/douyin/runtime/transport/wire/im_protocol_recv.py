@@ -368,6 +368,7 @@ class IMMessage:
     msg_type: int
     server_message_id: int
     create_time_us: int
+    conversation_short_id: int
     sender_uid: int
     sender_sec_uid: str
     content_json: str
@@ -386,6 +387,7 @@ _MSG_F_CONV_ID = 1
 _MSG_F_TYPE = 2
 _MSG_F_SERVER_ID = 3
 _MSG_F_CREATE_TIME = 4
+_MSG_F_CONV_SHORT_ID = 5
 _MSG_F_SENDER_UID = 7
 _MSG_F_CONTENT = 8
 _MSG_F_EXT_KV = 9
@@ -586,6 +588,7 @@ def decode_im_message(buf: bytes) -> Optional[IMMessage]:
     msg_type = get_first_int(fields, _MSG_F_TYPE)
     server_id = get_first_int(fields, _MSG_F_SERVER_ID)
     create_us = get_first_int(fields, _MSG_F_CREATE_TIME)
+    conversation_short_id = get_first_int(fields, _MSG_F_CONV_SHORT_ID)
     sender = get_first_int(fields, _MSG_F_SENDER_UID)
     sender_sec = get_first_str(fields, _MSG_F_SENDER_SEC_UID)
     content_raw = get_first_bytes(fields, _MSG_F_CONTENT)
@@ -644,6 +647,7 @@ def decode_im_message(buf: bytes) -> Optional[IMMessage]:
         msg_type=msg_type,
         server_message_id=server_id,
         create_time_us=create_us,
+        conversation_short_id=conversation_short_id,
         sender_uid=sender,
         sender_sec_uid=sender_sec,
         content_json=content_json,

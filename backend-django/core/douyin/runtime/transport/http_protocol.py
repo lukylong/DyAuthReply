@@ -252,6 +252,11 @@ _ENDPOINTS: dict[str, dict[str, str]] = {
         "url": "https://imapi.douyin.com/v1/message/get_by_user",
         "content_type": "application/x-protobuf",
     },
+    "get_conversation_info": {
+        "method": "POST",
+        "url": "https://imapi.douyin.com/v2/conversation/get_info_list",
+        "content_type": "application/x-protobuf",
+    },
     "user_detail": {
         # 批量补 sender_uid → 昵称/头像/sec_uid（JSON 接口，不是 protobuf）
         # 用于 scan 之后给 _upsert 喂 peer_nickname / peer_avatar，避免前端
@@ -270,14 +275,21 @@ _ENDPOINTS: dict[str, dict[str, str]] = {
 _BASE_IM_HEADERS: dict[str, str] = {
     "content-type": "application/x-protobuf",
     "accept": "application/x-protobuf",
-    "origin": "https://www.douyin.com",
-    "referer": "https://www.douyin.com/",
+    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,ja;q=0.7",
+    "origin": "https://creator.douyin.com",
+    "referer": "https://creator.douyin.com/",
+    "priority": "u=1, i",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-site",
 }
 
 IDENTITY_SECURITY_URL = (
-    "https://www.douyin.com/passport/safe/get_identity_security_token/"
+    "https://creator.douyin.com/passport/safe/get_identity_security_token/"
 )
-_IDENTITY_SECURITY_REFERER = "https://www.douyin.com/chat?isPopup=1"
+_IDENTITY_SECURITY_REFERER = (
+    "https://creator.douyin.com/creator-micro/data/following/chat"
+)
 
 
 def identity_security_base_params(trace_id: str) -> str:
@@ -287,17 +299,18 @@ def identity_security_base_params(trace_id: str) -> str:
     并对整串计算 a_bogus。
     """
     return "&".join([
-        "passport_jssdk_version=4.2.3",
+        "passport_jssdk_version=5.1.4",
         "passport_jssdk_type=lite",
         "is_from_ttaccountsdk=1",
-        "aid=6383",
+        "aid=2906",
         "language=zh",
-        "scene=web_im",
+        "account_app_language=zh-CN",
+        "scene=im_send_msg",
         "auto_retry_req=0",
         "skip_verify=false",
         "identity_token_force_get_tag=0",
         f"biz_trace_id={trace_id}",
-        "id_token_version=1.2.10",
+        "id_token_version=2.1.5",
     ])
 
 # creator.douyin.com 域下的 JSON 业务接口（user_detail 等）共用 headers
@@ -383,7 +396,32 @@ def _build_default_sign_provider():
 
 
 # 业务层明确拒收（有 server_msg_id 也不能当成功落库）
-_HARD_BIZ_FAIL_CODES = frozenset({60021, 7905, 7911})
+_HARD_BIZ_FAIL_CODES = frozenset({60021, 7905, 7911, 8610})
+
+
+def _format_send_business_failure(result: SendMessageResult, log_tag: str) -> str:
+    """把 IM 业务层拒收转成可操作的错误，避免空 tips 回落成 ``msg=OK``。
+
+    当前创作者中心在私信发送校验未通过时会返回
+    ``biz_status_code=8610/raw_check_code=2`` 且不分配 server_msg_id。
+    这是发送端的平台校验拒绝，不能误报为 Cookie 失效。
+    """
+
+    if result.biz_status_code == 8610 and result.biz_raw_check_code == 2:
+        detail = "抖音平台发送风控拦截，消息未送达；请等待风控解除或在抖音端完成验证后重试"
+    elif result.biz_status_text:
+        detail = result.biz_status_text
+    elif result.biz_raw_check_code:
+        detail = "抖音平台发送校验未通过，消息未送达"
+    elif result.status_msg and result.status_msg.upper() != "OK":
+        detail = result.status_msg
+    else:
+        detail = "抖音平台拒绝发送，消息未送达"
+
+    return (
+        f"{log_tag} business status={result.biz_status_code} "
+        f"raw_check_code={result.biz_raw_check_code} msg={detail}"
+    )
 
 
 class HttpProtocolTransport(AccountTransport):
@@ -457,6 +495,9 @@ class HttpProtocolTransport(AccountTransport):
         self._bound_account_id: Optional[str] = None
         # key=account_id, value=(identity token, device id, monotonic timestamp)
         self._identity_security_cache: dict[str, tuple[str, str, float]] = {}
+        # key=platform conversation_id, value=(short_id, ticket, monotonic timestamp)
+        # short_id 来自消息 f5；ticket 再由 cmd=610 会话详情接口补齐。
+        self._conversation_send_context_cache: dict[str, tuple[int, str, float]] = {}
 
     def _assert_account_bound(self, account: "DouyinAccount", verb: str) -> None:
         """校验传入账号与本 transport 绑定账号一致（信息隔离硬约束）。"""
@@ -835,7 +876,7 @@ class HttpProtocolTransport(AccountTransport):
                 fetch_self_profile_via_douyin_web,
             )
 
-            cookies = await self._sign.get_cookies()
+            cookies = await self._sign.get_cookies(domain_contains="www.douyin.com")
             ua = getattr(self._sign, "_user_agent", "") or ""
             proxy = getattr(self._sign, "_proxy_url", None)
             web_profile = await fetch_self_profile_via_douyin_web(
@@ -1466,7 +1507,7 @@ class HttpProtocolTransport(AccountTransport):
             return cached[0], cached[1]
 
         try:
-            cookies = await self._sign.get_cookies()
+            cookies = await self._sign.get_cookies(domain_contains="creator.douyin.com")
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"读取身份安全 Cookie 失败: {exc}") from exc
         cookies = {str(k).lower(): str(v) for k, v in (cookies or {}).items()}
@@ -1475,6 +1516,10 @@ class HttpProtocolTransport(AccountTransport):
             "accept": "application/json, text/javascript",
             "referer": _IDENTITY_SECURITY_REFERER,
             "x-tt-passport-csrf-token": (
+                cookies.get("passport_csrf_token", "")
+                or cookies.get("passport_csrf_token_default", "")
+            ),
+            "x-secsdk-csrf-token": (
                 cookies.get("passport_csrf_token", "")
                 or cookies.get("passport_csrf_token_default", "")
             ),
@@ -1510,6 +1555,135 @@ class HttpProtocolTransport(AccountTransport):
             raise RuntimeError(f"身份安全 token 获取失败: {payload!r}{hint}")
         self._identity_security_cache[account_id] = (token, device_id, now)
         return token, device_id
+
+    def _remember_conversation_short_ids(self, messages: list[Any]) -> None:
+        """把收信响应中的 ``conversation_short_id`` 留给后续发送。"""
+
+        now = time.monotonic()
+        for message in messages:
+            conversation_id = str(
+                getattr(message, "conversation_id", "") or ""
+            ).strip()
+            short_id = int(
+                getattr(message, "conversation_short_id", 0) or 0
+            )
+            if not conversation_id or short_id <= 0:
+                continue
+            cached = self._conversation_send_context_cache.get(conversation_id)
+            ticket = cached[1] if cached and cached[0] == short_id else ""
+            self._conversation_send_context_cache[conversation_id] = (
+                short_id,
+                ticket,
+                now,
+            )
+
+    async def _resolve_send_conversation_context(
+        self,
+        account: "DouyinAccount",
+        conversation_id: str,
+        *,
+        force: bool = False,
+    ) -> tuple[int, str]:
+        """获取发送必填的会话短 ID 与 ticket，并做短时缓存。"""
+
+        from core.douyin.runtime.transport.wire.im_send_pb2 import (
+            decode_get_conversation_info_response_pb2,
+            encode_get_conversation_info_request_pb2,
+        )
+
+        now = time.monotonic()
+        cached = self._conversation_send_context_cache.get(conversation_id)
+        if cached and not force and cached[1] and now - cached[2] < 900:
+            return cached[0], cached[1]
+
+        short_id = cached[0] if cached and not force else 0
+        if short_id <= 0:
+            endpoint = _ENDPOINTS["get_by_user"]
+            body, seq_id = encode_get_by_user_request(cursor_us=0, limit=200)
+            logger.info(
+                f"[transport.http] send_context → POST {endpoint['url']} "
+                f"account={account.id} conv={conversation_id} seq_id={seq_id}"
+            )
+            resp: SignedResponse = await self._sign.signed_fetch(
+                method=endpoint["method"],
+                url=endpoint["url"],
+                body=body,
+                headers=_BASE_IM_HEADERS,
+            )
+            if not resp.ok or not resp.content:
+                raise RuntimeError(
+                    f"发送前读取会话短 ID 失败: http status={resp.status}"
+                )
+            result = decode_get_by_user_response(resp.content)
+            if result.status_code != 0:
+                self._raise_if_login_expired(
+                    resp.status, result.status_code,
+                    proto_status_msg=result.status_msg,
+                    context=(
+                        "发送前读取会话短 ID 失败: "
+                        f"protocol status={result.status_code} msg={result.status_msg!r}"
+                    ),
+                )
+                raise RuntimeError(
+                    "发送前读取会话短 ID 失败: "
+                    f"protocol status={result.status_code} msg={result.status_msg!r}"
+                )
+            self._remember_conversation_short_ids(result.messages)
+            cached = self._conversation_send_context_cache.get(conversation_id)
+            short_id = cached[0] if cached else 0
+        if short_id <= 0:
+            raise RuntimeError(
+                f"发送会话缺少 conversation_short_id: {conversation_id}"
+            )
+
+        endpoint = _ENDPOINTS["get_conversation_info"]
+        body, seq_id = encode_get_conversation_info_request_pb2(
+            conversation_id=conversation_id,
+            conversation_short_id=short_id,
+            user_agent=getattr(self._sign, "_user_agent", "") or "",
+        )
+        logger.info(
+            f"[transport.http] send_context → POST {endpoint['url']} "
+            f"account={account.id} conv={conversation_id} short_id={short_id} "
+            f"seq_id={seq_id}"
+        )
+        resp = await self._sign.signed_fetch(
+            method=endpoint["method"],
+            url=endpoint["url"],
+            body=body,
+            headers=_BASE_IM_HEADERS,
+        )
+        if not resp.ok or not resp.content:
+            raise RuntimeError(
+                f"发送前读取会话 ticket 失败: http status={resp.status}"
+            )
+        context = decode_get_conversation_info_response_pb2(resp.content)
+        if context.status_code != 0:
+            self._raise_if_login_expired(
+                resp.status, context.status_code,
+                proto_status_msg=context.status_msg,
+                context=(
+                    "发送前读取会话 ticket 失败: "
+                    f"protocol status={context.status_code} msg={context.status_msg!r}"
+                ),
+            )
+            raise RuntimeError(
+                "发送前读取会话 ticket 失败: "
+                f"protocol status={context.status_code} msg={context.status_msg!r}"
+            )
+        if context.conversation_id and context.conversation_id != conversation_id:
+            raise RuntimeError("发送前读取会话 ticket 失败: conversation_id 回显不一致")
+        if context.conversation_short_id not in (0, short_id):
+            raise RuntimeError("发送前读取会话 ticket 失败: conversation_short_id 回显不一致")
+        ticket = str(context.ticket or "").strip()
+        if not ticket:
+            raise RuntimeError("发送前读取会话 ticket 失败: ticket 为空")
+        self._conversation_send_context_cache[conversation_id] = (
+            short_id,
+            ticket,
+            now,
+        )
+        return short_id, ticket
 
     async def _post_send_message(
         self,
@@ -1561,26 +1735,30 @@ class HttpProtocolTransport(AccountTransport):
 
         cookies = await self._sign.get_cookies()
         cookies = {str(k).lower(): str(v) for k, v in (cookies or {}).items()}
-        s_v_web_id = cookies.get("s_v_web_id", "")
-        if not s_v_web_id:
-            raise RuntimeError(f"{log_tag} 缺少 s_v_web_id，无法组装 verifyFp/fp")
+        conversation_short_id, conversation_ticket = (
+            await self._resolve_send_conversation_context(account, conversation_id)
+        )
         identity_token, identity_device_id = await self._get_identity_security_token(account)
 
         body, client_msg_id, seq_id = await sync_to_async(
             encode_send_message_request_pb2, thread_sensitive=False
         )(
             conversation_id=conversation_id,
+            conversation_short_id=conversation_short_id,
+            ticket=conversation_ticket,
             text=normalized,
             bd_ticket=bd_ticket,
-            s_v_web_id=s_v_web_id,
+            s_v_web_id="",
             identity_security_token=identity_token,
             identity_security_device_id=identity_device_id,
+            user_agent=getattr(self._sign, "_user_agent", "") or "",
         )
         encoder = "pb2-2026"
 
         logger.info(
             f"[transport.http] {log_tag} → POST {endpoint['url']} "
             f"account={account.id} conv={conversation_id} "
+            f"short_id={conversation_short_id} ticket=Y "
             f"client_msg_id={client_msg_id} seq_id={seq_id} body_len={len(body)} "
             f"encoder={encoder}"
         )
@@ -1592,7 +1770,6 @@ class HttpProtocolTransport(AccountTransport):
             headers=_BASE_IM_HEADERS,
             use_xhr=True,
             base_params="",
-            post_sign_params={"verifyFp": s_v_web_id, "fp": s_v_web_id},
         )
 
         if not resp.ok:
@@ -1657,10 +1834,7 @@ class HttpProtocolTransport(AccountTransport):
                     f"biz_raw_check_code={result.biz_raw_check_code} "
                     f"server_msg_id={result.server_msg_id} client_msg_id={result.client_msg_id}"
                 )
-                raise RuntimeError(
-                    f"{log_tag} business status={result.biz_status_code} "
-                    f"msg={result.biz_status_text or result.status_msg or 'unknown'}"
-                )
+                raise RuntimeError(_format_send_business_failure(result, log_tag))
         if result.biz_status_code == 8101 and result.biz_status_text:
             logger.warning(
                 f"[transport.http] {log_tag} 业务层提示异常 account={account.id} "
@@ -1987,6 +2161,14 @@ class HttpProtocolTransport(AccountTransport):
                     )
                     hinted_conversation_id = None
                 else:
+                    self._raise_if_login_expired(
+                        resp.status, result.status_code,
+                        proto_status_msg=result.status_msg,
+                        context=(
+                            f"scan_inbox(conv) 协议层失败 status_code={result.status_code} "
+                            f"msg={result.status_msg!r}"
+                        ),
+                    )
                     raise RuntimeError(
                         f"scan_inbox(conv) 协议层失败 status_code={result.status_code} "
                         f"msg={result.status_msg!r}"
@@ -1995,6 +2177,7 @@ class HttpProtocolTransport(AccountTransport):
                 # 会话级快路径失效时，回退到跨会话 get_by_user 主路径，避免打断整个 scan loop。
                 pass
             else:
+                self._remember_conversation_short_ids(result.messages)
                 cursor_max = max(
                     [conversation_cursor]
                     + [m.server_message_id for m in result.messages if m.server_message_id > 0]
@@ -2278,6 +2461,8 @@ class HttpProtocolTransport(AccountTransport):
                 f"scan_inbox 协议层失败 status_code={result.status_code} "
                 f"msg={result.status_msg!r}"
             )
+
+        self._remember_conversation_short_ids(result.messages)
 
         # ---------------- identity sanity check ----------------
         # get_by_user 协议没有 list_conversations 的 participants 结构，做 hard

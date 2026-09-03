@@ -141,7 +141,33 @@ def parse_keys(raw: str) -> dict[str, str]:
 _BUNDLE_PREFIX = "DYCRED1."
 
 
-def parse_credential_bundle(raw: str) -> dict[str, str]:
+def _normalize_cookie_headers(raw: Any) -> dict[str, str]:
+    """Keep only the three Douyin host cookie snapshots used by the runtime."""
+
+    if not isinstance(raw, dict):
+        return {}
+    allowed = {
+        "creator.douyin.com",
+        "imapi.douyin.com",
+        "www.douyin.com",
+    }
+    result: dict[str, str] = {}
+    for key, value in raw.items():
+        host = str(key or "").strip().lower()
+        if "://" in host:
+            try:
+                from urllib.parse import urlparse
+
+                host = (urlparse(host).hostname or "").lower()
+            except Exception:  # noqa: BLE001
+                continue
+        header = str(value or "").strip()
+        if host in allowed and header and len(header) <= 128 * 1024:
+            result[host] = header
+    return result
+
+
+def parse_credential_bundle(raw: str) -> dict[str, Any]:
     """解析浏览器扩展生成的「一键导入串」→ {cookie, web_protect, keys, user_agent, sec_uid, nickname, unique_id}。
 
     支持两种形态：
@@ -197,6 +223,15 @@ def parse_credential_bundle(raw: str) -> dict[str, str]:
         "nickname": str(payload.get("nickname") or ""),        # 新增
         "unique_id": str(payload.get("unique_id") or ""),      # 新增
         "avatar": str(payload.get("avatar") or ""),            # 新增
+        # v2.2.0: retain Chromium's host-scoped Cookie header instead of
+        # flattening conflicting creator/imapi/www values into one mapping.
+        "cookie_headers": _normalize_cookie_headers(payload.get("cookie_headers")),
+        # dtrait_blob is the reusable inner device feature blob.  The raw
+        # header remains a same-path fallback for bundles captured before the
+        # document-start hook observed the plaintext blob.
+        "dtrait_blob": str(payload.get("dtrait_blob") or ""),
+        "session_dtrait": str(payload.get("session_dtrait") or ""),
+        "session_dtrait_path": str(payload.get("session_dtrait_path") or ""),
     }
 
 
@@ -236,6 +271,10 @@ def merge_storage_state(
     web_protect: str = "",
     keys: str = "",
     domain: str = ".douyin.com",
+    cookie_headers: Any = None,
+    dtrait_blob: str = "",
+    session_dtrait: str = "",
+    session_dtrait_path: str = "",
 ) -> dict[str, Any]:
     """在已有 storage_state 之上做**增量更新**，构造新的 storage_state。
 
@@ -269,6 +308,22 @@ def merge_storage_state(
         cookies = {c.get("name"): c.get("value", "") for c in cookie_list if c.get("name")}
 
     state: dict[str, Any] = {"cookies": cookie_list, "origins": base.get("origins") or []}
+
+    scoped_headers = _normalize_cookie_headers(cookie_headers)
+    if scoped_headers:
+        state["_cookie_headers"] = scoped_headers
+    elif not new_cookies and isinstance(base.get("_cookie_headers"), dict):
+        state["_cookie_headers"] = _normalize_cookie_headers(base.get("_cookie_headers"))
+
+    dtrait = {
+        "blob": str(dtrait_blob or "").strip(),
+        "header": str(session_dtrait or "").strip(),
+        "path": str(session_dtrait_path or "").strip(),
+    }
+    if any(dtrait.values()):
+        state["_dtrait"] = dtrait
+    elif not new_cookies and isinstance(base.get("_dtrait"), dict):
+        state["_dtrait"] = dict(base.get("_dtrait") or {})
 
     # bd-ticket：旧值为基底 → 登录响应 Cookie → 显式 server_data/keys。
     bd: dict[str, str] = dict(base.get("_bd_ticket") or {})
@@ -320,6 +375,10 @@ def build_storage_state(
     web_protect: str = "",
     keys: str = "",
     domain: str = ".douyin.com",
+    cookie_headers: Any = None,
+    dtrait_blob: str = "",
+    session_dtrait: str = "",
+    session_dtrait_path: str = "",
 ) -> dict[str, Any]:
     """把粘贴的三件套构造成内部 storage_state（可直接交给 storage.save_storage_state）。
 
@@ -331,7 +390,15 @@ def build_storage_state(
     if not parse_cookie_header(cookie_str):
         raise ValueError("cookie 为空或格式不正确（应为浏览器复制的 Cookie 整行）")
     return merge_storage_state(
-        None, cookie_str, web_protect=web_protect, keys=keys, domain=domain
+        None,
+        cookie_str,
+        web_protect=web_protect,
+        keys=keys,
+        domain=domain,
+        cookie_headers=cookie_headers,
+        dtrait_blob=dtrait_blob,
+        session_dtrait=session_dtrait,
+        session_dtrait_path=session_dtrait_path,
     )
 
 

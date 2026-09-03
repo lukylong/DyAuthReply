@@ -19,14 +19,17 @@
     cookie               —— 监控/接收 + 发送都需要（必填）
     bd_ticket(priK/...)  —— 仅「发送/建会话」需要；监控只读接口可不带
 
-signed_fetch 收到的 url 是**裸 endpoint**（无 query），本类负责补齐：
+signed_fetch 收到的 url 是**裸 endpoint**（无 query）。creator IM 的 imapi
+请求保持裸 URL；其它 Web 接口继续补齐：
     最终 query = 签名前参数 + msToken + a_bogus + 签名后参数
     imapi 写接口额外注入 bd-ticket-guard 头（有 bd_ticket 凭证时）
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
 from contextlib import suppress
 from typing import TYPE_CHECKING, Optional, Union
 from urllib.parse import urlparse
@@ -35,7 +38,14 @@ from asgiref.sync import sync_to_async
 
 from core.douyin.runtime.transport.sign_types import SignedResponse, SignerUnavailable
 from core.douyin.runtime.transport.sign import js_signer
+from core.douyin.runtime.transport.sign.bd_ticket import derive_ecdh_key
+from core.douyin.runtime.transport.sign.dtrait import build_session_dtrait
+from core.douyin.runtime.transport.chrome_http_client import (
+    AsyncChromeHttpClient,
+    ChromeHttpError,
+)
 from core.douyin.runtime.transport.sign.mstoken import resolve_mstoken
+from core.douyin.runtime.transport.browser_fingerprint import browser_fingerprint
 # 复用 LocalSignProvider 已经校准过的 web 公共参数表与小工具，避免重复维护
 from core.douyin.runtime.transport.local_sign_provider import (
     _DEFAULT_UA,
@@ -58,6 +68,8 @@ _IMAPI_WRITE_PATHS = (
     "/v1/conversation/create",
 )
 _IDENTITY_SECURITY_PATH = "/passport/safe/get_identity_security_token/"
+_GET_CLIENT_CERT_PATH = "/passport/ticket_guard/get_client_cert/"
+_CSRF_BOOTSTRAP_PATH = "/service/2/abtest_config/"
 
 
 class JsSignProvider:
@@ -65,11 +77,16 @@ class JsSignProvider:
 
     def __init__(self, *, request_timeout_s: Optional[float] = None, verify_tls: bool = True) -> None:
         self._account_id: Optional[str] = None
-        self._client: "Optional[httpx.AsyncClient]" = None
+        self._client: Optional[AsyncChromeHttpClient] = None
         self._cookies: dict[str, str] = {}
+        self._cookie_headers: dict[str, str] = {}
         self._bd_ticket: dict[str, str] = {}  # {private_key, ticket, ts_sign}
+        self._dtrait: dict[str, str] = {}
+        self._dtrait_material: Optional[tuple[str, bytes]] = None
         self._user_agent: str = _DEFAULT_UA
         self._proxy_url: Optional[str] = None
+        self._ecdh_key: Optional[bytes] = None
+        self._ecdh_retry_at = 0.0
         # 超时默认值统一从 settings 读取（DOUYIN_HTTP_TIMEOUT_S），便于规模化调参
         if request_timeout_s is None:
             request_timeout_s = _setting_float("DOUYIN_HTTP_TIMEOUT_S", 15.0)
@@ -79,12 +96,18 @@ class JsSignProvider:
 
     # ---------------- 生命周期 ----------------
     async def start(self, account: "DouyinAccount") -> None:
-        import httpx
-
         self._account_id = str(account.id)
         self._user_agent = (getattr(account, "user_agent", "") or "").strip() or _DEFAULT_UA
         self._proxy_url = (getattr(account, "proxy_url", "") or "").strip() or None
-        self._cookies, self._bd_ticket = await _load_account_credentials(self._account_id)
+        (
+            self._cookies,
+            self._bd_ticket,
+            self._cookie_headers,
+            self._dtrait,
+        ) = await _load_account_credentials(self._account_id)
+        self._ecdh_key = None
+        self._ecdh_retry_at = 0.0
+        self._dtrait_material = None
 
         # JS 引擎健康预检：dy_ab.js / Node / PyExecJS 任一缺失则不就绪，触发上层 fallback
         if not await sync_to_async(js_signer.is_available, thread_sensitive=False)():
@@ -102,19 +125,12 @@ class JsSignProvider:
             )
 
         try:
-            # 统一连接池上限：每账号独立 client，限制单账号并发连接，避免规模化时句柄/连接爆炸
-            limits = httpx.Limits(
-                max_connections=_setting_int("DOUYIN_HTTP_MAX_CONNECTIONS", 8),
-                max_keepalive_connections=_setting_int("DOUYIN_HTTP_MAX_KEEPALIVE", 4),
-                keepalive_expiry=_setting_float("DOUYIN_HTTP_KEEPALIVE_EXPIRY_S", 30.0),
-            )
-            self._client = httpx.AsyncClient(
+            self._client = AsyncChromeHttpClient(
+                user_agent=self._user_agent,
                 timeout=self._timeout_s,
                 proxy=self._proxy_url,
-                follow_redirects=True,
                 verify=self._verify_tls,
-                limits=limits,
-                headers={"user-agent": self._user_agent},
+                max_connections=_setting_int("DOUYIN_HTTP_MAX_CONNECTIONS", 8),
             )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[sign.js] httpx 客户端创建失败 account={self._account_id} err={e}")
@@ -126,7 +142,8 @@ class JsSignProvider:
         logger.info(
             f"[sign.js] JsSignProvider 就绪 account={self._account_id} "
             f"proxy={'Y' if self._proxy_url else 'N'} cookies={len(self._cookies)} "
-            f"bd_ticket={'Y' if self._bd_ticket.get('private_key') else 'N'}"
+            f"bd_ticket={'Y' if self._bd_ticket.get('private_key') else 'N'} "
+            f"tls_profile={getattr(self._client, 'profile', 'unknown')}"
         )
 
     async def stop(self, account: "DouyinAccount") -> None:
@@ -170,13 +187,11 @@ class JsSignProvider:
                 creator JSON 接口的公共参数与 webapp/aid=6383 不同，需由调用方传入。
             extra_params: 追加到查询串的额外键值（值会做 URL 编码）。
                 这些参数会一并参与 a_bogus 计算，确保与浏览器一致。
-            post_sign_params: 在 a_bogus 后追加、不参与签名的键值。PC IM send
-                的 verifyFp/fp 必须放在这里以保持浏览器字段顺序。
+            post_sign_params: 在 a_bogus 后追加、不参与签名的键值。
 
         Raises:
             SignerUnavailable: 引擎/客户端未就绪、签名抛错或 httpx 网络异常（上层 fallback）。
         """
-        import httpx
         from urllib.parse import quote
 
         if not self.is_ready or self._client is None:
@@ -185,15 +200,20 @@ class JsSignProvider:
         parsed = urlparse(url)
         host = parsed.netloc.lower()
         path = parsed.path
+        request_cookies = self._cookies_for_host(host)
 
-        # ① host 公共参数（可被 base_params 覆盖）→ ② 补 msToken → ③ 追加 extra_params
-        #  → ④ dy_ab.js 对最终查询串算 a_bogus（extra_params 一并入参，与浏览器对齐）
-        base = base_params if base_params is not None else _common_params_for(host, self._user_agent)
-        token = resolve_mstoken(self._cookies)
-        params_with_token = f"{base}&msToken={token}" if base else f"msToken={token}"
-        if extra_params:
-            extra = "&".join(f"{k}={quote(str(v), safe='')}" for k, v in extra_params.items())
-            params_with_token = f"{params_with_token}&{extra}"
+        # creator.douyin.com 的 2026 PC IM 请求对 imapi 使用裸 URL，不携带
+        # msToken/a_bogus/verifyFp。主站与 creator JSON 接口仍走查询签名。
+        is_creator_im = host == "imapi.douyin.com"
+        final_url = url
+        params_with_token = ""
+        if not is_creator_im:
+            base = base_params if base_params is not None else _common_params_for(host, self._user_agent)
+            token = resolve_mstoken(request_cookies)
+            params_with_token = f"{base}&msToken={token}" if base else f"msToken={token}"
+            if extra_params:
+                extra = "&".join(f"{k}={quote(str(v), safe='')}" for k, v in extra_params.items())
+                params_with_token = f"{params_with_token}&{extra}"
         body_str = ""
         if isinstance(body, str):
             body_str = body
@@ -212,13 +232,16 @@ class JsSignProvider:
             # thread_sensitive=False：签名只与常驻 Node 进程池通信、不触碰 Django ORM，
             # 放到独立线程池并行执行，避免占用 Django 共享线程（默认 thread_sensitive=True
             # 会让所有签名与 DB 操作在同一线程串行，多账号下成为延迟主因）。
-            a_bogus = await sync_to_async(js_signer.get_ab, thread_sensitive=False)(
-                params_with_token, body_str
-            )
+            a_bogus = ""
+            if not is_creator_im:
+                a_bogus = await sync_to_async(js_signer.get_ab, thread_sensitive=False)(
+                    params_with_token, body_str
+                )
         except js_signer.JsSignerUnavailable as e:
             raise SignerUnavailable(f"JS a_bogus 失败: {e}") from e
-        final_url = f"{url}?{params_with_token}&a_bogus={a_bogus}"
-        if post_sign_params:
+        if not is_creator_im:
+            final_url = f"{url}?{params_with_token}&a_bogus={a_bogus}"
+        if post_sign_params and not is_creator_im:
             post = "&".join(
                 f"{k}={quote(str(v), safe='')}" for k, v in post_sign_params.items()
             )
@@ -227,11 +250,21 @@ class JsSignProvider:
         # 组装请求头：默认 + UA + Cookie + （imapi 写接口）bd-ticket-guard
         req_headers: dict[str, str] = {
             "user-agent": self._user_agent,
-            "cookie": _cookie_header(self._cookies),
+            "cookie": self._cookie_header_for_host(host),
         }
         for k, v in (headers or {}).items():
             req_headers[k.lower()] = v
-        await self._maybe_inject_bd_ticket(req_headers, host=host, path=path)
+        fingerprint = browser_fingerprint(self._user_agent)
+        req_headers.setdefault("sec-ch-ua", fingerprint["sec_ch_ua"])
+        req_headers.setdefault("sec-ch-ua-mobile", "?0")
+        req_headers.setdefault("sec-ch-ua-platform", fingerprint["sec_ch_ua_platform"])
+        await self._maybe_inject_session_dtrait(req_headers, host=host, path=path)
+        await self._maybe_inject_bd_ticket(
+            req_headers,
+            host=host,
+            path=path,
+            cookies=request_cookies,
+        )
 
         content: Optional[bytes] = None
         if isinstance(body, (bytes, bytearray, memoryview)):
@@ -248,7 +281,7 @@ class JsSignProvider:
                 headers=req_headers,
                 timeout=timeout_s,
             )
-        except httpx.HTTPError as e:
+        except ChromeHttpError as e:
             logger.warning(
                 f"[sign.js] httpx 请求失败 account={self._account_id} "
                 f"host={host} err={type(e).__name__}: {e}"
@@ -268,16 +301,60 @@ class JsSignProvider:
             content=raw,
         )
 
-    async def _maybe_inject_bd_ticket(
+    def _cookies_for_host(self, host: str) -> dict[str, str]:
+        raw = self._cookie_headers.get((host or "").lower(), "")
+        return _parse_cookie_header(raw) if raw else dict(self._cookies)
+
+    def _cookie_header_for_host(self, host: str) -> str:
+        return self._cookie_headers.get((host or "").lower(), "") or _cookie_header(
+            self._cookies
+        )
+
+    async def _maybe_inject_session_dtrait(
         self, req_headers: dict[str, str], *, host: str, path: str
     ) -> None:
-        """对 PC IM 写接口注入完整 bd-ticket-guard 头。
+        """Attach a fresh creator passport dtrait header when captured material exists."""
 
-        本地当前使用 ECDSA 回退算法（web-sign-type=0）；该分支不需要
-        服务端 ECDH 证书，与参考实现的 fallback 分支一致。
-        """
+        if req_headers.get("x-tt-session-dtrait"):
+            return
+        is_identity = (
+            host == "creator.douyin.com" and path == _IDENTITY_SECURITY_PATH
+        )
+        if not is_identity:
+            return
+        blob = str(self._dtrait.get("blob") or "").strip()
+        if blob:
+            try:
+                built = await sync_to_async(build_session_dtrait, thread_sensitive=False)(
+                    path,
+                    blob,
+                    session_material=self._dtrait_material,
+                    return_material=True,
+                )
+                header, self._dtrait_material = built
+                req_headers["x-tt-session-dtrait"] = header
+                return
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"[sign.js] dtrait 动态构造失败 account={self._account_id} "
+                    f"err={type(exc).__name__}: {exc}"
+                )
+        captured_header = str(self._dtrait.get("header") or "").strip()
+        captured_path = str(self._dtrait.get("path") or "").strip()
+        if captured_header and captured_path == path:
+            req_headers["x-tt-session-dtrait"] = captured_header
+
+    async def _maybe_inject_bd_ticket(
+        self,
+        req_headers: dict[str, str],
+        *,
+        host: str,
+        path: str,
+        cookies: Optional[dict[str, str]] = None,
+    ) -> None:
+        """对 PC IM 强校验接口注入当前 bd-ticket-guard 头。"""
         is_write = "imapi.douyin.com" in host and any(path.startswith(p) for p in _IMAPI_WRITE_PATHS)
-        is_identity = "www.douyin.com" in host and path == _IDENTITY_SECURITY_PATH
+        is_identity = host in {"www.douyin.com", "creator.douyin.com"} and path == _IDENTITY_SECURITY_PATH
         if not (is_write or is_identity):
             return
         prik = self._bd_ticket.get("private_key") or ""
@@ -289,10 +366,23 @@ class JsSignProvider:
                 f"account={self._account_id} path={path}"
             )
             return
+        effective_cookies = cookies or self._cookies
+        sign_id = _cookie_value(effective_cookies, "bd_ticket_guard_ts_sign_id")
+        if sign_id and not ts_sign.startswith(sign_id):
+            raise SignerUnavailable(
+                "bd-ticket-guard 凭证与当前 Cookie 不属于同一次登录，请重新导入"
+            )
+        ecdh_key = await self._resolve_ecdh_key(prik)
+        t_trust = 1 if _cookie_value(effective_cookies, "_bd_ticket_crypt_cookie") else None
         try:
             client_data, ree_key = await asyncio.gather(
                 sync_to_async(js_signer.build_bd_ticket_client_data, thread_sensitive=False)(
-                    path, ticket, ts_sign, prik
+                    path,
+                    ticket,
+                    ts_sign,
+                    prik,
+                    ecdh_key=ecdh_key,
+                    t_trust=t_trust,
                 ),
                 sync_to_async(js_signer.get_ree_key, thread_sensitive=False)(prik),
             )
@@ -304,16 +394,132 @@ class JsSignProvider:
         req_headers["bd-ticket-guard-web-version"] = (
             "1" if ts_sign.startswith("ts.1") else "2"
         )
-        req_headers["bd-ticket-guard-web-sign-type"] = "0"
+        req_headers["bd-ticket-guard-web-sign-type"] = "1" if ecdh_key else "0"
+
+    async def _resolve_ecdh_key(self, private_key: str) -> Optional[bytes]:
+        """Fetch/cache the server certificate and derive the current HMAC key."""
+
+        if self._ecdh_key is not None:
+            return self._ecdh_key
+        if not (self._bd_ticket.get("client_cert") or "").startswith("pub."):
+            return None
+        if time.monotonic() < self._ecdh_retry_at:
+            return None
+        try:
+            server_cert = await self._fetch_server_cert()
+            self._ecdh_key = await sync_to_async(derive_ecdh_key, thread_sensitive=False)(
+                private_key, server_cert
+            )
+            return self._ecdh_key
+        except Exception as e:  # noqa: BLE001
+            self._ecdh_retry_at = time.monotonic() + 60.0
+            logger.warning(
+                f"[sign.js] ECDH 换证失败，60 秒内回退 ECDSA "
+                f"account={self._account_id} err={type(e).__name__}: {e}"
+            )
+            return None
+
+    async def _fetch_server_cert(self) -> str:
+        """Fetch the ticket-guard ECIES server certificate using current cookies."""
+
+        if self._client is None:
+            raise SignerUnavailable("JsSignProvider HTTP 客户端未就绪")
+        from urllib.parse import urlencode
+
+        origin = "https://www.douyin.com"
+        request_cookies = self._cookies_for_host("www.douyin.com")
+        query = urlencode(
+            {
+                "aid": "6383",
+                "is_from_ttaccountsdk": "1",
+                "msToken": resolve_mstoken(request_cookies),
+            }
+        )
+        a_bogus = await sync_to_async(js_signer.get_ab, thread_sensitive=False)(query, "")
+        csrf_token = await self._fetch_secsdk_csrf_token(origin)
+        headers = {
+            "x-tt-session-dtrait": "",
+            "referer": f"{origin}/",
+            "user-agent": self._user_agent,
+            "accept": "application/json",
+        }
+        if csrf_token:
+            headers["x-secsdk-csrf-token"] = csrf_token
+        headers.update(
+            {
+                "content-type": "application/x-www-form-urlencoded",
+                "cookie": self._cookie_header_for_host("www.douyin.com"),
+                "accept-language": "zh-CN,zh;q=0.9",
+                "origin": origin,
+                "priority": "u=1, i",
+                "sec-fetch-dest": "empty",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-site": "same-origin",
+            }
+        )
+        response = await self._client.request(
+            "POST",
+            f"{origin}{_GET_CLIENT_CERT_PATH}?{query}&a_bogus={a_bogus}",
+            content=b"server_data=1,aid=6383",
+            headers=headers,
+            timeout=self._timeout_s,
+        )
+        if response.status_code // 100 != 2:
+            raise RuntimeError(f"get_client_cert HTTP {response.status_code}")
+        payload = json.loads((response.content or b"{}").decode("utf-8", "replace"))
+        if payload.get("message") != "success":
+            raise RuntimeError("get_client_cert business response was not success")
+        server_cert = str((payload.get("data") or {}).get("server_cert") or "")
+        if not server_cert:
+            raise RuntimeError("get_client_cert returned an empty certificate")
+        return server_cert
+
+    async def _fetch_secsdk_csrf_token(self, origin: str) -> str:
+        if self._client is None:
+            return ""
+        host = urlparse(origin).netloc.lower()
+        headers = {
+            "x-secsdk-csrf-request": "1",
+            "referer": f"{origin}/",
+            "user-agent": self._user_agent,
+            "x-secsdk-csrf-version": "1.2.22",
+            "accept": "*/*",
+            "accept-language": "zh-CN,zh;q=0.9",
+            "cookie": self._cookie_header_for_host(host),
+        }
+        try:
+            response = await self._client.request(
+                "HEAD",
+                f"{origin}{_CSRF_BOOTSTRAP_PATH}",
+                headers=headers,
+                timeout=self._timeout_s,
+            )
+            raw = response.headers.get("x-ware-csrf-token", "")
+            parts = raw.split(",")
+            return parts[1].strip() if len(parts) > 1 else ""
+        except Exception:  # noqa: BLE001
+            return ""
 
     # ---------------- cookie / 凭证 ----------------
     async def get_cookies(self, *, domain_contains: str = "douyin.com") -> dict[str, str]:  # noqa: ARG002
         """返回小写 name → value（与 SignProvider.get_cookies 对齐）。"""
-        return {k.lower(): v for k, v in self._cookies.items()}
+        host = ""
+        marker = str(domain_contains or "").lower()
+        if "creator" in marker:
+            host = "creator.douyin.com"
+        elif "imapi" in marker:
+            host = "imapi.douyin.com"
+        elif marker.startswith("www"):
+            host = "www.douyin.com"
+        cookies = self._cookies_for_host(host) if host else self._cookies
+        return {k.lower(): v for k, v in cookies.items()}
 
     def set_cookies(self, cookies: dict[str, str]) -> None:
         """直接注入 cookie（验证/调试用：从抓包复制的 Cookie 头）。"""
         self._cookies = dict(cookies or {})
+        self._cookie_headers = {}
+        self._ecdh_key = None
+        self._ecdh_retry_at = 0.0
 
     def set_bd_ticket(
         self,
@@ -330,6 +536,8 @@ class JsSignProvider:
             "ts_sign": ts_sign,
             "client_cert": client_cert,
         }
+        self._ecdh_key = None
+        self._ecdh_retry_at = 0.0
 
     def get_bd_ticket(self) -> dict[str, str]:
         """返回完整 bd-ticket 凭证（private_key/ticket/ts_sign/client_cert）。
@@ -340,6 +548,27 @@ class JsSignProvider:
 
 
 # ──────────────────────── helpers ────────────────────────
+
+
+def _cookie_value(cookies: dict[str, str], name: str) -> str:
+    if name in cookies:
+        return str(cookies.get(name) or "")
+    wanted = name.casefold()
+    for key, value in cookies.items():
+        if str(key).casefold() == wanted:
+            return str(value or "")
+    return ""
+
+
+def _parse_cookie_header(raw: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for item in str(raw or "").split(";"):
+        if "=" not in item:
+            continue
+        name, value = item.strip().split("=", 1)
+        if name:
+            result[name] = value
+    return result
 
 
 def _setting_float(name: str, default: float) -> float:
@@ -359,8 +588,10 @@ def _setting_int(name: str, default: int) -> int:
 
 
 @sync_to_async
-def _load_account_credentials(account_id: str) -> tuple[dict[str, str], dict[str, str]]:
-    """从加密 storage_state 取 (cookies, bd_ticket)。
+def _load_account_credentials(
+    account_id: str,
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]]:
+    """从加密 storage_state 取 cookie、ticket、域名快照和 dtrait。
 
     cookie:    state["cookies"] = [{name, value}, ...]
     bd_ticket: state["_bd_ticket"] = {private_key, ticket, ts_sign}（录入时写入，见阶段 2）
@@ -374,9 +605,9 @@ def _load_account_credentials(account_id: str) -> tuple[dict[str, str], dict[str
         state = load_storage_state(account_id)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[sign.js] 读取 storage_state 失败 account={account_id}: {e}")
-        return {}, {}
+        return {}, {}, {}, {}
     if not state or not isinstance(state, dict):
-        return {}, {}
+        return {}, {}, {}, {}
     cookies: dict[str, str] = {}
     for c in state.get("cookies") or []:
         name = str(c.get("name") or "")
@@ -389,4 +620,15 @@ def _load_account_credentials(account_id: str) -> tuple[dict[str, str], dict[str
         "ts_sign": str(bd_raw.get("ts_sign") or ""),
         "client_cert": str(bd_raw.get("client_cert") or ""),
     }
-    return cookies, bd_ticket
+    cookie_headers = {
+        str(host).lower(): str(value or "")
+        for host, value in (state.get("_cookie_headers") or {}).items()
+        if host and value
+    }
+    dtrait_raw = state.get("_dtrait") or {}
+    dtrait = {
+        "blob": str(dtrait_raw.get("blob") or ""),
+        "header": str(dtrait_raw.get("header") or ""),
+        "path": str(dtrait_raw.get("path") or ""),
+    }
+    return cookies, bd_ticket, cookie_headers, dtrait

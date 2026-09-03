@@ -6,9 +6,15 @@
  */
 const SERVER_DATA_HEADER = 'bd-ticket-guard-server-data';
 const MAX_SERVER_DATA_LENGTH = 64 * 1024;
+const DTRAIT_HEADER = 'x-tt-session-dtrait';
+const MAX_DTRAIT_LENGTH = 16 * 1024;
 
 function storageKey(storeId) {
   return `ticket_guard_server_data_${storeId || '0'}`;
+}
+
+function dtraitStorageKey(storeId) {
+  return `session_dtrait_${storeId || '0'}`;
 }
 
 async function resolveStoreId(tab, tabId) {
@@ -35,6 +41,21 @@ async function captureServerData(details, value) {
   });
 }
 
+async function captureSessionDtrait(details, value) {
+  const tab = await chrome.tabs.get(details.tabId).catch(() => null);
+  if (!tab) return;
+  const storeId = await resolveStoreId(tab, details.tabId);
+  let path = '';
+  try { path = new URL(details.url).pathname; } catch { /* ignore */ }
+  await chrome.storage.session.set({
+    [dtraitStorageKey(storeId)]: {
+      value,
+      path,
+      capturedAt: Date.now(),
+    },
+  });
+}
+
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
     const header = (details.responseHeaders || []).find(
@@ -47,4 +68,17 @@ chrome.webRequest.onHeadersReceived.addListener(
   },
   { urls: ['*://*.douyin.com/*'] },
   ['responseHeaders', 'extraHeaders'],
+);
+
+chrome.webRequest.onBeforeSendHeaders.addListener(
+  (details) => {
+    const header = (details.requestHeaders || []).find(
+      (item) => String(item.name || '').toLowerCase() === DTRAIT_HEADER,
+    );
+    const value = String(header?.value || '').trim();
+    if (!value || value.length > MAX_DTRAIT_LENGTH || details.tabId < 0) return;
+    void captureSessionDtrait(details, value);
+  },
+  { urls: ['*://*.douyin.com/*'] },
+  ['requestHeaders', 'extraHeaders'],
 );

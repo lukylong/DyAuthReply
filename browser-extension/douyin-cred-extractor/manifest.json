@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "抖音登录态提取器 (DyAuthReply)",
-  "version": "2.1.0",
-  "description": "一键抓取抖音 Cookie / bd-ticket server_data / keys，用于 DyAuthReply 导入登录态",
+  "version": "2.2.0",
+  "description": "一键抓取抖音分域 Cookie / bd-ticket / dtrait / keys，用于 DyAuthReply 导入登录态",
   "incognito": "split",
   "permissions": [
     "cookies",
@@ -21,5 +21,13 @@
   },
   "background": {
     "service_worker": "background.js"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.douyin.com/*"],
+      "js": ["dtrait-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
 }

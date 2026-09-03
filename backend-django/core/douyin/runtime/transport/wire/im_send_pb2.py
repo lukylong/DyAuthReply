@@ -18,12 +18,21 @@ import json
 import random
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Optional
 
 from core.douyin.runtime.transport.wire import dy_request_pb2 as R
+from core.douyin.runtime.transport.wire.codec import (
+    encode_field,
+    get_first_bytes,
+    get_first_int,
+    get_first_str,
+    iter_fields,
+)
 from core.douyin.runtime.transport.wire.im_protocol import IM_BUILD_ID, IM_SDK_VERSION
 
 SEND_MESSAGE_CMD_ID = 100
+GET_CONVERSATION_INFO_CMD_ID = 610
 # 保留旧导入名，单一真值收敛到 im_protocol。
 IM_BUILD_NUMBER = IM_BUILD_ID
 _DEFAULT_UA = (
@@ -36,13 +45,50 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _header_entry(key: str, value: str) -> bytes:
+    return encode_field(1, key) + encode_field(2, value)
+
+
+def _serialize_creator_envelope(
+    req: "R.Request",
+    *,
+    body_field: int,
+    body_payload: bytes,
+    headers: list[tuple[str, str]],
+) -> bytes:
+    """Serialize creator IM with explicit proto3 defaults seen on Chromium's wire."""
+
+    request_body = encode_field(body_field, body_payload)
+    parts = [
+        encode_field(1, int(req.cmd)),
+        encode_field(2, int(req.sequence_id)),
+        encode_field(3, req.sdk_version),
+        encode_field(4, ""),
+        encode_field(5, int(req.refer)),
+        encode_field(6, 0),
+        encode_field(7, req.build_number),
+        encode_field(8, request_body),
+        encode_field(9, ""),
+        encode_field(11, req.device_platform),
+    ]
+    parts.extend(encode_field(15, _header_entry(key, value)) for key, value in headers)
+    parts.extend(
+        [
+            encode_field(18, int(req.auth_type)),
+            encode_field(21, req.biz),
+            encode_field(22, req.access),
+        ]
+    )
+    return b"".join(parts)
+
+
 def _build_envelope(
     cmd: int,
     bd_ticket: Optional[dict] = None,  # noqa: ARG001 旧调用兼容；新 envelope 不带票据
     *,
     s_v_web_id: str = "",
     webid: str = "",  # noqa: ARG001 旧调用兼容
-    user_agent: str = _DEFAULT_UA,
+    user_agent: str = _DEFAULT_UA,  # noqa: ARG001 浏览器 UA 仅用于 HTTP 层
 ) -> "R.Request":
     """组装 2026 PC IM Request envelope。
 
@@ -56,29 +102,15 @@ def _build_envelope(
     req.refer = 3
     req.inbox_type = 0
     req.build_number = IM_BUILD_NUMBER
-    req.device_id = "0"
-    req.device_platform = "douyin_pc"
-    req.version_code = "360000"
+    # 2026-09-03 creator.douyin.com 实际请求画像。这里必须与创作者中心
+    # PC IM 包一致；使用主站 douyin_pc/aid=6383 会被 send 返回 7911。
+    req.device_platform = "douyin_creator"
     h = req.headers
-    h["session_aid"] = "6383"
-    h["session_did"] = "0"
-    h["app_name"] = "douyin_pc"
-    h["priority_region"] = "cn"
-    h["user_agent"] = user_agent
-    h["cookie_enabled"] = "true"
-    h["browser_language"] = "zh-CN"
-    h["browser_platform"] = "Win32"
-    h["browser_name"] = "Mozilla"
-    h["browser_version"] = user_agent.split("Mozilla/")[-1]
-    h["browser_online"] = "true"
-    h["screen_width"] = "1920"
-    h["screen_height"] = "1080"
-    h["referer"] = "https://www.douyin.com/jingxuan"
-    h["timezone_name"] = "Asia/Shanghai"
-    h["deviceId"] = "0"
+    h["aid_new"] = ""
+    h["app_name"] = "douyin_creator"
     h["is-retry"] = "0"
-    req.auth_type = 4
-    req.biz = "douyin_web"
+    req.auth_type = 1
+    req.biz = "douyin_creator"
     req.access = "web_sdk"
     return req
 
@@ -131,39 +163,157 @@ def encode_send_message_request_pb2(
     if content_override is not None:
         msg_content = content_override
     else:
-        msg_content = {
-            "aweType": 700,
-            "type": 0,
-            "richTextInfos": [],
-            "text": text,
-        }
+        # Chromium preserves this insertion order in the compact JSON string.
+        msg_content = {"text": text, "aweType": 774}
     content_json = json.dumps(msg_content, ensure_ascii=False, separators=(",", ":"))
 
-    body = req.body.send_message_body
-    body.conversation_id = conversation_id
-    body.conversation_type = 1
-    body.conversation_short_id = short_id
-    body.content = content_json
-    body.ext.append(R.ExtValue(key="s:mentioned_users", value=""))
-    body.ext.append(R.ExtValue(key="s:client_message_id", value=cm_id))
+    ext_pairs = [
+        ("s:mentioned_users", ""),
+        ("s:client_message_id", cm_id),
+    ]
     for key, value in (ext or {}).items():
         if key not in {"s:mentioned_users", "s:client_message_id", "s:stime"}:
-            body.ext.append(R.ExtValue(key=str(key), value=str(value)))
-    body.ext.append(
-        R.ExtValue(key="s:stime", value=f"{_now_ms()}.{random.randrange(100000):05d}")
-    )
-    if mentioned_users:
-        body.mentioned_users.extend(int(uid) for uid in mentioned_users)
-    body.message_type = int(message_type)
-    body.ticket = ticket or ""
-    body.client_message_id = cm_id
+            ext_pairs.append((str(key), str(value)))
+    # Browser JS does not left-pad the random suffix (observed widths 2..5).
+    ext_pairs.append(("s:stime", f"{_now_ms()}.{random.randrange(100000)}"))
 
+    send_parts = [
+        encode_field(1, conversation_id),
+        encode_field(2, 1),
+        encode_field(3, short_id),
+        encode_field(4, content_json),
+    ]
+    send_parts.extend(
+        encode_field(5, _header_entry(key, value)) for key, value in ext_pairs
+    )
+    send_parts.extend(
+        [
+            encode_field(6, int(message_type)),
+            encode_field(7, ticket or ""),
+            encode_field(8, cm_id),
+        ]
+    )
+    send_parts.extend(encode_field(9, int(uid)) for uid in (mentioned_users or []))
+
+    headers: list[tuple[str, str]] = []
     if identity_security_token:
-        req.headers["identity_security_token"] = json.dumps(
-            {"token": str(identity_security_token)}, separators=(",", ":")
+        headers.append(
+            (
+                "identity_security_token",
+                json.dumps(
+                    {"token": str(identity_security_token)}, separators=(",", ":")
+                ),
+            )
         )
     if identity_security_device_id:
-        req.headers["identity_security_device_id"] = str(identity_security_device_id)
-    req.headers["identity_security_aid"] = ""
+        headers.append(("identity_security_device_id", str(identity_security_device_id)))
+    headers.extend(
+        [
+            ("identity_security_aid", "2906"),
+            ("aid_new", ""),
+            ("app_name", "douyin_creator"),
+            ("is-retry", "0"),
+        ]
+    )
+    serialized = _serialize_creator_envelope(
+        req,
+        body_field=SEND_MESSAGE_CMD_ID,
+        body_payload=b"".join(send_parts),
+        headers=headers,
+    )
+    return serialized, cm_id, req.sequence_id
 
-    return req.SerializeToString(), cm_id, req.sequence_id
+
+def encode_get_conversation_info_request_pb2(
+    *,
+    conversation_id: str,
+    conversation_short_id: int,
+    user_agent: str = _DEFAULT_UA,
+) -> tuple[bytes, int]:
+    """构造 PC IM ``conversation/get_info_list`` 请求。"""
+
+    if not conversation_id:
+        raise ValueError("conversation_id 不能为空")
+    short_id = int(conversation_short_id or 0)
+    if short_id <= 0:
+        raise ValueError("conversation_short_id 必须大于 0")
+
+    req = _build_envelope(GET_CONVERSATION_INFO_CMD_ID, user_agent=user_agent)
+    data_payload = b"".join(
+        [
+            encode_field(1, conversation_id),
+            encode_field(2, short_id),
+            encode_field(3, 1),
+        ]
+    )
+    get_info_payload = encode_field(1, data_payload)
+    serialized = _serialize_creator_envelope(
+        req,
+        body_field=GET_CONVERSATION_INFO_CMD_ID,
+        body_payload=get_info_payload,
+        headers=[
+            ("aid_new", ""),
+            ("app_name", "douyin_creator"),
+            ("is-retry", "0"),
+        ],
+    )
+    return serialized, req.sequence_id
+
+
+@dataclass(frozen=True)
+class ConversationSendContext:
+    """发送所需的会话短 ID 与会话票据。"""
+
+    status_code: int
+    status_msg: str
+    conversation_id: str = ""
+    conversation_short_id: int = 0
+    ticket: str = ""
+
+
+def decode_get_conversation_info_response_pb2(buf: bytes) -> ConversationSendContext:
+    """解析 ``conversation/get_info_list`` 的首条会话信息。"""
+
+    if not buf:
+        return ConversationSendContext(status_code=-1, status_msg="empty body")
+    envelope: dict[int, list] = {}
+    try:
+        for field_number, _wire_type, value in iter_fields(buf):
+            envelope.setdefault(field_number, []).append(value)
+    except Exception:
+        return ConversationSendContext(status_code=-1, status_msg="envelope unparseable")
+
+    status_code = get_first_int(envelope, 3, default=-1)
+    status_msg = get_first_str(envelope, 4)
+    if status_code != 0:
+        return ConversationSendContext(status_code=status_code, status_msg=status_msg)
+
+    body = get_first_bytes(envelope, 6)
+    body_fields: dict[int, list] = {}
+    try:
+        for field_number, _wire_type, value in iter_fields(body):
+            body_fields.setdefault(field_number, []).append(value)
+    except Exception:
+        return ConversationSendContext(status_code=-1, status_msg="body unparseable")
+    wrapper = get_first_bytes(body_fields, GET_CONVERSATION_INFO_CMD_ID)
+    wrapper_fields: dict[int, list] = {}
+    try:
+        for field_number, _wire_type, value in iter_fields(wrapper):
+            wrapper_fields.setdefault(field_number, []).append(value)
+    except Exception:
+        return ConversationSendContext(status_code=-1, status_msg="wrapper unparseable")
+
+    info = get_first_bytes(wrapper_fields, 1)
+    info_fields: dict[int, list] = {}
+    try:
+        for field_number, _wire_type, value in iter_fields(info):
+            info_fields.setdefault(field_number, []).append(value)
+    except Exception:
+        return ConversationSendContext(status_code=-1, status_msg="conversation unparseable")
+    return ConversationSendContext(
+        status_code=0,
+        status_msg=status_msg,
+        conversation_id=get_first_str(info_fields, 1),
+        conversation_short_id=get_first_int(info_fields, 2),
+        ticket=get_first_str(info_fields, 4),
+    )

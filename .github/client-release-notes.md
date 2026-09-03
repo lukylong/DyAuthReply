@@ -1,12 +1,11 @@
 ## 本次更新
 
-- **修复卡片回复无法发送**：协议更新后发送日志仍引用已移除的旧模板变量，导致请求在发往抖音前直接异常；现已清理旧字段并补充发送链路回归测试
-- **影响范围**：同时修复卡片落地页、普通自动回复和手动文本发送共用的 HTTP 私信发送通道
-- **同步抖音 PC 私信新协议**：`im/user_token/v2` 仅返回 `user_id` 时也可继续建立私信会话，不再依赖旧响应中的 `token`、`sdk_cert`、`ts_sign`
-- **迁移发送凭证来源**：从登录回包 Cookie `bd-ticket-guard-server-data` 解析 `token`、`sdk_cert`、`ts_sign`，并兼容 `server_data` / `bd_ticket_guard_server_data` 别名
-- **凭证导入改为原子绑定**：扩展导入时一次性提交账号身份、Cookie 与签名材料，切换账号时清理旧签名，避免串号
-- 随版本提供 **抖音登录态提取器 2.1.0**，新增登录回包监听并自动保存新协议所需凭证
-- 修复卡片落地页被客户端整页跳转的问题，并保留抖音爬虫可读取的自定义标题与描述
+- **同步抖音创作者中心 PC IM 当前协议**：发送改为无 query 的 `v1/message/send`，先解析会话 `short_id` / `ticket`，并使用当前 `douyin_creator` 请求包与身份头。
+- **修复凭证采集缺口**：同时保存 `creator.douyin.com`、`imapi.douyin.com`、`www.douyin.com` 三个域的 Cookie 快照，补齐 UIFEID、浏览器指纹、`bd-ticket`、`dtrait` 和 Web 签名链路。
+- **适配 `im/user_token/v2` 新返回**：接口仅返回 `user_id` 时仍可建立收消息链路，不再把缺少旧 `token`、`sdk_cert`、`ts_sign` 当成登录失效。
+- **修复风控误报**：`biz_status_code=8610/raw_check_code=2` 现明确标记为抖音平台发送风控，不再显示为 Cookie 失效或 `msg=OK`。
+- **凭证导入保持原子绑定**：同一会话增量更新时保留有效私钥与 ticket，跨账号时清理旧签名材料。
+- 随版本提供 **抖音登录态提取器 2.2.0**，可一键导出与本版协议匹配的主机级 Cookie 和签名材料。
 
 ---
 

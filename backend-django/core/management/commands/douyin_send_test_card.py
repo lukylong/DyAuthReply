@@ -104,22 +104,20 @@ class Command(BaseCommand):
             ))
             return
 
-        s_v_web_id = ''
-        try:
-            cookies = {str(k).lower(): str(v) for k, v in (await signer.get_cookies()).items()}
-            s_v_web_id = cookies.get('s_v_web_id', '')
-        except Exception:  # noqa: BLE001
-            pass
-        if not s_v_web_id:
-            self.stderr.write(self.style.ERROR("缺少 s_v_web_id，无法组装 verifyFp/fp"))
-            return
-
         try:
             identity_token, identity_device_id = (
                 await transport._get_identity_security_token(account)
             )
         except Exception as e:  # noqa: BLE001
             self.stderr.write(self.style.ERROR(f"身份安全 token 获取失败: {e}"))
+            return
+
+        try:
+            conversation_short_id, conversation_ticket = (
+                await transport._resolve_send_conversation_context(account, conv)
+            )
+        except Exception as e:  # noqa: BLE001
+            self.stderr.write(self.style.ERROR(f"会话 short_id/ticket 获取失败: {e}"))
             return
 
         from core.douyin.runtime.transport.http_protocol import _ENDPOINTS, _BASE_IM_HEADERS
@@ -146,13 +144,15 @@ class Command(BaseCommand):
                     encode_send_message_request_pb2, thread_sensitive=False
                 )(
                     conversation_id=conv,
+                    conversation_short_id=conversation_short_id,
+                    ticket=conversation_ticket,
                     text='',
                     bd_ticket=bd_ticket,
-                    s_v_web_id=s_v_web_id,
                     content_override=card_i,
                     message_type=mt,
                     identity_security_token=identity_token,
                     identity_security_device_id=identity_device_id,
+                    user_agent=getattr(signer, '_user_agent', '') or '',
                 )
             except Exception as e:  # noqa: BLE001
                 self.stderr.write(self.style.ERROR(f"  type={mt} 编码失败: {e}"))
@@ -166,7 +166,6 @@ class Command(BaseCommand):
                     headers=_BASE_IM_HEADERS,
                     use_xhr=True,
                     base_params='',
-                    post_sign_params={'verifyFp': s_v_web_id, 'fp': s_v_web_id},
                 )
             except Exception as e:  # noqa: BLE001
                 self.stderr.write(self.style.ERROR(f"  type={mt} 请求异常: {e}"))

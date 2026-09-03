@@ -281,6 +281,10 @@ def quick_create_account(request, data: QuickCreateAccountIn):
         web_protect = data.web_protect or ""
         keys = data.keys or ""
         user_agent = data.user_agent or ""
+        cookie_headers = {}
+        dtrait_blob = ""
+        session_dtrait = ""
+        session_dtrait_path = ""
 
         # 解析 bundle（如果提供）
         bundle_sec_uid = ""
@@ -298,6 +302,10 @@ def quick_create_account(request, data: QuickCreateAccountIn):
                 bundle_nickname = unpacked.get("nickname", "")     # 新增
                 bundle_unique_id = unpacked.get("unique_id", "")   # 新增
                 bundle_avatar = unpacked.get("avatar", "")         # 新增
+                cookie_headers = unpacked.get("cookie_headers") or {}
+                dtrait_blob = unpacked.get("dtrait_blob", "")
+                session_dtrait = unpacked.get("session_dtrait", "")
+                session_dtrait_path = unpacked.get("session_dtrait_path", "")
             except ValueError as e:
                 _delete_douyin_account_with_storage(account)
                 raise HttpError(400, f"一键导入串解析失败：{e}")
@@ -308,6 +316,10 @@ def quick_create_account(request, data: QuickCreateAccountIn):
             cookie,
             web_protect=web_protect,
             keys=keys,
+            cookie_headers=cookie_headers,
+            dtrait_blob=dtrait_blob,
+            session_dtrait=session_dtrait,
+            session_dtrait_path=session_dtrait_path,
         )
 
         cookies = {c["name"]: c["value"] for c in state.get("cookies", [])}
@@ -532,6 +544,10 @@ def import_credential(request, account_id: str, data: DouyinCredentialImportIn):
     web_protect = data.web_protect or ""
     keys = data.keys or ""
     user_agent = data.user_agent or ""
+    cookie_headers = {}
+    dtrait_blob = ""
+    session_dtrait = ""
+    session_dtrait_path = ""
     bundle_sec_uid = ""
     bundle_nickname = ""
     bundle_unique_id = ""
@@ -549,6 +565,10 @@ def import_credential(request, account_id: str, data: DouyinCredentialImportIn):
         bundle_nickname = unpacked.get("nickname", "")     # 新增
         bundle_unique_id = unpacked.get("unique_id", "")   # 新增
         bundle_avatar = unpacked.get("avatar", "")         # 新增
+        cookie_headers = unpacked.get("cookie_headers") or {}
+        dtrait_blob = unpacked.get("dtrait_blob", "")
+        session_dtrait = unpacked.get("session_dtrait", "")
+        session_dtrait_path = unpacked.get("session_dtrait_path", "")
 
     base_state = load_storage_state(str(account_id))
     try:
@@ -557,6 +577,10 @@ def import_credential(request, account_id: str, data: DouyinCredentialImportIn):
             cookie,
             web_protect=web_protect,
             keys=keys,
+            cookie_headers=cookie_headers,
+            dtrait_blob=dtrait_blob,
+            session_dtrait=session_dtrait,
+            session_dtrait_path=session_dtrait_path,
         )
     except ValueError as e:
         raise HttpError(400, f"凭证解析失败：{e}")
@@ -698,6 +722,10 @@ def check_credential(request, data: CheckCredentialIn):
         cookie = data.cookie or ""
         web_protect = data.web_protect or ""
         keys = data.keys or ""
+        cookie_headers = {}
+        dtrait_blob = ""
+        session_dtrait = ""
+        session_dtrait_path = ""
         bundle_sec_uid = ""
         bundle_nickname = ""
 
@@ -710,6 +738,10 @@ def check_credential(request, data: CheckCredentialIn):
                 keys = keys or unpacked["keys"]
                 bundle_sec_uid = unpacked.get("sec_uid", "")
                 bundle_nickname = unpacked.get("nickname", "")
+                cookie_headers = unpacked.get("cookie_headers") or {}
+                dtrait_blob = unpacked.get("dtrait_blob", "")
+                session_dtrait = unpacked.get("session_dtrait", "")
+                session_dtrait_path = unpacked.get("session_dtrait_path", "")
             except ValueError as e:
                 return {
                     "valid": False,
@@ -722,7 +754,16 @@ def check_credential(request, data: CheckCredentialIn):
 
         # 创建临时 storage_state（不保存）
         temp_id = str(uuid.uuid4())
-        state = merge_storage_state({}, cookie, web_protect=web_protect, keys=keys)
+        state = merge_storage_state(
+            {},
+            cookie,
+            web_protect=web_protect,
+            keys=keys,
+            cookie_headers=cookie_headers,
+            dtrait_blob=dtrait_blob,
+            session_dtrait=session_dtrait,
+            session_dtrait_path=session_dtrait_path,
+        )
 
         cookies = {c["name"]: c["value"] for c in state.get("cookies", [])}
         if not ({"sessionid", "sessionid_ss"} & cookies.keys()):

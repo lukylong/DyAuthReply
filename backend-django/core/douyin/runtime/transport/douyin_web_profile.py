@@ -19,10 +19,11 @@ import random
 import re
 import time
 from typing import Any, Mapping, Optional
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlparse
 
 from asgiref.sync import sync_to_async
 
+from core.douyin.runtime.transport.browser_fingerprint import browser_fingerprint
 from core.douyin.runtime.transport.local_sign_provider import _cookie_header
 from core.douyin.runtime.transport.sign.mstoken import random_mstoken, resolve_mstoken
 
@@ -68,6 +69,15 @@ def generate_fake_webid(length: int = 19) -> str:
 def ensure_web_cookie_fields(cookies: Mapping[str, str]) -> dict[str, str]:
     """对照 DouyinAuth.perepare_auth：缺 msToken / s_v_web_id 时补全。"""
     out = dict(cookies or {})
+    # SignProvider historically exposes lower-case lookup keys. Restore the
+    # case-sensitive names Chromium actually sends before serializing Cookie.
+    for canonical in ("UIFID", "UIFID_temp", "msToken", "msToken_ss"):
+        matches = [key for key in out if str(key).casefold() == canonical.casefold()]
+        if canonical not in out and matches:
+            out[canonical] = out[matches[0]]
+        for key in matches:
+            if key != canonical:
+                out.pop(key, None)
     if not (out.get("msToken") or out.get("msToken_ss")):
         out["msToken"] = random_mstoken()
     if not out.get("s_v_web_id"):
@@ -75,33 +85,48 @@ def ensure_web_cookie_fields(cookies: Mapping[str, str]) -> dict[str, str]:
     return out
 
 
-def _web_platform_params(*, is_mac: bool) -> dict[str, str]:
+def _cookie_value(cookies: Mapping[str, str], name: str) -> str:
+    if name in cookies:
+        return str(cookies.get(name) or "")
+    wanted = name.casefold()
+    for key, value in cookies.items():
+        if str(key).casefold() == wanted:
+            return str(value or "")
+    return ""
+
+
+def _web_platform_params(*, user_agent: str) -> dict[str, str]:
+    fingerprint = browser_fingerprint(user_agent)
     return {
         "device_platform": "webapp",
         "aid": "6383",
         "channel": "channel_pc_web",
         "publish_video_strategy_type": "2",
+        "update_version_code": "170400",
         "pc_client_type": "1",
+        "pc_libra_divert": fingerprint["pc_libra_divert"],
+        "support_h265": "1",
+        "support_dash": "1",
+        "cpu_core_num": "8",
         "version_code": "170400",
         "version_name": "17.4.0",
         "cookie_enabled": "true",
         "screen_width": "1920",
         "screen_height": "1080",
         "browser_language": "zh-CN",
-        "browser_platform": "MacIntel" if is_mac else "Win32",
+        "browser_platform": fingerprint["browser_platform"],
         "browser_name": "Chrome",
-        "browser_version": "124.0.0.0",
+        "browser_version": fingerprint["browser_version"],
         "browser_online": "true",
         "engine_name": "Blink",
-        "engine_version": "124.0.0.0",
-        "os_name": "Mac OS" if is_mac else "Windows",
-        "os_version": "10",
-        "cpu_core_num": "8",
+        "engine_version": fingerprint["engine_version"],
+        "os_name": fingerprint["os_name"],
+        "os_version": fingerprint["os_version"],
         "device_memory": "8",
         "platform": "PC",
         "downlink": "10",
         "effective_type": "4g",
-        "round_trip_time": "50",
+        "round_trip_time": "0",
     }
 
 
@@ -114,6 +139,7 @@ async def _signed_web_get(
     referer: str,
     proxy_url: Optional[str] = None,
     timeout_s: float = 12.0,
+    verify_fp_after_sign: bool = False,
 ) -> Optional[dict[str, Any]]:
     """带 a_bogus 的 www.douyin.com GET；返回 JSON dict 或 None。"""
     import httpx
@@ -122,11 +148,15 @@ async def _signed_web_get(
 
     cookies = ensure_web_cookie_fields(cookies)
     s_v_web_id = cookies.get("s_v_web_id") or ""
+    uifid = _cookie_value(cookies, "UIFID")
     ms = resolve_mstoken(cookies)
     params = dict(params)
     params["webid"] = params.get("webid") or generate_fake_webid()
-    params["verifyFp"] = s_v_web_id
-    params["fp"] = s_v_web_id
+    if uifid:
+        params["uifid"] = uifid
+    if not verify_fp_after_sign:
+        params["verifyFp"] = s_v_web_id
+        params["fp"] = s_v_web_id
     params["msToken"] = ms
 
     query = urlencode(params)
@@ -137,12 +167,30 @@ async def _signed_web_get(
         return None
 
     url = f"{url_base}?{query}&a_bogus={a_bogus}"
+    if verify_fp_after_sign:
+        encoded_fp = quote(s_v_web_id, safe="")
+        url = f"{url}&verifyFp={encoded_fp}&fp={encoded_fp}"
+    from core.douyin.runtime.transport.sign import secsdk_web_sign
+
+    if secsdk_web_sign.is_protected(urlparse(url_base).path):
+        url = secsdk_web_sign.sign_url(url, uifid=uifid)
+    fingerprint = browser_fingerprint(user_agent)
     headers = {
         "user-agent": user_agent,
         "referer": referer,
         "accept": "application/json, text/plain, */*",
+        "sec-ch-ua": fingerprint["sec_ch_ua"],
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": fingerprint["sec_ch_ua_platform"],
+        "accept-language": "zh-CN,zh;q=0.9",
+        "priority": "u=1, i",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
         "cookie": _cookie_header(dict(cookies)),
     }
+    if uifid:
+        headers["uifid"] = uifid
     try:
         async with httpx.AsyncClient(
             timeout=timeout_s,
@@ -268,16 +316,20 @@ async def fetch_profile_stats_via_douyin_web(
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
-    is_mac = "Macintosh" in ua
     aid = account_id or "?"
 
-    p_params = _web_platform_params(is_mac=is_mac)
-    p_params.update({
+    p_params = {
+        "device_platform": "webapp",
+        "aid": "6383",
+        "channel": "channel_pc_web",
+        "publish_video_strategy_type": "2",
         "source": "channel_pc_web",
         "sec_user_id": sec_uid,
         "personal_center_strategy": "1",
-        "update_version_code": "170400",
-    })
+        "profile_other_record_enable": "1",
+        "land_to": "1",
+    }
+    p_params.update(_web_platform_params(user_agent=ua))
     p_data = await _signed_web_get(
         _WEB_PROFILE_OTHER_URL,
         p_params,
@@ -285,6 +337,7 @@ async def fetch_profile_stats_via_douyin_web(
         user_agent=ua,
         referer=f"https://www.douyin.com/user/{quote(sec_uid, safe='')}",
         proxy_url=proxy_url,
+        verify_fp_after_sign=True,
     )
     if not isinstance(p_data, dict):
         logger.warning(f"[web.profile] profile-stats 请求失败 account={aid}")
@@ -359,12 +412,13 @@ async def fetch_user_works_via_douyin_web(
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
-    is_mac = "Macintosh" in ua
     aid = account_id or "?"
     cursor = str(max_cursor or "0")
 
-    params = _web_platform_params(is_mac=is_mac)
-    params.update({
+    params = {
+        "device_platform": "webapp",
+        "aid": "6383",
+        "channel": "channel_pc_web",
         "sec_user_id": sec_uid,
         "max_cursor": cursor,
         "locate_query": "false",
@@ -374,8 +428,12 @@ async def fetch_user_works_via_douyin_web(
         "whale_cut_token": "",
         "cut_version": "1",
         "count": str(count),
-        "update_version_code": "170400",
-    })
+        "publish_video_strategy_type": "2",
+        "from_user_page": "0",
+    }
+    params.update(_web_platform_params(user_agent=ua))
+    params["version_code"] = "290100"
+    params["version_name"] = "29.1.0"
     data = await _signed_web_get(
         _WEB_AWEME_POST_URL,
         params,
@@ -383,6 +441,7 @@ async def fetch_user_works_via_douyin_web(
         user_agent=ua,
         referer=f"https://www.douyin.com/user/{quote(sec_uid, safe='')}",
         proxy_url=proxy_url,
+        verify_fp_after_sign=True,
     )
     if not isinstance(data, dict):
         logger.warning(f"[web.profile] works 请求失败 account={aid}")
@@ -420,11 +479,10 @@ async def fetch_self_profile_via_douyin_web(
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
-    is_mac = "Macintosh" in ua
     aid = account_id or "?"
 
     # 1) query/user → user_uid
-    q_params = _web_platform_params(is_mac=is_mac)
+    q_params = _web_platform_params(user_agent=ua)
     q_data = await _signed_web_get(
         _WEB_QUERY_USER_URL,
         q_params,
@@ -454,13 +512,18 @@ async def fetch_self_profile_via_douyin_web(
     # 3) profile/other → nickname（需 sec_uid）
     profile: Optional[dict] = None
     if sec_uid:
-        p_params = _web_platform_params(is_mac=is_mac)
-        p_params.update({
+        p_params = {
+            "device_platform": "webapp",
+            "aid": "6383",
+            "channel": "channel_pc_web",
+            "publish_video_strategy_type": "2",
             "source": "channel_pc_web",
             "sec_user_id": sec_uid,
             "personal_center_strategy": "1",
-            "update_version_code": "170400",
-        })
+            "profile_other_record_enable": "1",
+            "land_to": "1",
+        }
+        p_params.update(_web_platform_params(user_agent=ua))
         p_data = await _signed_web_get(
             _WEB_PROFILE_OTHER_URL,
             p_params,
@@ -468,6 +531,7 @@ async def fetch_self_profile_via_douyin_web(
             user_agent=ua,
             referer=f"https://www.douyin.com/user/{quote(sec_uid, safe='')}",
             proxy_url=proxy_url,
+            verify_fp_after_sign=True,
         )
         if isinstance(p_data, dict) and p_data.get("status_code", 0) == 0:
             profile = _profile_from_user_info_payload(p_data)

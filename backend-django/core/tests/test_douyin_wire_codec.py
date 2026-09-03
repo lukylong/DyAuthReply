@@ -109,28 +109,28 @@ class WireCodecBasicsTests(unittest.TestCase):
 # ---------------- 与 sniff 报告事实对齐 ----------------
 class IMProtocolEnvelopePrefixTests(unittest.TestCase):
     """
-    sniff 报告里 send_message 请求 hex 前缀（37 字节）：
+    当前创作者中心 send_message 请求 hex 前缀：
         08 64                              cmd_id=100
         10 9d 4e                           seq_id=10013
-        1a 05 30 2e 31 2e 38               sdk_version="0.1.8"
+        1a 05 30 2e 32 2e 30               sdk_version="0.2.0"
         22 00                              token=""
         28 03                              field 5 = 3
         30 00                              field 6 = 0
-        3a 19 ...                           build_id="0d50935:feat/pc-im-groupB"
+        3a 12 ...                           build_id="0f64c47:feat/pc-im"
         42 ?? ??                           field 8 wrapper (length follows)
 
-    无论 text / client_msg_id 怎么变，这 35 字节 + `0x42` 都不变。
-    我们用同样输入构造 envelope，前 35 字节必须 byte-for-byte 完全相同。
+    无论 text / client_msg_id 怎么变，这段固定头 + `0x42` 都不变。
+    我们用同样输入构造 envelope，前缀必须 byte-for-byte 完全相同。
     """
 
     EXPECTED_PREFIX = bytes.fromhex(
         "08 64 "
         "10 9d 4e "
-        "1a 05 30 2e 31 2e 38 "
+        "1a 05 30 2e 32 2e 30 "
         "22 00 "
         "28 03 "
         "30 00 "
-        "3a 19 30 64 35 30 39 33 35 3a 66 65 61 74 2f 70 63 2d 69 6d 2d 67 72 6f 75 70 42".replace(" ", "")
+        "3a 12 30 66 36 34 63 34 37 3a 66 65 61 74 2f 70 63 2d 69 6d".replace(" ", "")
     )
 
     def test_envelope_prefix_matches_sniff(self):
@@ -153,8 +153,8 @@ class IMProtocolEnvelopePrefixTests(unittest.TestCase):
             conversation_id="0:1:80549827440:3061476426516824",
             text="hi",
         )
-        # 新 build_number 末尾含 ASCII "B" (0x42)，不能再用 bytes.find
-        # 定位 envelope field 8，必须按 protobuf 字段迭代。
+        # 定位 envelope field 8 必须按 protobuf 字段迭代，
+        # 不依赖 build_number 的具体字节内容。
         field8 = next(value for number, _wire, value in iter_fields(body) if number == 8)
         self.assertIsInstance(field8, bytes)
         self.assertEqual(field8[0], 0xA2)

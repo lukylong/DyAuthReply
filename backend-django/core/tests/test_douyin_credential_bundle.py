@@ -100,6 +100,14 @@ class DouyinCredentialBundleTests(SimpleTestCase):
                 "web_protect": '{"ticket":"t"}',
                 "keys": '{"ec_privateKey":"k"}',
                 "ua": "Mozilla/5.0 Test",
+                "cookie_headers": {
+                    "creator.douyin.com": "sessionid=creator",
+                    "https://imapi.douyin.com/path": "sessionid=imapi",
+                    "example.com": "discard=1",
+                },
+                "dtrait_blob": "browser-device-blob",
+                "session_dtrait": "d0_captured",
+                "session_dtrait_path": "/passport/safe/get_identity_security_token/",
             }
         )
         out = parse_credential_bundle(bundle)
@@ -107,6 +115,19 @@ class DouyinCredentialBundleTests(SimpleTestCase):
         self.assertEqual(out["web_protect"], '{"ticket":"t"}')
         self.assertEqual(out["keys"], '{"ec_privateKey":"k"}')
         self.assertEqual(out["user_agent"], "Mozilla/5.0 Test")
+        self.assertEqual(
+            out["cookie_headers"],
+            {
+                "creator.douyin.com": "sessionid=creator",
+                "imapi.douyin.com": "sessionid=imapi",
+            },
+        )
+        self.assertEqual(out["dtrait_blob"], "browser-device-blob")
+        self.assertEqual(out["session_dtrait"], "d0_captured")
+        self.assertEqual(
+            out["session_dtrait_path"],
+            "/passport/safe/get_identity_security_token/",
+        )
 
     def test_parse_plain_json_fallback(self):
         out = parse_credential_bundle(
@@ -203,3 +224,43 @@ class DouyinCredentialBundleTests(SimpleTestCase):
         self.assertEqual(merged["_bd_ticket"]["ticket"], "new-ticket")
         self.assertEqual(merged["_bd_ticket"]["create_time"], "222")
         self.assertNotIn("private_key", merged["_bd_ticket"])
+
+    def test_scoped_cookie_and_dtrait_survive_key_only_update(self):
+        initial = merge_storage_state(
+            {},
+            "sessionid=current; msToken=flat",
+            cookie_headers={
+                "creator.douyin.com": "sessionid=current; msToken=creator",
+                "imapi.douyin.com": "sessionid=current; msToken=imapi",
+            },
+            dtrait_blob="browser-device-blob",
+            session_dtrait="d0_captured",
+            session_dtrait_path="/passport/safe/get_identity_security_token/",
+        )
+        updated = merge_storage_state(
+            initial,
+            "",
+            keys=json.dumps({"ec_privateKey": "private-key"}),
+        )
+
+        self.assertEqual(updated["_cookie_headers"], initial["_cookie_headers"])
+        self.assertEqual(updated["_dtrait"], initial["_dtrait"])
+        self.assertEqual(updated["_bd_ticket"]["private_key"], "private-key")
+
+    def test_new_flat_cookie_clears_stale_scoped_capture(self):
+        base = {
+            "cookies": [
+                {"name": "sessionid", "value": "old", "domain": ".douyin.com", "path": "/"}
+            ],
+            "_cookie_headers": {"imapi.douyin.com": "sessionid=old"},
+            "_dtrait": {
+                "blob": "old-blob",
+                "header": "d0_old",
+                "path": "/passport/safe/get_identity_security_token/",
+            },
+        }
+
+        updated = merge_storage_state(base, "sessionid=new")
+
+        self.assertNotIn("_cookie_headers", updated)
+        self.assertNotIn("_dtrait", updated)

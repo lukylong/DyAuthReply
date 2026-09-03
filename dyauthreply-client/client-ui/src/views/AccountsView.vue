@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeRouteLeave } from 'vue-router';
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { Ellipsis, Plus, Search, Smartphone, TriangleAlert } from 'lucide-vue-next';
 import AppModal from '../components/AppModal.vue';
 import AccountProfileDrawer from '../components/AccountProfileDrawer.vue';
 import {
@@ -26,6 +27,13 @@ const importError = ref('');
 const importSuccess = ref('');
 const reimportTarget = ref<DouyinAccount | null>(null);
 const savingId = ref('');
+const searchQuery = ref('');
+
+const filteredAccounts = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase();
+  if (!q) return accounts.value;
+  return accounts.value.filter((a) => a.nickname.toLowerCase().includes(q));
+});
 
 const showProfile = ref(false);
 const profileTarget = ref<DouyinAccount | null>(null);
@@ -104,9 +112,26 @@ function closeImport() {
   reimportTarget.value = null;
 }
 
+// ---- 卡片溢出菜单（查看主页 / 更新凭证 / 删除账号）----
+const openMenuId = ref('');
+
+function toggleMenu(id: string, event: Event) {
+  event.stopPropagation();
+  openMenuId.value = openMenuId.value === id ? '' : id;
+}
+
+function closeMenu() {
+  openMenuId.value = '';
+}
+
+function onDocumentClick() {
+  closeMenu();
+}
+
 function onEscapeKey(e: KeyboardEvent) {
   if (e.key !== 'Escape') return;
-  if (showDelete.value) closeDelete();
+  if (openMenuId.value) closeMenu();
+  else if (showDelete.value) closeDelete();
   else if (showProfile.value) closeProfile();
   else if (showImport.value) closeImport();
 }
@@ -122,10 +147,17 @@ watch([showImport, showProfile, showDelete], ([imp, prof, del]) => {
 onBeforeRouteLeave(() => {
   closeImport();
   closeProfile();
+  closeMenu();
   showDelete.value = false;
 });
 
-onUnmounted(() => {
+onMounted(() => {
+  document.addEventListener('click', onDocumentClick);
+  document.addEventListener('keydown', onEscapeKey);
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener('click', onDocumentClick);
   document.removeEventListener('keydown', onEscapeKey);
 });
 
@@ -178,25 +210,6 @@ async function toggleAutoReply(acc: DouyinAccount, event: Event) {
   }
 }
 
-async function saveQuota(acc: DouyinAccount, event: Event) {
-  const input = event.target as HTMLInputElement;
-  const quota = Number(input.value);
-  if (!Number.isFinite(quota) || quota < 0) return;
-  if (!license.value?.can_use_business) {
-    error.value = `当前授权状态为「${license.value?.state_label || '未激活'}」，无法修改配额`;
-    return;
-  }
-  savingId.value = acc.id;
-  try {
-    const updated = await patchAccount(acc.id, { daily_reply_quota: quota });
-    acc.daily_reply_quota = updated.daily_reply_quota;
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e);
-  } finally {
-    savingId.value = '';
-  }
-}
-
 function avatarInitial(name: string) {
   const t = name.trim();
   if (!t) return '?';
@@ -209,36 +222,42 @@ onMounted(load);
 <template>
   <div class="accounts-page">
     <div class="head">
-      <div>
-        <h2>我的抖音号</h2>
-        <p class="sub">通过浏览器凭证提取插件获取一键导入串，在此粘贴并托管抖音私信消息。</p>
-        <p v-if="license && !license.can_use_business" class="license-tip">
-          当前授权状态为「{{ license.state_label }}」，账号导入、凭证更新与自动回复托管已限制。
-        </p>
-        <p v-if="overAccountLimit" class="license-tip warn-limit">
-          已托管 {{ accounts.length }} 个账号，超过单机建议上限（{{ RECOMMENDED_MAX_ACCOUNTS }} 个）。账号过多会增加内存占用、回复延迟与风控关联风险，建议分散到多台设备托管。
-        </p>
+      <div class="head-title">
+        <h2>抖音账号</h2>
+        <span class="count-badge">{{ accounts.length }} 个账号</span>
       </div>
-      <button type="button" class="btn-glass btn-primary-glass" @click="openImport()">
-        <span>+</span> 导入抖音号
-      </button>
+      <div class="head-actions">
+        <div class="search-box">
+          <Search class="search-icon" :size="16" />
+          <input v-model="searchQuery" type="text" class="input-glass search-input" placeholder="搜索昵称" />
+        </div>
+        <button type="button" class="btn-glass btn-primary-glass" @click="openImport()">
+          <Plus :size="16" /> 导入抖音号
+        </button>
+      </div>
     </div>
+    <p v-if="license && !license.can_use_business" class="license-tip">
+      当前授权状态为「{{ license.state_label }}」，账号导入、凭证更新与自动回复托管已限制。
+    </p>
+    <p v-if="overAccountLimit" class="license-tip warn-limit">
+      已托管 {{ accounts.length }} 个账号，超过单机建议上限（{{ RECOMMENDED_MAX_ACCOUNTS }} 个）。账号过多会增加内存占用、回复延迟与风控关联风险，建议分散到多台设备托管。
+    </p>
 
     <div v-if="loading" class="loading-state glass-panel">
       <div class="dot-spinner"></div>
       <p>正在同步账号凭据，请稍候...</p>
     </div>
-    
+
     <div v-else-if="error" class="card error glass-panel">
-      <span class="icon">⚠️</span>
+      <TriangleAlert class="icon" :size="24" />
       <div class="err-text">
         <h4>获取数据失败</h4>
         <p>{{ error }}</p>
       </div>
     </div>
-    
+
     <div v-else-if="accounts.length === 0" class="empty-state glass-panel">
-      <div class="empty-icon">📱</div>
+      <Smartphone class="empty-icon" :size="40" />
       <h3>暂无绑定的抖音号</h3>
       <p>导入您的第一个抖音号来配置私信的自动回复任务</p>
       <button type="button" class="btn-glass btn-primary-glass mt-16" @click="openImport()">
@@ -246,48 +265,54 @@ onMounted(load);
       </button>
     </div>
 
+    <div v-else-if="filteredAccounts.length === 0" class="empty-state glass-panel">
+      <Search class="empty-icon" :size="40" />
+      <h3>没有匹配的账号</h3>
+      <p>换个昵称关键词试试</p>
+    </div>
+
     <section v-else class="accounts-grid">
-      <article v-for="acc in accounts" :key="acc.id" class="account-card glass-panel" :class="{ disabled: !acc.auto_reply_enabled }">
-        <div class="account-header">
-          <div class="profile-group">
-            <div class="avatar md">
-              <img v-if="acc.avatar" :src="acc.avatar" alt="" />
-              <span v-else>{{ avatarInitial(acc.nickname) }}</span>
-            </div>
-            <div class="name-status">
-              <strong>{{ acc.nickname }}</strong>
-              <div class="tags-row">
-                <span class="badge" :class="{ success: acc.status === 1, warn: acc.status !== 1 }">
-                  {{ statusLabel(acc.status) }}
-                </span>
-                <span class="badge" :class="{ success: acc.credential_state === 'sendable', danger: acc.credential_state === 'invalid' }">
-                  {{ credentialLabel(acc.credential_state) }}
-                </span>
-              </div>
+      <article
+        v-for="acc in filteredAccounts"
+        :key="acc.id"
+        class="account-card-sm glass-panel"
+        :class="{ disabled: !acc.auto_reply_enabled }"
+        @click="openProfile(acc)"
+      >
+        <div class="card-top">
+          <div class="avatar sm">
+            <img v-if="acc.avatar" :src="acc.avatar" alt="" />
+            <span v-else>{{ avatarInitial(acc.nickname) }}</span>
+          </div>
+          <span class="status-dot" :class="{ online: acc.status === 1 }" :title="statusLabel(acc.status)"></span>
+          <div class="menu-wrap">
+            <button
+              type="button"
+              class="menu-trigger"
+              title="更多操作"
+              aria-label="更多操作"
+              @click.stop="toggleMenu(acc.id, $event)"
+            >
+              <Ellipsis :size="16" />
+            </button>
+            <div v-if="openMenuId === acc.id" class="menu-dropdown" @click.stop>
+              <button type="button" @click="openProfile(acc); closeMenu()">查看主页</button>
+              <button type="button" @click="openImport(acc); closeMenu()">更新凭证</button>
+              <button type="button" class="danger" @click="openDelete(acc); closeMenu()">删除账号</button>
             </div>
           </div>
         </div>
 
-        <div class="quota-setting">
-          <div class="quota-info">
-            <span class="lbl">今日已回复</span>
-            <span class="val">{{ acc.reply_today ?? 0 }} 次</span>
-          </div>
-          <div class="quota-input-wrap">
-            <span class="lbl">日回复限额</span>
-            <input
-              class="input-glass quota-input"
-              type="number"
-              min="0"
-              :value="acc.daily_reply_quota ?? 200"
-              :disabled="savingId === acc.id || !!(license && !license.can_use_business)"
-              @change="saveQuota(acc, $event)"
-            />
-          </div>
-        </div>
+        <strong class="nickname" :title="acc.nickname">{{ acc.nickname }}</strong>
+        <span class="credential-badge" :class="{ success: acc.credential_state === 'sendable', danger: acc.credential_state === 'invalid' }">
+          {{ credentialLabel(acc.credential_state) }}
+        </span>
 
-        <div class="account-actions">
-          <label class="ios-switch">
+        <div class="card-divider"></div>
+
+        <div class="card-bottom">
+          <span class="reply-count">今日回复 {{ acc.reply_today ?? 0 }} 次</span>
+          <label class="ios-switch sm" @click.stop>
             <input
               type="checkbox"
               :checked="acc.auto_reply_enabled"
@@ -295,31 +320,7 @@ onMounted(load);
               @change="toggleAutoReply(acc, $event)"
             />
             <span class="slider"></span>
-            <span class="switch-lbl">自动回复</span>
           </label>
-          <div class="action-btns">
-            <button type="button" class="btn-glass btn-action" @click="openProfile(acc)">
-              查看主页
-            </button>
-            <button type="button" class="btn-glass btn-action" @click="openImport(acc)">
-              更新凭证
-            </button>
-            <button
-              type="button"
-              class="btn-glass btn-icon btn-delete"
-              title="删除账号"
-              aria-label="删除账号"
-              @click="openDelete(acc)"
-            >
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M3 6h18" />
-                <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                <line x1="10" y1="11" x2="10" y2="17" />
-                <line x1="14" y1="11" x2="14" y2="17" />
-              </svg>
-            </button>
-          </div>
         </div>
       </article>
     </section>
@@ -403,7 +404,7 @@ onMounted(load);
 .accounts-page {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 16px;
 }
 
 .head {
@@ -411,24 +412,52 @@ onMounted(load);
   justify-content: space-between;
   align-items: center;
   gap: 16px;
-  margin-bottom: 8px;
 }
 
-.head h2 {
-  margin: 0 0 6px;
-  font-size: 1.6rem;
+.head-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.head-title h2 {
+  margin: 0;
+  font-size: 1.4rem;
   font-weight: 800;
 }
 
-.sub {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: 0.9rem;
+.count-badge {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.search-box {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.search-icon {
+  position: absolute;
+  left: 12px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.search-input {
+  padding-left: 36px;
+  width: 200px;
 }
 
 .license-tip {
-  margin: 8px 0 0;
-  color: #b45309;
+  margin: 0;
+  color: var(--warning);
   font-size: 0.88rem;
 }
 
@@ -449,15 +478,14 @@ onMounted(load);
 .dot-spinner {
   width: 32px;
   height: 32px;
-  border: 2px solid rgba(255, 255, 255, 0.08);
+  border: 2px solid var(--border-subtle);
   border-radius: 50%;
-  border-top-color: var(--accent-crimson);
+  border-top-color: var(--brand-primary);
   animation: spin 1s infinite linear;
 }
 
 .empty-icon {
-  font-size: 3rem;
-  opacity: 0.8;
+  color: var(--text-muted);
 }
 
 .empty-state h3 {
@@ -482,17 +510,18 @@ onMounted(load);
   align-items: flex-start;
   gap: 16px;
   padding: 16px 20px;
-  border-color: rgba(239, 68, 68, 0.2);
-  background: rgba(239, 68, 68, 0.03);
+  border-color: var(--danger-soft);
+  background: var(--danger-soft);
 }
 
 .card.error .icon {
-  font-size: 1.5rem;
+  color: var(--danger);
+  flex-shrink: 0;
 }
 
 .err-text h4 {
   margin: 0 0 4px;
-  color: #ef4444;
+  color: var(--danger);
 }
 
 .err-text p {
@@ -501,35 +530,29 @@ onMounted(load);
   color: var(--text-secondary);
 }
 
-/* Accounts Grid Layout */
+/* Accounts Grid Layout: 4 列固定 */
 .accounts-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 20px;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
 }
 
-.account-card {
-  padding: 24px;
+.account-card-sm {
+  padding: 14px 16px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
-  transition: var(--transition-smooth);
+  gap: 10px;
+  cursor: pointer;
 }
 
-.account-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.05);
-}
-
-.account-card.disabled {
+.account-card-sm.disabled {
   opacity: 0.85;
 }
 
-.profile-group {
+.card-top {
   display: flex;
-  gap: 16px;
   align-items: center;
-  min-width: 0;
+  gap: 8px;
 }
 
 .avatar {
@@ -538,8 +561,8 @@ onMounted(load);
   flex-shrink: 0;
   display: grid;
   place-items: center;
-  background: linear-gradient(135deg, rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.01));
-  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
   color: var(--text-primary);
   font-weight: 700;
 }
@@ -548,21 +571,87 @@ onMounted(load);
   height: 100%;
   object-fit: cover;
 }
-.avatar.md {
-  width: 50px;
-  height: 50px;
-  font-size: 1.1rem;
+.avatar.sm {
+  width: 36px;
+  height: 36px;
+  font-size: 0.95rem;
 }
 
-.name-status {
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.status-dot.online {
+  background: var(--success);
+}
+
+.menu-wrap {
+  position: relative;
+  margin-left: auto;
+}
+
+.menu-trigger {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: var(--transition-quick);
+}
+
+.menu-trigger:hover {
+  background: var(--bg-app);
+  color: var(--text-primary);
+}
+
+.menu-dropdown {
+  position: absolute;
+  top: 30px;
+  right: 0;
+  z-index: 20;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  min-width: 0;
+  min-width: 132px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(16, 24, 40, 0.12);
+  padding: 6px;
 }
 
-.name-status strong {
-  font-size: 1rem;
+.menu-dropdown button {
+  border: none;
+  background: transparent;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.menu-dropdown button:hover {
+  background: var(--bg-app);
+}
+
+.menu-dropdown button.danger {
+  color: var(--danger);
+}
+
+.menu-dropdown button.danger:hover {
+  background: var(--danger-soft);
+}
+
+.nickname {
+  font-size: 0.92rem;
   color: var(--text-primary);
   font-weight: 700;
   overflow: hidden;
@@ -570,124 +659,42 @@ onMounted(load);
   white-space: nowrap;
 }
 
-.tags-row {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.badge {
+.credential-badge {
+  align-self: flex-start;
   font-size: 0.68rem;
   font-weight: 600;
   padding: 2px 8px;
   border-radius: 99px;
-  background: rgba(0, 0, 0, 0.04);
-  border: 1px solid rgba(0, 0, 0, 0.06);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
   color: var(--text-muted);
 }
-.badge.success {
-  background: rgba(34, 197, 94, 0.1);
-  border-color: rgba(34, 197, 94, 0.2);
-  color: #16803d;
+.credential-badge.success {
+  background: var(--success-soft);
+  border-color: rgba(5, 150, 105, 0.2);
+  color: var(--success);
 }
-.badge.warn {
-  background: rgba(234, 179, 8, 0.1);
-  border-color: rgba(234, 179, 8, 0.2);
-  color: #a16207;
-}
-.badge.danger {
-  background: rgba(239, 68, 68, 0.1);
-  border-color: rgba(239, 68, 68, 0.2);
-  color: #b91c1c;
+.credential-badge.danger {
+  background: var(--danger-soft);
+  border-color: rgba(220, 38, 38, 0.2);
+  color: var(--danger);
 }
 
-/* Quota parameters styling */
-.quota-setting {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  background: rgba(255, 255, 255, 0.25);
-  padding: 12px 16px;
-  border-radius: 12px;
-  border: 1px solid rgba(0, 0, 0, 0.03);
-  gap: 16px;
+.card-divider {
+  height: 1px;
+  background: var(--border-subtle);
 }
 
-.quota-info {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.quota-info .lbl, .quota-input-wrap .lbl {
-  font-size: 0.72rem;
-  color: var(--text-muted);
-  font-weight: 600;
-}
-
-.quota-info .val {
-  font-size: 0.95rem;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-
-.quota-input-wrap {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.quota-input {
-  width: 100%;
-  padding: 4px 10px;
-  border-radius: 8px;
-  font-size: 0.85rem;
-  font-weight: 600;
-  background: rgba(255, 255, 255, 0.4);
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  color: var(--text-primary);
-}
-
-/* Card Actions Panel */
-.account-actions {
+.card-bottom {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin-top: 4px;
-}
-
-.action-btns {
-  display: flex;
-  align-items: center;
   gap: 8px;
 }
 
-.btn-action {
-  padding: 8px 14px;
-  font-size: 0.8rem;
-  border-radius: 10px;
-}
-
-.btn-icon {
-  display: grid;
-  place-items: center;
-  width: 34px;
-  height: 34px;
-  padding: 0;
-  border-radius: 10px;
-}
-
-.btn-icon svg {
-  display: block;
-}
-
-.btn-delete {
-  color: var(--text-muted);
-}
-.btn-delete:hover {
-  background: rgba(239, 68, 68, 0.1);
-  border-color: rgba(239, 68, 68, 0.25);
-  color: #b91c1c;
+.reply-count {
+  font-size: 0.76rem;
+  color: var(--text-secondary);
 }
 
 /* iOS Toggle Switch */
@@ -709,10 +716,9 @@ onMounted(load);
 
 .ios-switch .slider {
   position: relative;
-  width: 44px;
-  height: 24px;
-  background: rgba(0, 0, 0, 0.08);
-  border: 1px solid rgba(0, 0, 0, 0.05);
+  width: 40px;
+  height: 22px;
+  background: var(--border-strong);
   border-radius: 99px;
   transition: var(--transition-quick);
 }
@@ -720,34 +726,22 @@ onMounted(load);
 .ios-switch .slider:before {
   content: "";
   position: absolute;
-  height: 18px;
-  width: 18px;
-  left: 2px;
-  bottom: 2px;
+  height: 16px;
+  width: 16px;
+  left: 3px;
+  bottom: 3px;
   background-color: #fff;
   border-radius: 50%;
   transition: var(--transition-quick);
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
 .ios-switch input:checked + .slider {
-  background: #22c55e;
-  border-color: rgba(34, 197, 94, 0.1);
+  background: var(--success);
 }
 
 .ios-switch input:checked + .slider:before {
-  transform: translateX(20px);
-  background-color: #fff;
-}
-
-.ios-switch .switch-lbl {
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--text-secondary);
-}
-
-.ios-switch input:checked ~ .switch-lbl {
-  color: var(--text-primary);
+  transform: translateX(18px);
 }
 
 /* Modal Content Panel */
@@ -758,16 +752,14 @@ onMounted(load);
 }
 
 .tips-box {
-  background: rgba(255, 255, 255, 0.4);
+  background: var(--bg-app);
   border-radius: 12px;
   padding: 12px 16px;
-  border-left: 3px solid var(--accent-indigo);
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--violet);
   font-size: 0.85rem;
   color: var(--text-secondary);
   line-height: 1.5;
-  border-top: 1px solid rgba(255, 255, 255, 0.3);
-  border-right: 1px solid rgba(255, 255, 255, 0.3);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.3);
 }
 
 .tips-box p {
@@ -796,15 +788,15 @@ onMounted(load);
 }
 
 .error-msg {
-  background: rgba(239, 68, 68, 0.06);
-  color: #ef4444;
-  border: 1px solid rgba(239, 68, 68, 0.15);
+  background: var(--danger-soft);
+  color: var(--danger);
+  border: 1px solid rgba(220, 38, 38, 0.2);
 }
 
 .success-msg {
-  background: rgba(34, 197, 94, 0.06);
-  color: #15803d;
-  border: 1px solid rgba(34, 197, 94, 0.15);
+  background: var(--success-soft);
+  color: var(--success);
+  border: 1px solid rgba(5, 150, 105, 0.2);
 }
 
 .actions {
@@ -828,18 +820,18 @@ onMounted(load);
 }
 
 .warn-msg {
-  background: rgba(234, 179, 8, 0.08);
-  color: #a16207;
-  border: 1px solid rgba(234, 179, 8, 0.2);
+  background: var(--warning-soft);
+  color: var(--warning);
+  border: 1px solid rgba(217, 119, 6, 0.2);
 }
 
 .btn-danger-glass {
-  background: rgba(239, 68, 68, 0.12);
-  border-color: rgba(239, 68, 68, 0.25);
-  color: #b91c1c;
+  background: var(--danger-soft);
+  border-color: rgba(220, 38, 38, 0.3);
+  color: var(--danger);
 }
 .btn-danger-glass:hover:not(:disabled) {
-  background: rgba(239, 68, 68, 0.2);
+  background: rgba(220, 38, 38, 0.15);
 }
 
 @keyframes spin {
@@ -851,5 +843,24 @@ onMounted(load);
 }
 .fade-enter-from, .fade-leave-to {
   opacity: 0;
+}
+
+@media (max-width: 1200px) {
+  .accounts-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (max-width: 860px) {
+  .accounts-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .search-input {
+    width: 160px;
+  }
 }
 </style>

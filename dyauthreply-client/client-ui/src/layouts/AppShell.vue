@@ -2,6 +2,16 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router';
 import {
+  CreditCard,
+  History,
+  LayoutDashboard,
+  MessageCircle,
+  Settings2,
+  ShieldCheck,
+  SlidersHorizontal,
+  Smartphone,
+} from 'lucide-vue-next';
+import {
   checkAppUpdate,
   checkUpdateViaTauri,
   getHealth,
@@ -23,7 +33,6 @@ const router = useRouter();
 const isWide = computed(() => Boolean(route.meta.wide));
 
 const isOnline = ref(false);
-const serviceName = ref('core-api');
 const { licenseStatus, ensureStatus } = useClientLicense();
 let healthTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -110,7 +119,6 @@ async function checkHealth() {
   try {
     const res = await getHealth();
     isOnline.value = res.ok;
-    serviceName.value = res.service || 'core-api';
   } catch (e) {
     isOnline.value = false;
   }
@@ -225,15 +233,8 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
 </script>
 
 <template>
-  <!-- Liquid glow animated background -->
-  <div class="liquid-bg-wrapper">
-    <div class="liquid-blob blob-1"></div>
-    <div class="liquid-blob blob-2"></div>
-    <div class="liquid-blob blob-3"></div>
-  </div>
-
   <div class="app-layout">
-    <!-- Sleek glassmorphic sidebar -->
+    <!-- Flat sidebar -->
     <aside class="sidebar glass-panel">
       <div class="brand">
         <span class="logo-grad" @click="onHiddenAdminClick">D</span>
@@ -245,28 +246,28 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
 
       <nav class="nav-links">
         <RouterLink to="/home" class="nav-item">
-          <span class="icon">📊</span>概览
+          <LayoutDashboard class="icon" :size="18" />概览
         </RouterLink>
         <RouterLink to="/accounts" class="nav-item">
-          <span class="icon">📱</span>抖音账号
+          <Smartphone class="icon" :size="18" />抖音账号
         </RouterLink>
         <RouterLink to="/license" class="nav-item">
-          <span class="icon">🔐</span>客户端授权
+          <ShieldCheck class="icon" :size="18" />客户端授权
         </RouterLink>
         <RouterLink to="/chat" class="nav-item">
-          <span class="icon">💬</span>私信工作台
+          <MessageCircle class="icon" :size="18" />私信工作台
         </RouterLink>
         <RouterLink to="/rules" class="nav-item">
-          <span class="icon">⚙️</span>自动回复规则
+          <Settings2 class="icon" :size="18" />自动回复规则
         </RouterLink>
         <RouterLink to="/cards" class="nav-item">
-          <span class="icon">🪪</span>卡片管理
+          <CreditCard class="icon" :size="18" />卡片管理
         </RouterLink>
         <RouterLink to="/logs" class="nav-item">
-          <span class="icon">📝</span>回复记录
+          <History class="icon" :size="18" />回复记录
         </RouterLink>
         <RouterLink to="/settings" class="nav-item">
-          <span class="icon">🎛️</span>客户端设置
+          <SlidersHorizontal class="icon" :size="18" />客户端设置
         </RouterLink>
       </nav>
 
@@ -274,10 +275,7 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
       <div class="sidebar-footer">
         <div class="status-badge" :class="{ online: isOnline }">
           <span class="pulse-dot"></span>
-          <div class="status-info">
-            <span class="status-text">{{ isOnline ? '服务运行中' : '服务未连接' }}</span>
-            <span class="service-name">{{ serviceName }}</span>
-          </div>
+          <span class="status-text">{{ isOnline ? '服务运行中' : '服务未连接' }}</span>
         </div>
         <div v-if="licenseStatus" class="license-badge" :class="licenseStatus.state">
           <span class="license-title">授权</span>
@@ -452,26 +450,24 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
 }
 
 .nav-item .icon {
-  font-size: 1.05rem;
+  flex-shrink: 0;
 }
 
 .nav-item:hover {
   color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.35);
-  transform: translateX(2px);
+  background: var(--bg-app);
 }
 
 .nav-item.router-link-active {
-  background: rgba(255, 255, 255, 0.75);
-  color: var(--text-primary);
-  border-color: rgba(255, 255, 255, 0.95);
-  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.03);
+  background: var(--nav-active-bg);
+  color: var(--brand-primary);
+  border-color: transparent;
 }
 
 .sidebar-footer {
   margin-top: auto;
   padding-top: 16px;
-  border-top: 1px solid rgba(0, 0, 0, 0.05);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .status-badge {
@@ -480,8 +476,8 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
   gap: 12px;
   padding: 10px 12px;
   border-radius: 12px;
-  background: rgba(0, 0, 0, 0.02);
-  border: 1px solid rgba(0, 0, 0, 0.05);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
   transition: var(--transition-smooth);
 }
 
@@ -499,11 +495,6 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
   animation: pulse 2s infinite;
 }
 
-.status-info {
-  display: flex;
-  flex-direction: column;
-}
-
 .status-text {
   font-size: 0.8rem;
   font-weight: 600;
@@ -512,11 +503,6 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
 
 .online .status-text {
   color: #15803d;
-}
-
-.service-name {
-  font-size: 0.68rem;
-  color: var(--text-muted);
 }
 
 .version-tag {
@@ -680,8 +666,8 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-  background: rgba(0, 0, 0, 0.02);
-  border: 1px solid rgba(0, 0, 0, 0.05);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
 }
 
 .license-title {
@@ -733,11 +719,7 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
   display: flex;
   flex-direction: column;
   border-radius: 20px;
-  border: 1px solid var(--glass-border);
-  box-shadow: 
-    0 10px 40px -15px rgba(0, 0, 0, 0.08),
-    inset 0 1px 1px 0 rgba(255, 255, 255, 0.5);
-  background: var(--glass-bg);
+  background: var(--bg-app);
 }
 
 .scroll-container {

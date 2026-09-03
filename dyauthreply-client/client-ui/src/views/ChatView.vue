@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { ImageOff, MessagesSquare, Mic, Smile, Video } from 'lucide-vue-next';
 import {
   DouyinRealtime,
   getWorkerCommandStatus,
@@ -925,7 +926,7 @@ onUnmounted(() => {
     <!-- Main Section: Chat Interface -->
     <section class="chat-main">
       <div v-if="!activeConversation" class="chat-empty">
-        <div class="empty-icon">💬</div>
+        <MessagesSquare class="empty-icon" :size="40" />
         <h3>私信对话看板</h3>
         <p class="hint">请在左侧选择具体客户以查阅消息并进行手动交互</p>
       </div>
@@ -982,7 +983,7 @@ onUnmounted(() => {
                   @error="onMediaError(msg.id)"
                 />
                 <span v-else class="msg-media-fallback" @click="previewImage(imageSrc(msg))">
-                  🖼️ {{ msg.content || '[图片]' }}
+                  <ImageOff :size="14" /> {{ msg.content || '[图片]' }}
                 </span>
               </template>
 
@@ -996,7 +997,7 @@ onUnmounted(() => {
                     loading="lazy"
                     @error="onMediaError(msg.id)"
                   />
-                  <span v-else class="msg-media-fallback">🎬 {{ msg.content || '[视频]' }}</span>
+                  <span v-else class="msg-media-fallback"><Video :size="14" /> {{ msg.content || '[视频]' }}</span>
                   <span class="msg-video-tag">▶ {{ videoDurationLabel(msg) }}</span>
                 </div>
               </template>
@@ -1037,7 +1038,7 @@ onUnmounted(() => {
                     <span class="voice-time">{{ voiceTimeLabel(msg) }}</span>
                   </div>
                   <span v-else class="msg-voice" @click="openMedia(msg.media?.url)">
-                    🎤 语音 {{ voiceDurationLabel(msg) }}
+                    <Mic :size="14" /> 语音 {{ voiceDurationLabel(msg) }}
                   </span>
                   <span v-if="msg.media?.ai_text" class="msg-voice-aitext">
                     {{ msg.media.ai_text }}
@@ -1094,7 +1095,7 @@ onUnmounted(() => {
                 :disabled="license ? !license.can_use_business : false"
                 @click="toggleEmoji"
               >
-                😀
+                <Smile :size="18" />
               </button>
               <div v-if="showEmoji" class="emoji-panel">
                 <button
@@ -1710,7 +1711,7 @@ onUnmounted(() => {
   padding: 8px 12px;
   font-size: 0.86rem;
   color: var(--text-primary);
-  background: rgba(0, 0, 0, 0.04);
+  background: var(--bg-app);
   border-radius: 10px;
   cursor: pointer;
 }
@@ -1963,16 +1964,18 @@ onUnmounted(() => {
 .emoji-btn {
   width: 40px;
   height: 40px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-subtle);
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.6);
-  font-size: 20px;
-  line-height: 1;
+  background: var(--bg-card);
+  color: var(--text-secondary);
   cursor: pointer;
   transition: background 0.15s ease;
 }
 .emoji-btn:hover:not(:disabled) {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--bg-app);
+  color: var(--text-primary);
 }
 .emoji-btn:disabled {
   opacity: 0.5;

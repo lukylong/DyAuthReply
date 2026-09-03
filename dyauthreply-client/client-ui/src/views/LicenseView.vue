@@ -115,8 +115,12 @@ onMounted(() => {
           </div>
           <div class="meta-list">
             <div class="meta-item">
-              <span>业务可用</span>
-              <strong>{{ status?.can_use_business ? '是' : '否' }}</strong>
+              <span>激活时间</span>
+              <strong>{{ formatDateTime(status?.activated_at) }}</strong>
+            </div>
+            <div class="meta-item">
+              <span>到期时间</span>
+              <strong>{{ formatDateTime(status?.expires_at) }}</strong>
             </div>
             <div class="meta-item">
               <span>卡密</span>
@@ -126,14 +130,9 @@ onMounted(() => {
               <span>套餐</span>
               <strong>{{ status?.plan?.name || '未分配' }}</strong>
             </div>
-            <div class="meta-item">
-              <span>设备指纹</span>
-              <strong class="mono">{{ status?.device_fingerprint || '-' }}</strong>
-            </div>
-            <div class="meta-item">
-              <span>离线截止</span>
-              <strong>{{ formatDateTime(status?.last_valid_until) }}</strong>
-            </div>
+          </div>
+          <div v-if="status?.last_error" class="msg warn-msg">
+            {{ status.last_error }}
           </div>
           <div class="action-row">
             <button type="button" class="btn-glass" :disabled="submitting" @click="refreshNow">
@@ -175,40 +174,6 @@ onMounted(() => {
           </div>
         </article>
       </section>
-
-      <section class="glass-panel details-card">
-        <h3>授权详情</h3>
-        <div class="detail-grid">
-          <div class="detail-item">
-            <span>激活时间</span>
-            <strong>{{ formatDateTime(status?.activated_at) }}</strong>
-          </div>
-          <div class="detail-item">
-            <span>最后校验</span>
-            <strong>{{ formatDateTime(status?.last_check_in_at) }}</strong>
-          </div>
-          <div class="detail-item">
-            <span>下次校验</span>
-            <strong>{{ formatDateTime(status?.next_check_in_at) }}</strong>
-          </div>
-          <div class="detail-item">
-            <span>到期时间</span>
-            <strong>{{ formatDateTime(status?.expires_at) }}</strong>
-          </div>
-          <div class="detail-item">
-            <span>心跳间隔</span>
-            <strong>{{ status?.heartbeat_interval_minutes || 0 }} 分钟</strong>
-          </div>
-          <div class="detail-item">
-            <span>离线宽限</span>
-            <strong>{{ status?.grace_period_minutes || 0 }} 分钟</strong>
-          </div>
-        </div>
-
-        <div v-if="status?.last_error" class="msg warn-msg">
-          {{ status.last_error }}
-        </div>
-      </section>
     </template>
   </div>
 </template>
@@ -224,8 +189,7 @@ onMounted(() => {
 
 .page-head h2,
 .state-card h3,
-.form-card h3,
-.details-card h3 {
+.form-card h3 {
   margin: 0;
 }
 
@@ -241,8 +205,7 @@ onMounted(() => {
 }
 
 .state-card,
-.form-card,
-.details-card {
+.form-card {
   padding: 24px;
 }
 
@@ -267,29 +230,28 @@ onMounted(() => {
   border-radius: 999px;
   font-size: 0.78rem;
   font-weight: 700;
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
 }
 
-.meta-list,
-.detail-grid {
+.meta-list {
   display: grid;
   gap: 12px;
   margin-top: 18px;
 }
 
-.meta-item,
-.detail-item {
+.meta-item {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
   padding: 12px 14px;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.38);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
 }
 
-.meta-item span,
-.detail-item span {
+.meta-item span {
   color: var(--text-muted);
   font-size: 0.84rem;
 }
@@ -322,26 +284,21 @@ onMounted(() => {
 
 .success,
 .success-msg {
-  color: #15803d;
+  color: var(--success);
 }
 
 .warn,
 .warn-msg {
-  color: #b45309;
+  color: var(--warning);
 }
 
 .danger,
 .error-msg {
-  color: #b91c1c;
+  color: var(--danger);
 }
 
 .muted {
   color: var(--text-muted);
-}
-
-.mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  font-size: 0.82rem;
 }
 
 @media (max-width: 980px) {

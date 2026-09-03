@@ -1,32 +1,59 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { RouterLink } from 'vue-router';
 import {
-  getBootstrap,
+  Check,
+  CircleCheck,
+  Inbox,
+  Puzzle,
+  TriangleAlert,
+} from 'lucide-vue-next';
+import {
   getHealth,
   listAccounts,
-  type BootstrapInfo,
   type DouyinAccount,
 } from '../api/client';
 import { useClientLicense } from '../composables/useClientLicense';
 
 const loading = ref(true);
 const error = ref('');
-const health = ref<{ ok: boolean; env: string } | null>(null);
-const bootstrap = ref<BootstrapInfo | null>(null);
 const accounts = ref<DouyinAccount[]>([]);
 const { licenseStatus: license, ensureStatus } = useClientLicense();
 const currentStep = ref(1);
+const wizardRef = ref<HTMLElement | null>(null);
+
+// 今日回复统计：当前客户端本地接口（/douyin/reply-log/stat/summary）只能拿到全量累计数据，
+// 没有按“今日”过滤的维度，为避免展示误导性数字，先用占位符，等后端补充按日期过滤的统计接口后再接入。
+const todayReplyDisplay = '--';
+const todaySuccessDisplay = '--';
+const todayFailedDisplay = '--';
+
+const onlineCount = computed(() => accounts.value.filter((a) => a.status === 1).length);
+const offlineCount = computed(() => accounts.value.length - onlineCount.value);
+
+const heroOk = computed(
+  () => accounts.value.length > 0 && (!license.value || license.value.can_use_business),
+);
+
+const heroIcon = computed(() => {
+  if (heroOk.value) return CircleCheck;
+  return accounts.value.length === 0 ? Inbox : TriangleAlert;
+});
+
+const heroTitle = computed(() => {
+  if (heroOk.value) return '自动回复正在运行';
+  if (accounts.value.length === 0) return '尚未托管任何抖音号';
+  return '自动回复已暂停';
+});
 
 async function initDashboard() {
   loading.value = true;
   error.value = '';
   try {
-    health.value = await getHealth();
-    bootstrap.value = await getBootstrap();
+    await getHealth();
     await ensureStatus();
     accounts.value = await listAccounts();
-    
+
     // Automatically set stepper progress based on system status
     if (accounts.value.length > 0) {
       currentStep.value = 3;
@@ -40,6 +67,12 @@ async function initDashboard() {
   }
 }
 
+function goInstallExtension() {
+  // 暂无独立的插件下载/打包产物，先引导到下方“快速接入向导”第 1 步的安装说明。
+  currentStep.value = 1;
+  wizardRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 onMounted(() => {
   initDashboard();
 });
@@ -47,23 +80,7 @@ onMounted(() => {
 
 <template>
   <div class="home-container">
-    <header class="dashboard-header">
-      <div class="logo-area">
-        <span class="logo-emoji">⚡</span>
-        <div class="logo-text">
-          <h1 class="gradient-text">自动回复控制台</h1>
-          <p class="subtitle">运行在本机的多账号抖音私信托管运营中心</p>
-        </div>
-      </div>
-      <div v-if="!loading && !error" class="header-status">
-        <span class="status-dot green pulsing"></span>
-        <span class="status-label">核心服务已连接</span>
-      </div>
-      <div v-else-if="!loading && error" class="header-status">
-        <span class="status-dot red"></span>
-        <span class="status-label text-error">核心服务连接断开</span>
-      </div>
-    </header>
+    <p class="eyebrow">概览</p>
 
     <div v-if="loading" class="loading-state glass-panel">
       <div class="spinner"></div>
@@ -71,59 +88,70 @@ onMounted(() => {
     </div>
 
     <div v-else-if="error" class="error-state glass-panel">
-      <div class="error-icon">⚠️</div>
+      <TriangleAlert class="error-icon" :size="32" />
       <h2>后台核心服务未连接</h2>
       <p class="error-msg">{{ error }}</p>
-      <p class="hint">请先启动桌面主程序。如果是开发者模式，请确认在终端运行了 <code>npm run launcher</code> 且 Django 服务端口 8765 已就绪。</p>
+      <p class="hint">请先启动桌面主程序，或稍候重试。</p>
       <button type="button" class="btn-glass btn-primary-glass" @click="initDashboard">重新连接服务</button>
     </div>
 
     <template v-else>
-      <!-- Dashboard Status Stats Grid -->
-      <section class="stats-grid">
-        <div class="stat-card glass-panel">
-          <div class="stat-icon api-icon">⚡</div>
-          <div class="stat-content">
-            <span class="label">服务状态</span>
-            <span class="value success-text">运行中</span>
-            <span class="subtext">环境: {{ health?.env }} · 端口: {{ bootstrap?.http_port }}</span>
+      <!-- 状态主区 -->
+      <section class="hero glass-panel">
+        <div class="hero-left">
+          <component :is="heroIcon" class="hero-icon" :class="{ ok: heroOk, warn: !heroOk && accounts.length > 0 }" :size="26" />
+          <div class="hero-text">
+            <h2>{{ heroTitle }}</h2>
+            <p>已托管 {{ accounts.length }} 个抖音账号 · 授权{{ license?.state_label || '未配置' }}</p>
           </div>
         </div>
+        <RouterLink to="/accounts" class="btn-glass btn-primary-glass">查看账号</RouterLink>
+      </section>
 
-        <div class="stat-card glass-panel">
-          <div class="stat-icon accounts-icon">👤</div>
-          <div class="stat-content">
-            <span class="label">托管账号</span>
-            <span class="value">{{ accounts.length }} 个</span>
-            <span class="subtext">已启用自动回复: {{ accounts.filter(a => a.auto_reply_enabled).length }} 个</span>
-          </div>
+      <!-- 数据统计条 -->
+      <section class="stats-bar glass-panel">
+        <div class="stat-item">
+          <span class="num">{{ todayReplyDisplay }}</span>
+          <span class="lbl">今日回复</span>
         </div>
-
-        <div class="stat-card glass-panel">
-          <div class="stat-icon">🔐</div>
-          <div class="stat-content">
-            <span class="label">客户端授权</span>
-            <span class="value" :class="{ 'success-text': license?.can_use_business, 'danger-text': license && !license.can_use_business }">
-              {{ license?.state_label || '未配置' }}
-            </span>
-            <span class="subtext">{{ license?.masked_code || '未绑定卡密' }}</span>
-          </div>
+        <span class="stat-divider"></span>
+        <div class="stat-item">
+          <span class="num success">{{ todaySuccessDisplay }}</span>
+          <span class="lbl">成功</span>
         </div>
-
-        <div class="stat-card glass-panel">
-          <div class="stat-icon storage-icon">💾</div>
-          <div class="stat-content">
-            <span class="label">存储方式</span>
-            <span class="value">SQLite3</span>
-            <span class="subtext" :title="bootstrap?.data_dir">数据隔离 · 本地沙箱隔离</span>
-          </div>
+        <span class="stat-divider"></span>
+        <div class="stat-item">
+          <span class="num danger">{{ todayFailedDisplay }}</span>
+          <span class="lbl">失败</span>
+        </div>
+        <span class="stat-divider"></span>
+        <div class="stat-item">
+          <span class="num">{{ onlineCount }}</span>
+          <span class="lbl">在线账号</span>
+        </div>
+        <span class="stat-divider"></span>
+        <div class="stat-item">
+          <span class="num">{{ offlineCount }}</span>
+          <span class="lbl">掉线账号</span>
         </div>
       </section>
 
-      <!-- Visual Interactive Setup Stepper -->
-      <section class="stepper-section glass-panel">
+      <!-- 浏览器插件下载入口 -->
+      <section class="plugin-row glass-panel">
+        <div class="plugin-info">
+          <div class="plugin-icon"><Puzzle :size="20" /></div>
+          <div class="plugin-text">
+            <h5>浏览器插件</h5>
+            <p>用于一键提取抖音登录态，配合第 1 步使用</p>
+          </div>
+        </div>
+        <button type="button" class="btn-glass btn-primary-glass" @click="goInstallExtension">下载安装</button>
+      </section>
+
+      <!-- 快速接入向导（去卡片化，仅顶部分隔线） -->
+      <section ref="wizardRef" class="stepper-section">
         <div class="stepper-header">
-          <h3>🚀 快速接入向导</h3>
+          <h3>快速接入向导</h3>
           <p>只需简单三步，即可将抖音号托管至本终端，开启自动回复服务</p>
         </div>
 
@@ -136,7 +164,7 @@ onMounted(() => {
 
           <div class="step-node" :class="{ active: currentStep === 1, completed: currentStep > 1 }" @click="currentStep = 1">
             <div class="step-circle">
-              <span v-if="currentStep > 1" class="check-icon">✓</span>
+              <Check v-if="currentStep > 1" class="check-icon" :size="16" />
               <span v-else>1</span>
             </div>
             <span class="step-title">安装提取插件</span>
@@ -144,7 +172,7 @@ onMounted(() => {
 
           <div class="step-node" :class="{ active: currentStep === 2, completed: currentStep > 2 }" @click="currentStep = 2">
             <div class="step-circle">
-              <span v-if="currentStep > 2" class="check-icon">✓</span>
+              <Check v-if="currentStep > 2" class="check-icon" :size="16" />
               <span v-else>2</span>
             </div>
             <span class="step-title">获取登录凭证</span>
@@ -156,7 +184,7 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- Translucent light theme instructions box -->
+        <!-- Instructions box -->
         <div class="step-content-box">
           <div v-if="currentStep === 1" class="step-slide">
             <h4>第一步：安装浏览器 Credential 提取扩展</h4>
@@ -239,42 +267,6 @@ onMounted(() => {
           </div>
         </div>
       </section>
-
-      <!-- CTA Shortcuts -->
-      <section class="cta-shortcuts">
-        <RouterLink to="/license" class="shortcut-btn glass-panel">
-          <div class="btn-inner">
-            <span class="icon">🔐</span>
-            <div class="text">
-              <h5>查看授权状态</h5>
-              <p>检查激活情况、离线宽限时间与当前设备绑定信息</p>
-            </div>
-          </div>
-          <span class="arrow">→</span>
-        </RouterLink>
-
-        <RouterLink to="/chat" class="shortcut-btn glass-panel">
-          <div class="btn-inner">
-            <span class="icon">💬</span>
-            <div class="text">
-              <h5>进入私信工作台</h5>
-              <p>实时监控、手动收发抖音私信，免去频繁登录抖音后台的琐碎</p>
-            </div>
-          </div>
-          <span class="arrow">→</span>
-        </RouterLink>
-
-        <RouterLink to="/rules" class="shortcut-btn glass-panel">
-          <div class="btn-inner">
-            <span class="icon">🎯</span>
-            <div class="text">
-              <h5>回复规则定制</h5>
-              <p>自由配置包含关键词、正则表达式匹配或全局兜底的匹配逻辑</p>
-            </div>
-          </div>
-          <span class="arrow">→</span>
-        </RouterLink>
-      </section>
     </template>
   </div>
 </template>
@@ -283,105 +275,19 @@ onMounted(() => {
 .home-container {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 20px;
   max-width: 1200px;
   margin: 0 auto;
   width: 100%;
 }
 
-.dashboard-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
-}
-
-.logo-area {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.logo-emoji {
-  font-size: 1.8rem;
-  background: rgba(255, 255, 255, 0.6);
-  border: 1px solid var(--glass-border);
-  border-radius: 12px;
-  width: 46px;
-  height: 46px;
-  display: grid;
-  place-items: center;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.02);
-}
-
-.logo-text {
-  display: flex;
-  flex-direction: column;
-}
-
-.gradient-text {
-  font-size: 1.6rem;
-  font-weight: 800;
+.eyebrow {
   margin: 0;
-  color: var(--text-primary);
-  letter-spacing: -0.5px;
-}
-
-.subtitle {
-  color: var(--text-secondary);
-  font-size: 0.88rem;
-  margin: 4px 0 0;
-}
-
-.header-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: rgba(255, 255, 255, 0.45);
-  padding: 6px 14px;
-  border-radius: 20px;
-  border: 1px solid var(--glass-border);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.02);
-}
-
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-
-.status-dot.green {
-  background: #10b981;
-}
-
-.status-dot.red {
-  background: #ef4444;
-}
-
-.status-dot.pulsing {
-  animation: pulse-green 2s infinite;
-}
-
-@keyframes pulse-green {
-  0% {
-    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.6);
-  }
-  70% {
-    box-shadow: 0 0 0 6px rgba(16, 185, 129, 0);
-  }
-  100% {
-    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
-  }
-}
-
-.status-label {
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--text-secondary);
-}
-
-.text-error {
-  color: #ef4444;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 
 .loading-state, .error-state {
@@ -397,21 +303,21 @@ onMounted(() => {
 .spinner {
   width: 36px;
   height: 36px;
-  border: 3px solid rgba(0, 0, 0, 0.05);
+  border: 3px solid var(--border-subtle);
   border-radius: 50%;
   border-top-color: var(--text-muted);
   animation: spin 1s infinite linear;
 }
 
 .error-icon {
-  font-size: 2.5rem;
+  color: var(--warning);
 }
 
 .error-msg {
-  color: #c2410c;
+  color: var(--warning);
   font-family: monospace;
-  background: rgba(0, 0, 0, 0.03);
-  border: 1px solid rgba(0, 0, 0, 0.05);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
   padding: 8px 16px;
   border-radius: 8px;
   font-size: 0.88rem;
@@ -423,88 +329,139 @@ onMounted(() => {
   font-size: 0.85rem;
 }
 
-.stats-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 16px;
-}
-
-.stat-card {
+/* 状态主区 */
+.hero {
   display: flex;
   align-items: center;
-  gap: 18px;
-  padding: 18px 22px;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 22px 26px;
 }
 
-.stat-icon {
-  font-size: 1.35rem;
-  width: 44px;
-  height: 44px;
-  border-radius: 12px;
-  display: grid;
-  place-items: center;
-  background: rgba(0, 0, 0, 0.03);
-  border: 1px solid rgba(0, 0, 0, 0.03);
-  color: var(--text-secondary);
-  flex-shrink: 0;
-}
-
-.api-icon {
-  color: #0284c7;
-  background: rgba(14, 165, 233, 0.08);
-}
-
-.accounts-icon {
-  color: #10b981;
-  background: rgba(16, 185, 129, 0.08);
-}
-
-.storage-icon {
-  color: #6366f1;
-  background: rgba(99, 102, 241, 0.08);
-}
-
-.stat-content {
+.hero-left {
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  gap: 16px;
   min-width: 0;
 }
 
-.stat-content .label {
-  font-size: 0.72rem;
+.hero-icon {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.hero-icon.ok {
+  color: var(--success);
+}
+
+.hero-icon.warn {
+  color: var(--warning);
+}
+
+.hero-text h2 {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.hero-text p {
+  margin: 4px 0 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+/* 数据统计条 */
+.stats-bar {
+  display: flex;
+  align-items: center;
+  padding: 18px 26px;
+  gap: 20px;
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.stat-item .num {
+  font-size: 1.3rem;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.stat-item .num.success {
+  color: var(--success);
+}
+
+.stat-item .num.danger {
+  color: var(--danger);
+}
+
+.stat-item .lbl {
+  font-size: 0.74rem;
   color: var(--text-muted);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
 }
 
-.stat-content .value {
-  font-size: 1.15rem;
+.stat-divider {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border-subtle);
+}
+
+/* 浏览器插件下载入口 */
+.plugin-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 24px;
+}
+
+.plugin-info {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+.plugin-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: var(--violet-soft);
+  color: var(--violet);
+  flex-shrink: 0;
+}
+
+.plugin-text h5 {
+  margin: 0;
+  font-size: 0.95rem;
   font-weight: 700;
   color: var(--text-primary);
-  margin: 2px 0;
 }
 
-.success-text {
-  color: #16803d;
+.plugin-text p {
+  margin: 4px 0 0;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
 }
 
-.stat-content .subtext {
-  font-size: 0.72rem;
-  color: var(--text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* Stepper Section Layout */
+/* Stepper Section Layout (去卡片化，仅顶部分隔线) */
 .stepper-section {
-  padding: 28px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .stepper-header h3 {
   margin: 0;
-  font-size: 1.15rem;
+  font-size: 1.05rem;
   color: var(--text-primary);
   font-weight: 800;
 }
@@ -531,7 +488,7 @@ onMounted(() => {
   left: 90px;
   right: 90px;
   height: 2px;
-  background: rgba(0, 0, 0, 0.06);
+  background: var(--border-subtle);
   z-index: 0;
   border-radius: 1px;
   overflow: hidden;
@@ -539,7 +496,7 @@ onMounted(() => {
 
 .stepper-line-progress {
   height: 100%;
-  background: linear-gradient(90deg, #3b82f6, #10b981);
+  background: var(--brand-primary);
   transition: width 0.4s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
@@ -557,40 +514,36 @@ onMounted(() => {
   width: 34px;
   height: 34px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.9);
-  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
   display: flex;
   align-items: center;
   justify-content: center;
   font-weight: 700;
   font-size: 0.85rem;
   color: var(--text-muted);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.01);
   transition: var(--transition-smooth);
 }
 
 .step-node:hover .step-circle {
-  border-color: rgba(0, 0, 0, 0.25);
+  border-color: var(--border-strong);
   color: var(--text-primary);
 }
 
 .step-node.active .step-circle {
-  background: var(--text-primary);
-  border-color: var(--text-primary);
+  background: var(--brand-primary);
+  border-color: var(--brand-primary);
   color: #fff;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
 }
 
 .step-node.completed .step-circle {
-  background: #10b981;
-  border-color: #10b981;
+  background: var(--success);
+  border-color: var(--success);
   color: #fff;
-  box-shadow: 0 4px 10px rgba(16, 185, 129, 0.2);
 }
 
 .check-icon {
-  font-weight: bold;
-  font-size: 0.95rem;
+  display: block;
 }
 
 .step-title {
@@ -612,11 +565,10 @@ onMounted(() => {
 
 /* Stepper Slides panel */
 .step-content-box {
-  background: rgba(255, 255, 255, 0.25);
-  border: 1px solid rgba(255, 255, 255, 0.4);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
   border-radius: 14px;
   padding: 24px;
-  box-shadow: inset 0 1px 2px rgba(255, 255, 255, 0.2);
 }
 
 .step-slide h4 {
@@ -633,7 +585,7 @@ onMounted(() => {
   line-height: 1.5;
 }
 
-/* Premium Checklist Styles */
+/* Checklist Styles */
 .instruction-list {
   display: flex;
   flex-direction: column;
@@ -645,25 +597,24 @@ onMounted(() => {
   display: flex;
   align-items: flex-start;
   gap: 14px;
-  background: rgba(255, 255, 255, 0.35);
-  border: 1px solid rgba(0, 0, 0, 0.01);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
   padding: 12px 16px;
   border-radius: 10px;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.01);
   transition: var(--transition-quick);
 }
 
 .instruction-item:hover {
-  background: rgba(255, 255, 255, 0.55);
-  border-color: rgba(255, 255, 255, 0.55);
-  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.01);
+  background: var(--brand-primary-soft);
+  border-color: var(--brand-primary);
 }
 
 .item-num {
   width: 20px;
   height: 20px;
   border-radius: 50%;
-  background: rgba(0, 0, 0, 0.04);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -682,38 +633,38 @@ onMounted(() => {
 }
 
 .code-path {
-  background: rgba(0, 0, 0, 0.04);
-  border: 1px solid rgba(0, 0, 0, 0.02);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
   padding: 2px 6px;
   border-radius: 5px;
   font-family: monospace;
   font-size: 0.85em;
-  color: #0284c7;
+  color: var(--brand-primary);
   font-weight: 600;
 }
 
 .code-highlight {
-  background: rgba(16, 185, 129, 0.04);
-  border: 1px solid rgba(16, 185, 129, 0.08);
+  background: var(--success-soft);
+  border: 1px solid rgba(5, 150, 105, 0.2);
   padding: 2px 6px;
   border-radius: 5px;
   font-family: monospace;
   font-size: 0.85em;
-  color: #059669;
+  color: var(--success);
   font-weight: 600;
 }
 
 .link-styled {
-  color: #0284c7;
+  color: var(--brand-primary);
   text-decoration: none;
   font-weight: 600;
-  border-bottom: 1px dashed rgba(2, 132, 199, 0.4);
+  border-bottom: 1px dashed rgba(37, 99, 235, 0.4);
   padding-bottom: 1px;
   transition: var(--transition-quick);
 }
 
 .link-styled:hover {
-  color: #0369a1;
+  color: var(--brand-primary-hover);
   border-bottom-style: solid;
 }
 
@@ -727,79 +678,16 @@ onMounted(() => {
   text-decoration: none;
 }
 
-/* CTA Shortcuts */
-.cta-shortcuts {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-}
-
-.shortcut-btn {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 20px 24px;
-  text-decoration: none;
-  color: inherit;
-  border-radius: 18px;
-}
-
-.shortcut-btn:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
-  border-color: rgba(255, 255, 255, 0.55);
-}
-
-.btn-inner {
-  display: flex;
-  gap: 16px;
-  align-items: center;
-}
-
-.btn-inner .icon {
-  font-size: 1.5rem;
-  background: rgba(255, 255, 255, 0.45);
-  width: 44px;
-  height: 44px;
-  border-radius: 10px;
-  display: grid;
-  place-items: center;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.01);
-}
-
-.btn-inner .text h5 {
-  margin: 0;
-  font-size: 0.95rem;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-
-.btn-inner .text p {
-  margin: 4px 0 0;
-  font-size: 0.78rem;
-  color: var(--text-secondary);
-  line-height: 1.45;
-  max-width: 320px;
-}
-
-.shortcut-btn .arrow {
-  font-size: 1.1rem;
-  color: var(--text-muted);
-  transition: var(--transition-quick);
-}
-
-.shortcut-btn:hover .arrow {
-  color: var(--text-primary);
-  transform: translateX(4px);
-}
-
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
 
 @media (max-width: 768px) {
-  .stats-grid {
-    grid-template-columns: 1fr;
+  .stats-bar {
+    flex-wrap: wrap;
+  }
+  .stat-divider {
+    display: none;
   }
   .stepper-container {
     padding: 0;
@@ -809,13 +697,9 @@ onMounted(() => {
     left: 45px;
     right: 45px;
   }
-  .cta-shortcuts {
-    grid-template-columns: 1fr;
-  }
-  .dashboard-header {
+  .hero {
     flex-direction: column;
     align-items: flex-start;
-    gap: 10px;
   }
 }
 </style>

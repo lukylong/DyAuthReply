@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
+import { Heart } from 'lucide-vue-next';
 import {
   getAccountWorks,
   getProfileStats,
   openExternalUrl,
+  patchAccount,
   statusLabel,
   type DouyinAccount,
   type ProfileStats,
   type WorkItem,
 } from '../api/client';
+import { useClientLicense } from '../composables/useClientLicense';
 
 const props = defineProps<{
   open: boolean;
@@ -17,9 +20,36 @@ const props = defineProps<{
 
 const emit = defineEmits<{ close: [] }>();
 
+const { licenseStatus: license } = useClientLicense();
+
 const stats = ref<ProfileStats | null>(null);
 const statsLoading = ref(false);
 const statsError = ref('');
+
+const savingQuota = ref(false);
+const quotaError = ref('');
+
+async function saveQuota(event: Event) {
+  const acc = props.account;
+  const input = event.target as HTMLInputElement;
+  if (!acc) return;
+  const quota = Number(input.value);
+  if (!Number.isFinite(quota) || quota < 0) return;
+  quotaError.value = '';
+  if (license.value && !license.value.can_use_business) {
+    quotaError.value = `当前授权状态为「${license.value.state_label}」，无法修改配额`;
+    return;
+  }
+  savingQuota.value = true;
+  try {
+    const updated = await patchAccount(acc.id, { daily_reply_quota: quota });
+    acc.daily_reply_quota = updated.daily_reply_quota;
+  } catch (e) {
+    quotaError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    savingQuota.value = false;
+  }
+}
 
 const works = ref<WorkItem[]>([]);
 const worksLoading = ref(false);
@@ -190,6 +220,25 @@ watch(
             </div>
           </section>
 
+          <!-- 配额编辑 -->
+          <section class="quota-card">
+            <div class="quota-row">
+              <div class="quota-label">
+                <span class="lbl">日回复限额</span>
+                <span class="hint">今日已回复 {{ account?.reply_today ?? 0 }} 次</span>
+              </div>
+              <input
+                class="input-glass quota-input"
+                type="number"
+                min="0"
+                :value="account?.daily_reply_quota ?? 200"
+                :disabled="savingQuota || !!(license && !license.can_use_business)"
+                @change="saveQuota"
+              />
+            </div>
+            <p v-if="quotaError" class="quota-error">{{ quotaError }}</p>
+          </section>
+
           <!-- 作品 -->
           <section class="works-section">
             <h4 class="section-title">作品列表</h4>
@@ -214,7 +263,7 @@ watch(
                 </div>
                 <p class="desc">{{ w.desc || '（无标题）' }}</p>
                 <div class="meta">
-                  <span class="likes">♥ {{ formatCount(w.like_count) }}</span>
+                  <span class="likes"><Heart :size="12" /> {{ formatCount(w.like_count) }}</span>
                   <span class="date">{{ formatTime(w.create_time) }}</span>
                 </div>
               </button>
@@ -251,9 +300,7 @@ watch(
 .drawer-backdrop {
   position: absolute;
   inset: 0;
-  background-color: rgba(241, 243, 247, 0.35);
-  backdrop-filter: blur(12px) saturate(120%);
-  -webkit-backdrop-filter: blur(12px) saturate(120%);
+  background-color: rgba(17, 24, 39, 0.35);
 }
 
 .drawer-panel {
@@ -261,11 +308,9 @@ watch(
   z-index: 1000;
   width: min(560px, 100%);
   height: 100%;
-  background: rgba(255, 255, 255, 0.9);
-  backdrop-filter: blur(40px) saturate(140%);
-  -webkit-backdrop-filter: blur(40px) saturate(140%);
-  border-left: 1px solid rgba(0, 0, 0, 0.06);
-  box-shadow: -24px 0 60px rgba(0, 0, 0, 0.12);
+  background: var(--bg-card);
+  border-left: 1px solid var(--border-subtle);
+  box-shadow: -12px 0 32px rgba(16, 24, 40, 0.08);
   display: flex;
   flex-direction: column;
   border-radius: 0;
@@ -277,7 +322,7 @@ watch(
   justify-content: space-between;
   gap: 12px;
   padding: 24px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+  border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
 
@@ -296,8 +341,8 @@ watch(
   flex-shrink: 0;
   display: grid;
   place-items: center;
-  background: linear-gradient(135deg, rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.01));
-  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
   font-weight: 700;
   font-size: 1.2rem;
   color: var(--text-primary);
@@ -333,19 +378,19 @@ watch(
   font-weight: 600;
   padding: 2px 8px;
   border-radius: 99px;
-  background: rgba(0, 0, 0, 0.04);
-  border: 1px solid rgba(0, 0, 0, 0.06);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
   color: var(--text-muted);
 }
 .badge.success {
-  background: rgba(34, 197, 94, 0.1);
-  border-color: rgba(34, 197, 94, 0.2);
-  color: #16803d;
+  background: var(--success-soft);
+  border-color: rgba(5, 150, 105, 0.2);
+  color: var(--success);
 }
 
 .drawer-close {
-  border: 1px solid rgba(0, 0, 0, 0.03);
-  background: rgba(0, 0, 0, 0.03);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-app);
   color: var(--text-secondary);
   width: 30px;
   height: 30px;
@@ -359,7 +404,7 @@ watch(
   transition: var(--transition-quick);
 }
 .drawer-close:hover {
-  background: rgba(0, 0, 0, 0.08);
+  background: var(--border-subtle);
   color: var(--text-primary);
 }
 
@@ -375,8 +420,8 @@ watch(
 
 /* 统计卡 */
 .stats-card {
-  background: rgba(255, 255, 255, 0.4);
-  border: 1px solid rgba(0, 0, 0, 0.04);
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
   border-radius: 16px;
   padding: 18px 16px 12px;
 }
@@ -406,14 +451,14 @@ watch(
   justify-content: space-between;
   margin-top: 14px;
   padding-top: 10px;
-  border-top: 1px solid rgba(0, 0, 0, 0.04);
+  border-top: 1px solid var(--border-subtle);
 }
 .hint {
   font-size: 0.74rem;
   color: var(--text-muted);
 }
 .hint.err {
-  color: #ef4444;
+  color: var(--danger);
 }
 .hint em {
   font-style: normal;
@@ -424,14 +469,53 @@ watch(
   font-weight: 600;
   padding: 5px 14px;
   border-radius: 8px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
   color: var(--text-primary);
   cursor: pointer;
   transition: var(--transition-quick);
 }
 .btn-refresh:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.95);
+  background: var(--bg-app);
+}
+
+/* 配额编辑 */
+.quota-card {
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+  padding: 14px 16px;
+}
+.quota-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.quota-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.quota-label .lbl {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.quota-label .hint {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+.quota-input {
+  width: 96px;
+  padding: 6px 10px;
+  text-align: right;
+  font-weight: 600;
+}
+.quota-error {
+  margin: 8px 0 0;
+  font-size: 0.78rem;
+  color: var(--danger);
 }
 .btn-refresh:disabled {
   opacity: 0.5;
@@ -537,6 +621,9 @@ watch(
   color: var(--text-muted);
 }
 .meta .likes {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   flex-shrink: 0;
   white-space: nowrap;
 }
@@ -556,14 +643,14 @@ watch(
   font-weight: 600;
   padding: 8px 24px;
   border-radius: 10px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
   color: var(--text-primary);
   cursor: pointer;
   transition: var(--transition-quick);
 }
 .btn-more:hover {
-  background: rgba(255, 255, 255, 0.95);
+  background: var(--bg-app);
 }
 .works-msg {
   padding: 24px;

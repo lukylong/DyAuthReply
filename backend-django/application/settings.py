@@ -545,14 +545,15 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.23'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.24'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '新增「卡片管理」：可创建伪装链接卡片（封面/标题/描述/跳转链接）\n'
-    '自动回复规则支持多选关联卡片，命中后以卡片形式发送\n'
-    '卡片数据自动同步到云端，抖音私信渲染为可点击卡片\n'
-    '优化客户端卡片管理界面配色与交互',
+    '启用全新 D 助手桌面图标\n'
+    '多账号状态与私信增量改为单条本机 WebSocket 实时广播，减少轮询负载\n'
+    '持久化会话发送上下文，修复新会话首条自动回复缺少 short_id 或 ticket\n'
+    '账号可发送、登录失效与平台风控状态按真实探测结果展示\n'
+    '同步抖音创作者中心当前 PC IM 协议并优化批量账号调度',
 )

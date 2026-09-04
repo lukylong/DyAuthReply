@@ -8,6 +8,9 @@ zq-platform (芷青开发平台) 是一个企业级后台管理系统，采用�
 - **后端**: Django 5.2.7 + Django Ninja (REST API)
 - **前端**: Vue 3 + Vite + Element Plus (pnpm monorepo)
 - **核心特性**: 抖音私信自动回复模块（纯 HTTP 协议，无浏览器依赖）
+- **桌面客户端** (`dyauthreply-client/`): Tauri 2 + Vue，面向最终用户的免 Docker 单机版，见下方「桌面客户端」章节
+
+**重要架构分工**：抖音托管自动回复的**主业务实际运行在桌面客户端**——客户端是自包含的本地实例（本机 SQLite + 本机 Django `127.0.0.1:8765` + 本地 douyin worker），账号/规则管理和实际回复发送都发生在客户端内。`web/` 管理后台 + 公网 `backend-django` 目前主要承担**数据查看**与**授权核心**（license 激活、设备鉴权），不是回复的主执行端。新增“客户端 → 公网”的数据同步应复用 `core/client/license_auth.py` 与 `/api/client-auth/*` 这套基于 `device_fingerprint` / `activation_id` 的鉴权通道，不要新造一套。
 
 ## 快速启动
 
@@ -101,6 +104,25 @@ pnpm format
 
 # 代码检查
 pnpm lint
+```
+
+#### 桌面客户端（Tauri，`dyauthreply-client/`）
+```bash
+# 前置：backend-django 依赖已装（复用同一份 core.douyin 代码），Node.js 20+，可选 Rust（仅打包需要）
+cd dyauthreply-client/client-ui && npm install
+cd ../desktop && npm install
+
+# 终端 A：本地服务（Django API + douyin worker，SQLite，无需 Redis/Postgres/Docker）
+python3 dyauthreply-client/launcher/launcher.py
+# 浏览器访问 http://127.0.0.1:8765/app/
+
+# 终端 B：Tauri 桌面壳（会自动拉起 client-ui 开发服务器）
+cd dyauthreply-client/desktop
+npm run tauri dev
+
+# 打包（产物在 desktop/src-tauri/target/release/bundle/）
+cd dyauthreply-client/client-ui && npm run build
+cd ../desktop && npm run tauri build
 ```
 
 ## 测试
@@ -254,6 +276,29 @@ web/
     └── utils/           # 工具函数
 ```
 
+### 桌面客户端架构（dyauthreply-client）
+
+**定位**: 面向不懂技术的最终用户的免 Docker 单机版，双击 `.app`/`.exe` 即用；与 `web/`、`backend-django` 的现有部署链路**完全隔离**，不共享代码，只通过 HTTP API / 子进程复用后端逻辑。
+
+```
+dyauthreply-client/
+├── desktop/              Tauri 2 工程（Rust 管子进程/托盘/单实例锁）
+│   └── src-tauri/        启动 launcher.py 子进程，WebView 加载 client-ui
+├── client-ui/            独立 Vue 3 + Vite 客户端 UI（与 web-ele 代码不共享，只共享 API 契约）
+│   └── src/views/        HomeView / AccountsView / ChatView / CardsView / RulesView / TemplatesView / LogsView / SettingsView / AdminConsoleView
+├── launcher/              跨平台启动器（Python，被 Tauri 调用，也可独立运行）
+│   ├── launcher.py        启动 Django API（127.0.0.1:8765）+ douyin worker，SQLite 迁移
+│   └── launcher_bundled.py  发布态：内置 Python/Node 运行时的打包版
+└── PLAN.zh-CN.md / QUICKSTART.zh-CN.md   产品规划与本地开发速查（先读 PLAN）
+```
+
+**关键点**:
+- 本地后端固定监听 `127.0.0.1:8765`，路由前缀 `/api/client/v1/`，仅聚合抖音相关 handler（不暴露 `/api/core/user` 等管理接口），现阶段靠 `127.0.0.1` 绑定 + 本地超级用户免鉴权，无客户端 Token/RBAC
+- 复用 `backend-django/core/douyin/runtime` 的 Worker/协议/凭证代码，而非重写
+- 数据目录：开发态 `DyAuthReply/data/client/`；macOS 正式版 `~/Library/Application Support/DyAuthReply/`；Windows 正式版 `%APPDATA%\DyAuthReply\`（与仓库 `data/standalone/` 路径不同，避免误删开发数据）
+- 约束：`dyauthreply-client/**` 内不得 `import` 或修改 `web/apps/web-ele/**`
+- 健康检查 `GET /api/client/v1/health`；启动失败时按顺序看 `launcher.log` → `server.log` → `migration_error.log`
+
 ## 开发规范
 
 ### 后端 API 开发（Django Ninja）
@@ -342,6 +387,12 @@ export namespace DouyinAccountApi {
 3. 查看 worker 日志中的签名错误详情
 4. 如果抖音更新了签名算法，需要更新 `dy_ab.js` 和 `bd-ticket-guard` 脚本
 
+### 桌面客户端启动失败（Splash 卡住/"服务启动失败"）
+1. 确认没有同时打开多个客户端窗口（会触发单实例锁 `launcher.lock`）
+2. 按优先级查日志：`launcher.log`（后端 sidecar 启动）→ `server.log`（Django API）→ `migration_error.log`（迁移失败详情）
+3. 确认 `8765` 端口未被占用（常见于开发态残留的 `launcher.py` 进程未退出）
+4. Windows 下杀毒软件可能拦截 PyInstaller 解包，需将安装目录加入白名单
+
 ## API 文档
 
 - **Swagger UI**: http://localhost:8000/api/docs
@@ -384,8 +435,8 @@ def douyin_reset_daily_quota():
 
 参考项目根目录的以下文档：
 - `DEPLOY.zh-CN.md`: 完整部署指南
-- `MIGRATION_DEPLOY.zh-CN.md`: 迁移部署指南
 - `docker-compose.yml`: Docker 部署配置
+- `dyauthreply-client/PLAN.zh-CN.md` / `QUICKSTART.zh-CN.md`: 桌面客户端规划与打包/发布说明
 
 ## 相关文档
 

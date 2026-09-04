@@ -61,6 +61,25 @@ class DouyinConversation(RootModel):
         db_index=True,
     )
 
+    platform_conversation_short_id = models.BigIntegerField(
+        null=True,
+        blank=True,
+        help_text="抖音平台侧 conversation_short_id（发送协议路由使用）",
+    )
+
+    platform_conversation_ticket = models.CharField(
+        max_length=512,
+        null=True,
+        blank=True,
+        help_text="抖音平台侧会话 ticket（仅服务端发送协议使用）",
+    )
+
+    platform_conversation_ticket_updated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="会话 ticket 最近成功刷新时间",
+    )
+
     last_message_at = models.DateTimeField(
         null=True,
         blank=True,
@@ -98,6 +117,10 @@ class DouyinConversation(RootModel):
         ]
         indexes = [
             models.Index(fields=['account', 'last_message_at']),
+            models.Index(
+                fields=['account', 'platform_conversation_id'],
+                name='dy_conv_acc_platform_idx',
+            ),
         ]
 
     def __str__(self):

@@ -2,7 +2,6 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ImageOff, MessagesSquare, Mic, Smile, Video } from 'lucide-vue-next';
 import {
-  DouyinRealtime,
   getWorkerCommandStatus,
   listAccounts,
   listConversations,
@@ -15,6 +14,7 @@ import {
   type MessageItem,
 } from '../api/client';
 import { useClientLicense } from '../composables/useClientLicense';
+import { useClientRealtime } from '../composables/useClientRealtime';
 
 const accounts = ref<DouyinAccount[]>([]);
 const activeAccountId = ref('');
@@ -55,6 +55,12 @@ const convTotal = ref(0);
 const convHasMore = ref(false);
 const CONV_PAGE_SIZE = 50;
 const { licenseStatus: license, ensureStatus } = useClientLicense();
+const {
+  setScope: setRealtimeScope,
+  start: startRealtime,
+  subscribe: subscribeClientRealtime,
+} = useClientRealtime();
+let unsubscribeRealtime: (() => void) | null = null;
 
 const activeAccount = computed(() =>
   accounts.value.find((a) => a.id === activeAccountId.value),
@@ -633,12 +639,8 @@ function selectConversation(id: string) {
   stickToBottom.value = true;
 }
 
-// 实时私信：WS 在线时降为慢兜底轮询，断线/不可用时回退原 3s 快轮询。
+// 实时私信：WS 在线时完全事件驱动；仅在断线/不可用时回退 3s 轮询。
 const FAST_POLL_MS = 3000;
-const SLOW_POLL_MS = 30000;
-let realtime: DouyinRealtime | null = null;
-const realtimeOn = ref(false);
-
 function pollTick() {
   if (document.hidden) return;
   if (activeAccountId.value) void loadConversations(true);
@@ -651,11 +653,11 @@ function startPolling(intervalMs = FAST_POLL_MS) {
 }
 
 function subscribeRealtime() {
-  realtime?.subscribe(activeAccountId.value, activeConversationId.value);
+  setRealtimeScope(activeAccountId.value, activeConversationId.value);
 }
 
 function setupRealtime() {
-  realtime = new DouyinRealtime({
+  unsubscribeRealtime = subscribeClientRealtime({
     onNewMessage: (d) => {
       if (!d.account_id || d.account_id !== activeAccountId.value) return;
       void loadConversations(true);
@@ -668,16 +670,15 @@ function setupRealtime() {
       }
     },
     onOpen: () => {
-      realtimeOn.value = true;
       subscribeRealtime();
-      startPolling(SLOW_POLL_MS);
+      stopPolling();
     },
     onClose: () => {
-      realtimeOn.value = false;
       startPolling(FAST_POLL_MS);
     },
   });
-  realtime.connect();
+  startRealtime();
+  subscribeRealtime();
 }
 
 function onVisibilityChange() {
@@ -825,8 +826,9 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopPolling();
-  realtime?.close();
-  realtime = null;
+  unsubscribeRealtime?.();
+  unsubscribeRealtime = null;
+  setRealtimeScope();
   if (convSearchTimer) clearTimeout(convSearchTimer);
   document.removeEventListener('visibilitychange', onVisibilityChange);
   document.removeEventListener('keydown', onKeydown);

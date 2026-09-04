@@ -23,7 +23,6 @@ from typing import Optional
 
 from core.douyin.runtime.transport.wire import dy_request_pb2 as R
 from core.douyin.runtime.transport.wire.codec import (
-    encode_field,
     get_first_bytes,
     get_first_int,
     get_first_str,
@@ -37,49 +36,12 @@ GET_CONVERSATION_INFO_CMD_ID = 610
 IM_BUILD_NUMBER = IM_BUILD_ID
 _DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 )
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
-
-
-def _header_entry(key: str, value: str) -> bytes:
-    return encode_field(1, key) + encode_field(2, value)
-
-
-def _serialize_creator_envelope(
-    req: "R.Request",
-    *,
-    body_field: int,
-    body_payload: bytes,
-    headers: list[tuple[str, str]],
-) -> bytes:
-    """Serialize creator IM with explicit proto3 defaults seen on Chromium's wire."""
-
-    request_body = encode_field(body_field, body_payload)
-    parts = [
-        encode_field(1, int(req.cmd)),
-        encode_field(2, int(req.sequence_id)),
-        encode_field(3, req.sdk_version),
-        encode_field(4, ""),
-        encode_field(5, int(req.refer)),
-        encode_field(6, 0),
-        encode_field(7, req.build_number),
-        encode_field(8, request_body),
-        encode_field(9, ""),
-        encode_field(11, req.device_platform),
-    ]
-    parts.extend(encode_field(15, _header_entry(key, value)) for key, value in headers)
-    parts.extend(
-        [
-            encode_field(18, int(req.auth_type)),
-            encode_field(21, req.biz),
-            encode_field(22, req.access),
-        ]
-    )
-    return b"".join(parts)
 
 
 def _build_envelope(
@@ -88,9 +50,9 @@ def _build_envelope(
     *,
     s_v_web_id: str = "",
     webid: str = "",  # noqa: ARG001 旧调用兼容
-    user_agent: str = _DEFAULT_UA,  # noqa: ARG001 浏览器 UA 仅用于 HTTP 层
+    user_agent: str = _DEFAULT_UA,
 ) -> "R.Request":
-    """组装 2026 PC IM Request envelope。
+    """组装 DouYin_Spider master 的 PC IM Request envelope。
 
     鉴权已移到 HTTP bd-ticket-guard 头；顶层 token/ts_sign/sdk_cert/request_sign
     保持未设置，与当前浏览器线上包一致。
@@ -102,15 +64,29 @@ def _build_envelope(
     req.refer = 3
     req.inbox_type = 0
     req.build_number = IM_BUILD_NUMBER
-    # 2026-09-03 creator.douyin.com 实际请求画像。这里必须与创作者中心
-    # PC IM 包一致；使用主站 douyin_pc/aid=6383 会被 send 返回 7911。
-    req.device_platform = "douyin_creator"
+    req.device_id = "0"
+    req.device_platform = "douyin_pc"
+    req.version_code = "360000"
     h = req.headers
-    h["aid_new"] = ""
-    h["app_name"] = "douyin_creator"
+    h["session_aid"] = "6383"
+    h["session_did"] = "0"
+    h["app_name"] = "douyin_pc"
+    h["priority_region"] = "cn"
+    h["user_agent"] = user_agent
+    h["cookie_enabled"] = "true"
+    h["browser_language"] = "zh-CN"
+    h["browser_platform"] = "Win32"
+    h["browser_name"] = "Mozilla"
+    h["browser_version"] = user_agent.replace("Mozilla/", "", 1)
+    h["browser_online"] = "true"
+    h["screen_width"] = "2560"
+    h["screen_height"] = "1440"
+    h["referer"] = "https://www.douyin.com/jingxuan"
+    h["timezone_name"] = "Asia/Shanghai"
+    h["deviceId"] = "0"
     h["is-retry"] = "0"
-    req.auth_type = 1
-    req.biz = "douyin_creator"
+    req.auth_type = 4
+    req.biz = "douyin_web"
     req.access = "web_sdk"
     return req
 
@@ -163,65 +139,40 @@ def encode_send_message_request_pb2(
     if content_override is not None:
         msg_content = content_override
     else:
-        # Chromium preserves this insertion order in the compact JSON string.
-        msg_content = {"text": text, "aweType": 774}
+        msg_content = {
+            "aweType": 700,
+            "type": 0,
+            "richTextInfos": [],
+            "text": text,
+        }
     content_json = json.dumps(msg_content, ensure_ascii=False, separators=(",", ":"))
 
-    ext_pairs = [
-        ("s:mentioned_users", ""),
-        ("s:client_message_id", cm_id),
-    ]
+    body = req.body.send_message_body
+    body.conversation_id = conversation_id
+    body.conversation_type = 1
+    body.conversation_short_id = short_id
+    body.content = content_json
+    body.ext.append(R.ExtValue(key="s:mentioned_users", value=""))
+    body.ext.append(R.ExtValue(key="s:client_message_id", value=cm_id))
     for key, value in (ext or {}).items():
         if key not in {"s:mentioned_users", "s:client_message_id", "s:stime"}:
-            ext_pairs.append((str(key), str(value)))
-    # Browser JS does not left-pad the random suffix (observed widths 2..5).
-    ext_pairs.append(("s:stime", f"{_now_ms()}.{random.randrange(100000)}"))
-
-    send_parts = [
-        encode_field(1, conversation_id),
-        encode_field(2, 1),
-        encode_field(3, short_id),
-        encode_field(4, content_json),
-    ]
-    send_parts.extend(
-        encode_field(5, _header_entry(key, value)) for key, value in ext_pairs
+            body.ext.append(R.ExtValue(key=str(key), value=str(value)))
+    body.ext.append(
+        R.ExtValue(key="s:stime", value=f"{_now_ms()}.{random.randrange(100000):05d}")
     )
-    send_parts.extend(
-        [
-            encode_field(6, int(message_type)),
-            encode_field(7, ticket or ""),
-            encode_field(8, cm_id),
-        ]
-    )
-    send_parts.extend(encode_field(9, int(uid)) for uid in (mentioned_users or []))
-
-    headers: list[tuple[str, str]] = []
+    if mentioned_users:
+        body.mentioned_users.extend(int(uid) for uid in mentioned_users)
+    body.message_type = int(message_type)
+    body.ticket = ticket or ""
+    body.client_message_id = cm_id
     if identity_security_token:
-        headers.append(
-            (
-                "identity_security_token",
-                json.dumps(
-                    {"token": str(identity_security_token)}, separators=(",", ":")
-                ),
-            )
+        req.headers["identity_security_token"] = json.dumps(
+            {"token": str(identity_security_token)}, separators=(",", ":")
         )
     if identity_security_device_id:
-        headers.append(("identity_security_device_id", str(identity_security_device_id)))
-    headers.extend(
-        [
-            ("identity_security_aid", "2906"),
-            ("aid_new", ""),
-            ("app_name", "douyin_creator"),
-            ("is-retry", "0"),
-        ]
-    )
-    serialized = _serialize_creator_envelope(
-        req,
-        body_field=SEND_MESSAGE_CMD_ID,
-        body_payload=b"".join(send_parts),
-        headers=headers,
-    )
-    return serialized, cm_id, req.sequence_id
+        req.headers["identity_security_device_id"] = str(identity_security_device_id)
+    req.headers["identity_security_aid"] = ""
+    return req.SerializeToString(), cm_id, req.sequence_id
 
 
 def encode_get_conversation_info_request_pb2(
@@ -239,25 +190,11 @@ def encode_get_conversation_info_request_pb2(
         raise ValueError("conversation_short_id 必须大于 0")
 
     req = _build_envelope(GET_CONVERSATION_INFO_CMD_ID, user_agent=user_agent)
-    data_payload = b"".join(
-        [
-            encode_field(1, conversation_id),
-            encode_field(2, short_id),
-            encode_field(3, 1),
-        ]
-    )
-    get_info_payload = encode_field(1, data_payload)
-    serialized = _serialize_creator_envelope(
-        req,
-        body_field=GET_CONVERSATION_INFO_CMD_ID,
-        body_payload=get_info_payload,
-        headers=[
-            ("aid_new", ""),
-            ("app_name", "douyin_creator"),
-            ("is-retry", "0"),
-        ],
-    )
-    return serialized, req.sequence_id
+    info = req.body.get_conversation_info_list_v2_body.data
+    info.conversation_id = conversation_id
+    info.conversation_short_id = short_id
+    info.conversation_type = 1
+    return req.SerializeToString(), req.sequence_id
 
 
 @dataclass(frozen=True)

@@ -538,6 +538,23 @@ def _account_max_message_ts(account_id: str):
     )
 
 
+def _account_state_revision() -> str:
+    """返回客户端账号列表的轻量版本号，避免 UI 定时拉取完整 `/account/all`。
+
+    所有会影响客户端账号卡片的写入都应同步推进 sys_update_datetime。消费者仅在
+    SQLite data_version 变化后查询这一行聚合；版本真正变化时才广播刷新信号。
+    """
+    from django.db.models import Count, Max
+    from core.douyin.douyin_account_model import DouyinAccount
+
+    state = DouyinAccount.objects.exclude(status=3).aggregate(
+        total=Count('id'),
+        latest=Max('sys_update_datetime'),
+    )
+    latest = state.get('latest')
+    return f"{int(state.get('total') or 0)}:{latest.isoformat() if latest else ''}"
+
+
 class DouyinConsumer(TokenAuthWebSocketConsumer):
     """抖音托管事件 WebSocket 消费者
 
@@ -611,6 +628,7 @@ class DouyinClientRealtimeConsumer(AsyncWebsocketConsumer):
         self._dbpoll_task = None
         self._last_data_version = None
         self._cursor_ts = None
+        self._account_revision = None
 
     def _is_loopback(self) -> bool:
         client = self.scope.get('client') or []
@@ -622,6 +640,11 @@ class DouyinClientRealtimeConsumer(AsyncWebsocketConsumer):
             await self.close(code=4003)
             return
         await self.accept()
+        with suppress(Exception):
+            self._account_revision = await sync_to_async(
+                _account_state_revision, thread_sensitive=True
+            )()
+        await self._ensure_dbpoll_started()
 
     async def disconnect(self, close_code):
         if self._dbpoll_task is not None:
@@ -666,7 +689,7 @@ class DouyinClientRealtimeConsumer(AsyncWebsocketConsumer):
             self._dbpoll_task = asyncio.create_task(self._dbpoll_loop())
 
     async def _dbpoll_loop(self):
-        """每 interval 读 data_version；变化时查订阅账号增量消息并推送 new_message。"""
+        """监听本地库变化，广播账号状态；有私信订阅时再查询消息增量。"""
         interval = max(
             0.1,
             float(getattr(settings, 'DOUYIN_WS_DBPOLL_INTERVAL_MS', 400)) / 1000.0,
@@ -674,14 +697,24 @@ class DouyinClientRealtimeConsumer(AsyncWebsocketConsumer):
         try:
             while True:
                 await asyncio.sleep(interval)
-                if not self._sub_account_id:
-                    continue
                 try:
                     dv = await sync_to_async(_read_data_version, thread_sensitive=True)()
                     # SQLite：dv 未变说明无任何写入，直接跳过；非 SQLite(dv=-1) 每轮都查。
                     if dv != -1 and dv == self._last_data_version:
                         continue
                     self._last_data_version = dv
+
+                    revision = await sync_to_async(
+                        _account_state_revision, thread_sensitive=True
+                    )()
+                    if revision != self._account_revision:
+                        self._account_revision = revision
+                        await self._send('account_state_changed', {
+                            'revision': revision,
+                        })
+
+                    if not self._sub_account_id:
+                        continue
                     result = await sync_to_async(
                         _account_new_messages, thread_sensitive=True
                     )(self._sub_account_id, self._cursor_ts)

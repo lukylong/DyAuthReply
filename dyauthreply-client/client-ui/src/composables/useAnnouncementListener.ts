@@ -4,15 +4,10 @@
  */
 import { ref, onMounted, onUnmounted, watchEffect } from 'vue';
 import { useClientSettings } from './useClientSettings';
-
-export interface ClientAnnouncement {
-  id: string;
-  title: string;
-  content: string;
-  level: 'info' | 'warning' | 'urgent';
-  publish_time: string | null;
-  expire_time: string | null;
-}
+import {
+  listClientAnnouncements,
+  type ClientAnnouncement,
+} from '../api/client';
 
 const announcements = ref<ClientAnnouncement[]>([]);
 const unreadCount = ref(0);
@@ -53,16 +48,8 @@ function updateUnreadCount() {
 
 async function fetchAnnouncements(): Promise<void> {
   try {
-    // 获取后端地址（从环境变量或配置）
-    const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
-    const response = await fetch(`${baseUrl}/api/client/v1/announcements?limit=10`);
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    const data = await response.json();
-    announcements.value = data.data || data; // 兼容不同的响应格式
+    // 始终走客户端本机 API；浏览器调试由 Vite 代理，桌面壳走 127.0.0.1:8765。
+    announcements.value = await listClientAnnouncements(10);
 
     updateUnreadCount();
 

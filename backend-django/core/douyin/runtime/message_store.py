@@ -214,6 +214,68 @@ def _recent_outbound_replies_log(
 
 
 @sync_to_async
+def load_conversation_send_context(
+    account_id: str,
+    platform_conversation_id: str,
+) -> tuple[int, str, Optional[datetime]]:
+    """读取账号隔离的持久化发送上下文，不触发任何协议请求。"""
+
+    from core.douyin.douyin_conversation_model import DouyinConversation
+
+    account_token = str(account_id or '').strip()
+    platform_token = str(platform_conversation_id or '').strip()
+    if not account_token or not platform_token:
+        return 0, '', None
+    row = (
+        DouyinConversation.objects.filter(
+            account_id=account_token,
+            platform_conversation_id=platform_token,
+        )
+        .values(
+            'platform_conversation_short_id',
+            'platform_conversation_ticket',
+            'platform_conversation_ticket_updated_at',
+        )
+        .first()
+    )
+    if not row:
+        return 0, '', None
+    return (
+        int(row.get('platform_conversation_short_id') or 0),
+        str(row.get('platform_conversation_ticket') or ''),
+        row.get('platform_conversation_ticket_updated_at'),
+    )
+
+
+@sync_to_async
+def save_conversation_send_context(
+    account_id: str,
+    platform_conversation_id: str,
+    conversation_short_id: int,
+    ticket: str,
+) -> bool:
+    """保存成功解析的会话发送上下文；严格按账号和平台会话双键更新。"""
+
+    from core.douyin.douyin_conversation_model import DouyinConversation
+
+    account_token = str(account_id or '').strip()
+    platform_token = str(platform_conversation_id or '').strip()
+    short_id = int(conversation_short_id or 0)
+    ticket_token = str(ticket or '').strip()
+    if not account_token or not platform_token or short_id <= 0 or not ticket_token:
+        return False
+    updated = DouyinConversation.objects.filter(
+        account_id=account_token,
+        platform_conversation_id=platform_token,
+    ).update(
+        platform_conversation_short_id=short_id,
+        platform_conversation_ticket=ticket_token,
+        platform_conversation_ticket_updated_at=timezone.now(),
+    )
+    return bool(updated)
+
+
+@sync_to_async
 def _upsert_conversation_and_message(
     account_id: str,
     peer_sec_uid: str,
@@ -226,6 +288,7 @@ def _upsert_conversation_and_message(
     peer_avatar: Optional[str] = None,
     peer_unique_id: Optional[str] = None,
     platform_conversation_id: Optional[str] = None,
+    platform_conversation_short_id: Optional[int] = None,
     direction: str = 'in',
     mark_processed: bool = False,
     content_type: str = 'text',
@@ -254,6 +317,7 @@ def _upsert_conversation_and_message(
     resolved_peer_sec_uid = (peer_sec_uid or "").strip()
     account_sec = (account.sec_uid or "").strip()
     platform_conv_id = (platform_conversation_id or "").strip()
+    platform_conv_short_id = int(platform_conversation_short_id or 0)
 
     # 校验 peer_sec_uid，防止将自己当成 peer
     if account_sec and resolved_peer_sec_uid == account_sec:
@@ -281,6 +345,8 @@ def _upsert_conversation_and_message(
         defaults['peer_unique_id'] = unique_id
     if platform_conv_id:
         defaults['platform_conversation_id'] = platform_conv_id
+    if platform_conv_short_id > 0:
+        defaults['platform_conversation_short_id'] = platform_conv_short_id
 
     conv, created = DouyinConversation.objects.get_or_create(
         account=account,
@@ -300,6 +366,15 @@ def _upsert_conversation_and_message(
             update_fields['peer_unique_id'] = unique_id
         if platform_conv_id:
             update_fields['platform_conversation_id'] = platform_conv_id
+        if platform_conv_short_id > 0:
+            if (
+                conv.platform_conversation_short_id
+                and conv.platform_conversation_short_id != platform_conv_short_id
+            ):
+                # short_id 变化代表旧 ticket 不再可信，避免复用错会话上下文。
+                update_fields['platform_conversation_ticket'] = None
+                update_fields['platform_conversation_ticket_updated_at'] = None
+            update_fields['platform_conversation_short_id'] = platform_conv_short_id
 
         if update_fields:
             DouyinConversation.objects.filter(id=conv.id).update(**update_fields)

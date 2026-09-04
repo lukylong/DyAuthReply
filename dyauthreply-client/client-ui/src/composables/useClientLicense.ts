@@ -14,6 +14,7 @@ const loaded = ref(false);
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let pollStarted = false;
+let loadPromise: Promise<ClientLicenseStatus> | null = null;
 
 function clearPollTimer() {
   if (pollTimer) {
@@ -30,14 +31,19 @@ function msUntilNextCheck(status: ClientLicenseStatus | null): number {
 }
 
 async function loadStatus(force = false) {
+  if (loadPromise) return loadPromise;
   loading.value = true;
-  try {
-    licenseStatus.value = force ? await refreshLicenseStatus() : await getLicenseStatus();
-    loaded.value = true;
-    return licenseStatus.value;
-  } finally {
-    loading.value = false;
-  }
+  loadPromise = (async () => {
+    try {
+      licenseStatus.value = force ? await refreshLicenseStatus() : await getLicenseStatus();
+      loaded.value = true;
+      return licenseStatus.value;
+    } finally {
+      loading.value = false;
+      loadPromise = null;
+    }
+  })();
+  return loadPromise;
 }
 
 async function ensureStatus() {

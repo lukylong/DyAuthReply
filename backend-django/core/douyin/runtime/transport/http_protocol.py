@@ -20,8 +20,10 @@ import base64
 import json
 import logging
 import os
+import random
 import time
 import uuid
+import weakref
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Optional
 
@@ -45,6 +47,7 @@ from core.douyin.runtime.transport.wire.codec import (
 )
 from core.douyin.runtime.transport.sign_types import (
     LoginExpiredError,
+    SendRiskControlError,
     SignedResponse,
     SignerUnavailable,
 )
@@ -66,6 +69,25 @@ if TYPE_CHECKING:
     from core.douyin.runtime.message_store import ScannedMessage
 
 logger = logging.getLogger(__name__)
+
+
+# 用户资料属于低优先级补全流量。所有账号共享同一事件循环内的并发闸，避免
+# “每账号 5 并发”随账号数线性放大成数百个 profile/other 请求。
+_PROFILE_FETCH_GUARDS: "weakref.WeakKeyDictionary[Any, tuple[int, asyncio.Semaphore]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _profile_fetch_guard() -> asyncio.Semaphore:
+    from django.conf import settings
+
+    limit = max(1, int(getattr(settings, "DOUYIN_PROFILE_FETCH_CONCURRENCY", 4) or 4))
+    loop = asyncio.get_running_loop()
+    entry = _PROFILE_FETCH_GUARDS.get(loop)
+    if entry is None or entry[0] != limit:
+        entry = (limit, asyncio.Semaphore(limit))
+        _PROFILE_FETCH_GUARDS[loop] = entry
+    return entry[1]
 
 
 @sync_to_async
@@ -284,12 +306,32 @@ _BASE_IM_HEADERS: dict[str, str] = {
     "sec-fetch-site": "same-site",
 }
 
+_REFERENCE_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+)
+_REFERENCE_SEC_CH_UA = (
+    '"Not=A?Brand";v="99", "Google Chrome";v="151", "Chromium";v="151"'
+)
+_REFERENCE_SEND_HEADERS: dict[str, str] = {
+    "content-type": "application/x-protobuf",
+    "accept": "application/x-protobuf",
+    "user-agent": _REFERENCE_UA,
+    "sec-ch-ua": _REFERENCE_SEC_CH_UA,
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,zh-TW;q=0.7,ja;q=0.6",
+    "referer": "https://www.douyin.com/",
+    "priority": "u=1, i",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
+}
+
 IDENTITY_SECURITY_URL = (
-    "https://creator.douyin.com/passport/safe/get_identity_security_token/"
+    "https://www.douyin.com/passport/safe/get_identity_security_token/"
 )
-_IDENTITY_SECURITY_REFERER = (
-    "https://creator.douyin.com/creator-micro/data/following/chat"
-)
+_IDENTITY_SECURITY_REFERER = "https://www.douyin.com/chat?isPopup=1"
 
 
 def identity_security_base_params(trace_id: str) -> str:
@@ -299,18 +341,17 @@ def identity_security_base_params(trace_id: str) -> str:
     并对整串计算 a_bogus。
     """
     return "&".join([
-        "passport_jssdk_version=5.1.4",
+        "passport_jssdk_version=4.2.3",
         "passport_jssdk_type=lite",
         "is_from_ttaccountsdk=1",
-        "aid=2906",
+        "aid=6383",
         "language=zh",
-        "account_app_language=zh-CN",
-        "scene=im_send_msg",
+        "scene=web_im",
         "auto_retry_req=0",
         "skip_verify=false",
         "identity_token_force_get_tag=0",
         f"biz_trace_id={trace_id}",
-        "id_token_version=2.1.5",
+        "id_token_version=1.2.10",
     ])
 
 # creator.douyin.com 域下的 JSON 业务接口（user_detail 等）共用 headers
@@ -498,6 +539,19 @@ class HttpProtocolTransport(AccountTransport):
         # key=platform conversation_id, value=(short_id, ticket, monotonic timestamp)
         # short_id 来自消息 f5；ticket 再由 cmd=610 会话详情接口补齐。
         self._conversation_send_context_cache: dict[str, tuple[int, str, float]] = {}
+        # 同一会话的手动/自动发送可能并发到达。上下文刷新只允许一条网络请求，
+        # 其余调用 await 同一 task，避免 cmd=610 / get_by_user 请求风暴。
+        self._conversation_send_context_inflight: dict[
+            tuple[str, bool], asyncio.Task[tuple[int, str]]
+        ] = {}
+        # 用户资料只用于展示，不参与消息是否回复的业务判定。正/负缓存和 singleflight
+        # 共同抑制 profile/other N+1；key=(account_id, sec_uid)。
+        self._peer_profile_cache: dict[
+            tuple[str, str], tuple[Optional[dict[str, str]], float]
+        ] = {}
+        self._peer_profile_inflight: dict[
+            tuple[str, str], asyncio.Task[Optional[dict[str, str]]]
+        ] = {}
 
     def _assert_account_bound(self, account: "DouyinAccount", verb: str) -> None:
         """校验传入账号与本 transport 绑定账号一致（信息隔离硬约束）。"""
@@ -540,6 +594,18 @@ class HttpProtocolTransport(AccountTransport):
         )
 
     async def stop(self, account: "DouyinAccount") -> None:
+        pending_contexts = list(self._conversation_send_context_inflight.values())
+        for task in pending_contexts:
+            task.cancel()
+        if pending_contexts:
+            await asyncio.gather(*pending_contexts, return_exceptions=True)
+        self._conversation_send_context_inflight.clear()
+        pending_profiles = list(self._peer_profile_inflight.values())
+        for task in pending_profiles:
+            task.cancel()
+        if pending_profiles:
+            await asyncio.gather(*pending_profiles, return_exceptions=True)
+        self._peer_profile_inflight.clear()
         try:
             await self._sign.stop(account)
         except Exception as e:  # noqa: BLE001
@@ -645,6 +711,9 @@ class HttpProtocolTransport(AccountTransport):
             except LoginExpiredError:
                 # 登录失效：保留类型透传给 worker 打回账号，不要包成通用 RuntimeError
                 raise
+            except SendRiskControlError:
+                # 发送封控：保留类型透传给 worker 更新账号列表状态
+                raise
             except ValueError:
                 raise
             except Exception as e:  # noqa: BLE001
@@ -689,6 +758,9 @@ class HttpProtocolTransport(AccountTransport):
                     ) from e
             except LoginExpiredError:
                 # 登录失效：保留类型透传给 worker 打回账号，不要包成通用 RuntimeError
+                raise
+            except SendRiskControlError:
+                # 发送封控：保留类型透传给 worker 更新账号列表状态
                 raise
             except ValueError:
                 # 调用方传错参数（空 text / 空 conv），透传
@@ -1138,34 +1210,154 @@ class HttpProtocolTransport(AccountTransport):
         sec_uids: list[str],
     ) -> dict[str, dict[str, str]]:
         """
-        批量/并发调 `profile/other` 获取用户昵称与头像。
+        批量调 `profile/other` 获取用户昵称与头像。
+
+        相同账号/sec_uid 的并发请求合并为一个；成功与失败分别使用长/短 TTL
+        缓存。跨账号的真实网络请求还会经过进程级并发闸。
         返回 {sec_uid: {"nickname": nick, "avatar": avatar}}
         """
-        import asyncio
-        import json as _json
-        import random
-        from urllib.parse import quote
-
         valid_sec_uids = sorted({s for s in sec_uids if s and not s.startswith("fallback_")})
         if not valid_sec_uids:
             return {}
 
         account_id = str(account.id)
-        result = {}
+        result = self.get_cached_peer_profiles(account_id, valid_sec_uids)
+        pending: list[tuple[str, asyncio.Task[Optional[dict[str, str]]]]] = []
+        for sec_uid in valid_sec_uids:
+            if sec_uid in result or self._profile_cache_contains(account_id, sec_uid):
+                continue
+            key = (account_id, sec_uid)
+            task = self._peer_profile_inflight.get(key)
+            if task is None:
+                task = asyncio.create_task(
+                    self._fetch_peer_profile_by_sec_uid(account, sec_uid),
+                    name=f"dy-profile-{account_id[:8]}-{sec_uid[:8]}",
+                )
+                self._peer_profile_inflight[key] = task
+                task.add_done_callback(
+                    lambda done, cache_key=key: self._finish_peer_profile_fetch(
+                        cache_key, done
+                    )
+                )
+            pending.append((sec_uid, task))
 
-        async def _fetch_one(sec_uid: str):
-            url = "https://www.douyin.com/aweme/v1/web/user/profile/other/"
-            extra_params = {
-                "source": "channel_pc_web",
-                "sec_user_id": sec_uid,
-                "personal_center_strategy": "1",
-                "update_version_code": "170400",
-            }
-            headers = {
-                "accept": "application/json, text/plain, */*",
-                "referer": f"https://www.douyin.com/user/{quote(sec_uid, safe='')}",
-            }
-            try:
+        if pending:
+            resolved = await asyncio.gather(
+                *(asyncio.shield(task) for _, task in pending),
+                return_exceptions=True,
+            )
+            for (sec_uid, _), info in zip(pending, resolved):
+                if isinstance(info, dict) and info.get("nickname"):
+                    result[sec_uid] = info
+        return result
+
+    def _profile_cache_contains(self, account_id: str, sec_uid: str) -> bool:
+        key = (str(account_id), str(sec_uid))
+        cached = self._peer_profile_cache.get(key)
+        if cached is None:
+            return False
+        if cached[1] <= time.monotonic():
+            self._peer_profile_cache.pop(key, None)
+            return False
+        return True
+
+    def get_cached_peer_profiles(
+        self,
+        account_id: str,
+        sec_uids: list[str],
+    ) -> dict[str, dict[str, str]]:
+        """只读进程内资料缓存；不会发起网络请求，供收信热路径使用。"""
+        result: dict[str, dict[str, str]] = {}
+        for sec_uid in sec_uids:
+            key = (str(account_id), str(sec_uid))
+            cached = self._peer_profile_cache.get(key)
+            if cached is None:
+                continue
+            info, expires_at = cached
+            if expires_at <= time.monotonic():
+                self._peer_profile_cache.pop(key, None)
+                continue
+            if info:
+                result[str(sec_uid)] = dict(info)
+        return result
+
+    def _finish_peer_profile_fetch(
+        self,
+        key: tuple[str, str],
+        task: asyncio.Task[Optional[dict[str, str]]],
+    ) -> None:
+        if self._peer_profile_inflight.get(key) is task:
+            self._peer_profile_inflight.pop(key, None)
+        if task.cancelled():
+            return
+        try:
+            info = task.result()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                f"[transport.http] 用户资料后台任务异常 account={key[0]} "
+                f"sec_uid={key[1]} err={type(exc).__name__}: {exc}"
+            )
+            info = None
+        self._cache_peer_profile(key, info)
+
+    def _cache_peer_profile(
+        self,
+        key: tuple[str, str],
+        info: Optional[dict[str, str]],
+    ) -> None:
+        from django.conf import settings
+
+        positive_ttl = float(
+            getattr(settings, "DOUYIN_PROFILE_CACHE_TTL_S", 86_400) or 86_400
+        )
+        negative_ttl = float(
+            getattr(settings, "DOUYIN_PROFILE_NEGATIVE_CACHE_TTL_S", 3_600) or 3_600
+        )
+        ttl = positive_ttl if info else negative_ttl
+        self._peer_profile_cache[key] = (dict(info) if info else None, time.monotonic() + ttl)
+
+        max_entries = max(
+            32,
+            int(getattr(settings, "DOUYIN_PROFILE_CACHE_MAX_ENTRIES", 4_096) or 4_096),
+        )
+        if len(self._peer_profile_cache) <= max_entries:
+            return
+        now = time.monotonic()
+        for cache_key, (_, expires_at) in list(self._peer_profile_cache.items()):
+            if expires_at <= now:
+                self._peer_profile_cache.pop(cache_key, None)
+        while len(self._peer_profile_cache) > max_entries:
+            self._peer_profile_cache.pop(next(iter(self._peer_profile_cache)))
+
+    async def _fetch_peer_profile_by_sec_uid(
+        self,
+        account: "DouyinAccount",
+        sec_uid: str,
+    ) -> Optional[dict[str, str]]:
+        """低优先级资料请求；调用方负责缓存与 singleflight。"""
+        from django.conf import settings
+        from urllib.parse import quote
+
+        jitter_max = max(
+            0.0,
+            float(getattr(settings, "DOUYIN_PROFILE_FETCH_JITTER_S", 0.2) or 0),
+        )
+        if jitter_max:
+            await asyncio.sleep(random.random() * jitter_max)
+
+        url = "https://www.douyin.com/aweme/v1/web/user/profile/other/"
+        extra_params = {
+            "source": "channel_pc_web",
+            "sec_user_id": sec_uid,
+            "personal_center_strategy": "1",
+            "update_version_code": "170400",
+        }
+        headers = {
+            "accept": "application/json, text/plain, */*",
+            "referer": f"https://www.douyin.com/user/{quote(sec_uid, safe='')}",
+        }
+        try:
+            async with _profile_fetch_guard():
                 resp = await self._sign.signed_fetch(
                     method="GET",
                     url=url,
@@ -1173,43 +1365,34 @@ class HttpProtocolTransport(AccountTransport):
                     extra_params=extra_params,
                     timeout_ms=10_000,
                 )
-                if resp.ok:
-                    payload = _json.loads(resp.text or resp.content.decode("utf-8") or "{}")
-                    if payload.get("status_code", 0) == 0:
-                        user = payload.get("user") or {}
-                        nickname = str(user.get("nickname") or "").strip()
-                        if nickname:
-                            avatar = ""
-                            for key in ("avatar_thumb", "avatar_larger", "avatar_medium"):
-                                block = user.get(key) or {}
-                                urls = block.get("url_list") or []
-                                if urls:
-                                    avatar = str(urls[0])
-                                    break
-                            unique_id = str(user.get("unique_id") or user.get("short_id") or "").strip()
-                            return sec_uid, {
-                                "nickname": nickname,
-                                "avatar": avatar,
-                                "unique_id": unique_id,
-                            }
-            except Exception as e:
-                logger.warning(f"[transport.http] _resolve_user_details_by_sec_uids 异常 sec_uid={sec_uid} err={e}")
-            return sec_uid, None
-
-        # 控制并发，最多 5 个并发，避免频控
-        sem = asyncio.Semaphore(5)
-        async def _sem_fetch(sec_uid: str):
-            async with sem:
-                await asyncio.sleep(random.random() * 0.4 + 0.1)
-                return await _fetch_one(sec_uid)
-
-        tasks = [_sem_fetch(s) for s in valid_sec_uids]
-        res_list = await asyncio.gather(*tasks)
-        for sec_uid, info in res_list:
-            if info:
-                result[sec_uid] = info
-
-        return result
+            if not resp.ok:
+                return None
+            payload = json.loads(resp.text or resp.content.decode("utf-8") or "{}")
+            if payload.get("status_code", 0) != 0:
+                return None
+            user = payload.get("user") or {}
+            nickname = str(user.get("nickname") or "").strip()
+            if not nickname:
+                return None
+            avatar = ""
+            for field in ("avatar_thumb", "avatar_larger", "avatar_medium"):
+                urls = (user.get(field) or {}).get("url_list") or []
+                if urls:
+                    avatar = str(urls[0])
+                    break
+            return {
+                "nickname": nickname,
+                "avatar": avatar,
+                "unique_id": str(
+                    user.get("unique_id") or user.get("short_id") or ""
+                ).strip(),
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"[transport.http] 用户资料请求异常 account={account.id} "
+                f"sec_uid={sec_uid} err={type(exc).__name__}: {exc}"
+            )
+            return None
 
     async def _resolve_peer_profiles_by_sec_uids(
         self,
@@ -1507,7 +1690,7 @@ class HttpProtocolTransport(AccountTransport):
             return cached[0], cached[1]
 
         try:
-            cookies = await self._sign.get_cookies(domain_contains="creator.douyin.com")
+            cookies = await self._sign.get_cookies(domain_contains="www.douyin.com")
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"读取身份安全 Cookie 失败: {exc}") from exc
         cookies = {str(k).lower(): str(v) for k, v in (cookies or {}).items()}
@@ -1515,11 +1698,16 @@ class HttpProtocolTransport(AccountTransport):
         headers = {
             "accept": "application/json, text/javascript",
             "referer": _IDENTITY_SECURITY_REFERER,
+            "user-agent": _REFERENCE_UA,
+            "sec-ch-ua": _REFERENCE_SEC_CH_UA,
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,zh-TW;q=0.7,ja;q=0.6",
+            "priority": "u=1, i",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
             "x-tt-passport-csrf-token": (
-                cookies.get("passport_csrf_token", "")
-                or cookies.get("passport_csrf_token_default", "")
-            ),
-            "x-secsdk-csrf-token": (
                 cookies.get("passport_csrf_token", "")
                 or cookies.get("passport_csrf_token_default", "")
             ),
@@ -1589,19 +1777,118 @@ class HttpProtocolTransport(AccountTransport):
         *,
         force: bool = False,
     ) -> tuple[int, str]:
-        """获取发送必填的会话短 ID 与 ticket，并做短时缓存。"""
+        """获取发送必填上下文；同一会话的并发刷新共享一个任务。"""
+
+        now = time.monotonic()
+        cached = self._conversation_send_context_cache.get(conversation_id)
+        ttl_s = self._send_context_ttl_s()
+        if cached and not force and cached[1] and now - cached[2] < ttl_s:
+            return cached[0], cached[1]
+
+        key = (str(conversation_id), bool(force))
+        task = self._conversation_send_context_inflight.get(key)
+        if task is None or task.done():
+            task = asyncio.create_task(
+                self._refresh_send_conversation_context(
+                    account,
+                    conversation_id,
+                    force=force,
+                )
+            )
+            self._conversation_send_context_inflight[key] = task
+            task.add_done_callback(
+                lambda done, context_key=key: self._finish_send_context_refresh(
+                    context_key, done
+                )
+            )
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done() and self._conversation_send_context_inflight.get(key) is task:
+                self._conversation_send_context_inflight.pop(key, None)
+
+    def _finish_send_context_refresh(
+        self,
+        key: tuple[str, bool],
+        task: asyncio.Task[tuple[int, str]],
+    ) -> None:
+        if self._conversation_send_context_inflight.get(key) is task:
+            self._conversation_send_context_inflight.pop(key, None)
+
+    @staticmethod
+    def _send_context_ttl_s() -> float:
+        try:
+            from django.conf import settings as _s
+
+            return max(
+                1.0,
+                float(getattr(_s, "DOUYIN_SEND_CONTEXT_TTL_S", 900) or 900),
+            )
+        except Exception:  # noqa: BLE001
+            return 900.0
+
+    async def _refresh_send_conversation_context(
+        self,
+        account: "DouyinAccount",
+        conversation_id: str,
+        *,
+        force: bool = False,
+    ) -> tuple[int, str]:
+        """内存→持久化→协议的分层解析；仅 legacy 行走宽扫描。"""
 
         from core.douyin.runtime.transport.wire.im_send_pb2 import (
             decode_get_conversation_info_response_pb2,
             encode_get_conversation_info_request_pb2,
         )
+        from core.douyin.runtime.message_store import (
+            load_conversation_send_context,
+            save_conversation_send_context,
+        )
 
         now = time.monotonic()
         cached = self._conversation_send_context_cache.get(conversation_id)
-        if cached and not force and cached[1] and now - cached[2] < 900:
+        ttl_s = self._send_context_ttl_s()
+        if cached and not force and cached[1] and now - cached[2] < ttl_s:
             return cached[0], cached[1]
 
-        short_id = cached[0] if cached and not force else 0
+        # force 仅强制刷新 ticket；short_id 是稳定路由键，仍可从内存/DB 复用。
+        short_id = cached[0] if cached else 0
+        if not force or short_id <= 0:
+            db_short_id, db_ticket, db_updated_at = (
+                await load_conversation_send_context(
+                    str(account.id),
+                    conversation_id,
+                )
+            )
+            if db_short_id > 0:
+                short_id = db_short_id
+            if (
+                not force
+                and short_id > 0
+                and db_ticket
+                and db_updated_at is not None
+            ):
+                try:
+                    from django.utils import timezone as django_timezone
+
+                    age_s = max(
+                        0.0,
+                        (django_timezone.now() - db_updated_at).total_seconds(),
+                    )
+                except Exception:  # noqa: BLE001
+                    age_s = ttl_s
+                if age_s < ttl_s:
+                    self._conversation_send_context_cache[conversation_id] = (
+                        short_id,
+                        db_ticket,
+                        now - age_s,
+                    )
+                    logger.debug(
+                        f"[transport.http] send_context 命中持久化 ticket "
+                        f"account={account.id} conv={conversation_id} age={age_s:.1f}s"
+                    )
+                    return short_id, db_ticket
+
         if short_id <= 0:
             endpoint = _ENDPOINTS["get_by_user"]
             body, seq_id = encode_get_by_user_request(cursor_us=0, limit=200)
@@ -1645,7 +1932,7 @@ class HttpProtocolTransport(AccountTransport):
         body, seq_id = encode_get_conversation_info_request_pb2(
             conversation_id=conversation_id,
             conversation_short_id=short_id,
-            user_agent=getattr(self._sign, "_user_agent", "") or "",
+            user_agent=_REFERENCE_UA,
         )
         logger.info(
             f"[transport.http] send_context → POST {endpoint['url']} "
@@ -1656,7 +1943,7 @@ class HttpProtocolTransport(AccountTransport):
             method=endpoint["method"],
             url=endpoint["url"],
             body=body,
-            headers=_BASE_IM_HEADERS,
+            headers=_REFERENCE_SEND_HEADERS,
         )
         if not resp.ok or not resp.content:
             raise RuntimeError(
@@ -1686,7 +1973,13 @@ class HttpProtocolTransport(AccountTransport):
         self._conversation_send_context_cache[conversation_id] = (
             short_id,
             ticket,
-            now,
+            time.monotonic(),
+        )
+        await save_conversation_send_context(
+            str(account.id),
+            conversation_id,
+            short_id,
+            ticket,
         )
         return short_id, ticket
 
@@ -1738,8 +2031,11 @@ class HttpProtocolTransport(AccountTransport):
             encode_send_message_request_pb2,
         )
 
-        cookies = await self._sign.get_cookies()
+        cookies = await self._sign.get_cookies(domain_contains="www.douyin.com")
         cookies = {str(k).lower(): str(v) for k, v in (cookies or {}).items()}
+        s_v_web_id = cookies.get("s_v_web_id", "")
+        if not s_v_web_id:
+            raise RuntimeError(f"{log_tag} 缺少 s_v_web_id，无法组装 verifyFp/fp")
         conversation_short_id, conversation_ticket = (
             await self._resolve_send_conversation_context(account, conversation_id)
         )
@@ -1753,10 +2049,10 @@ class HttpProtocolTransport(AccountTransport):
             ticket=conversation_ticket,
             text=normalized,
             bd_ticket=bd_ticket,
-            s_v_web_id="",
+            s_v_web_id=s_v_web_id,
             identity_security_token=identity_token,
             identity_security_device_id=identity_device_id,
-            user_agent=getattr(self._sign, "_user_agent", "") or "",
+            user_agent=_REFERENCE_UA,
         )
         encoder = "pb2-2026"
 
@@ -1772,9 +2068,10 @@ class HttpProtocolTransport(AccountTransport):
             method=endpoint["method"],
             url=endpoint["url"],
             body=body,
-            headers=_BASE_IM_HEADERS,
+            headers=_REFERENCE_SEND_HEADERS,
             use_xhr=True,
             base_params="",
+            post_sign_params={"verifyFp": s_v_web_id, "fp": s_v_web_id},
         )
 
         if not resp.ok:
@@ -1839,7 +2136,17 @@ class HttpProtocolTransport(AccountTransport):
                     f"biz_raw_check_code={result.biz_raw_check_code} "
                     f"server_msg_id={result.server_msg_id} client_msg_id={result.client_msg_id}"
                 )
-                raise RuntimeError(_format_send_business_failure(result, log_tag))
+                detail = _format_send_business_failure(result, log_tag)
+                if (
+                    result.biz_status_code in _HARD_BIZ_FAIL_CODES
+                    or result.biz_raw_check_code == 2
+                ):
+                    raise SendRiskControlError(
+                        detail,
+                        biz_status_code=result.biz_status_code,
+                        raw_check_code=result.biz_raw_check_code,
+                    )
+                raise RuntimeError(detail)
         if result.biz_status_code == 8101 and result.biz_status_text:
             logger.warning(
                 f"[transport.http] {log_tag} 业务层提示异常 account={account.id} "
@@ -2300,7 +2607,9 @@ class HttpProtocolTransport(AccountTransport):
                 user_details: dict[str, dict[str, str]] = {}
                 if pending:
                     sender_sec_uids = sorted({m.sender_sec_uid for m, _, _, _ in pending if m.sender_sec_uid})
-                    user_details = await self._resolve_user_details_by_sec_uids(account, sender_sec_uids)
+                    # 收信/回复热路径只读本地缓存。远程 profile/other 由 worker 的
+                    # 低优先级后台补全任务负责，资料接口延迟不会拖住消息入库和回复。
+                    user_details = self.get_cached_peer_profiles(account_id, sender_sec_uids)
 
                 touched_conv_ids: set[str] = set()
                 for m, received_at, external_msg_id, direction in pending:
@@ -2325,6 +2634,9 @@ class HttpProtocolTransport(AccountTransport):
                             raw={
                                 "source": "http_protocol.scan_inbox.conversation",
                                 "conversation_id": m.conversation_id,
+                                "conversation_short_id": int(
+                                    getattr(m, "conversation_short_id", 0) or 0
+                                ),
                                 "msg_type": m.msg_type,
                                 "server_message_id": m.server_message_id,
                                 "client_message_id": m.client_message_id,
@@ -2334,6 +2646,9 @@ class HttpProtocolTransport(AccountTransport):
                             },
                             external_msg_id=external_msg_id,
                             platform_conversation_id=m.conversation_id,
+                            platform_conversation_short_id=int(
+                                getattr(m, "conversation_short_id", 0) or 0
+                            ),
                             direction=direction,
                             content_type=getattr(m, "content_type", "text"),
                             media=getattr(m, "media", None),
@@ -2365,6 +2680,9 @@ class HttpProtocolTransport(AccountTransport):
                                     "source": "http_protocol",
                                     "server_message_id": m.server_message_id,
                                     "conversation_id": m.conversation_id,
+                                    "conversation_short_id": int(
+                                        getattr(m, "conversation_short_id", 0) or 0
+                                    ),
                                 },
                             )
                         )
@@ -2635,7 +2953,14 @@ class HttpProtocolTransport(AccountTransport):
         # ---------------- 第二遍：批量补昵称 + 落库 + 静默 mark_read ----------------
         user_details_by_sec: dict[str, dict[str, str]] = {}
         if pending:
-            user_details_by_sec = await self._resolve_peer_profiles_by_sec_uids(account, pending)
+            sender_sec_uids = sorted({
+                m.sender_sec_uid
+                for m, _, _, direction in pending
+                if direction == 'in' and m.sender_sec_uid
+            })
+            user_details_by_sec = self.get_cached_peer_profiles(
+                account_id, sender_sec_uids
+            )
 
         # touched_conv_ids 收集本轮 upsert 成功的 conversation_id
         # 用一次性 silent mark_read 把它们的 unread 清零，避免对同一 conv 重复 update
@@ -2680,6 +3005,9 @@ class HttpProtocolTransport(AccountTransport):
                     raw={
                         "source": "http_protocol.scan_inbox",
                         "conversation_id": m.conversation_id,
+                        "conversation_short_id": int(
+                            getattr(m, "conversation_short_id", 0) or 0
+                        ),
                         "msg_type": m.msg_type,
                         "server_message_id": m.server_message_id,
                         "client_message_id": m.client_message_id,
@@ -2689,6 +3017,9 @@ class HttpProtocolTransport(AccountTransport):
                     },
                     external_msg_id=external_msg_id,
                     platform_conversation_id=m.conversation_id,
+                    platform_conversation_short_id=int(
+                        getattr(m, "conversation_short_id", 0) or 0
+                    ),
                     direction=direction,
                     mark_processed=bool(
                         is_baseline and include_recent_without_unread and direction == 'in'
@@ -2722,6 +3053,10 @@ class HttpProtocolTransport(AccountTransport):
                         raw={
                             "source": "http_protocol",
                             "server_message_id": m.server_message_id,
+                            "conversation_id": m.conversation_id,
+                            "conversation_short_id": int(
+                                getattr(m, "conversation_short_id", 0) or 0
+                            ),
                         },
                     )
                 )

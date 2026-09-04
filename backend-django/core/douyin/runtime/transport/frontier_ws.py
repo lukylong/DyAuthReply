@@ -49,6 +49,16 @@ def _cookie_header(cookies: dict[str, str]) -> str:
     return "; ".join(f"{k}={v}" for k, v in cookies.items() if k)
 
 
+def _stable_jitter_factor(account_id: str, ratio: float) -> float:
+    """为账号生成稳定抖动系数，避免多账号周期性 HTTP 对账同时触发。"""
+    bounded = min(max(float(ratio), 0.0), 0.9)
+    if bounded <= 0:
+        return 1.0
+    digest = hashlib.sha256(str(account_id).encode("utf-8")).digest()
+    unit = int.from_bytes(digest[:8], "big") / ((1 << 64) - 1)
+    return 1.0 + ((unit * 2.0) - 1.0) * bounded
+
+
 class FrontierImWsClient:
     """主动连 frontier-im WS 的异步客户端；收到消息反序列化为 IMMessage 并通过 on_inbound(msg) 派发。"""
 
@@ -71,13 +81,21 @@ class FrontierImWsClient:
         self._ws = None
         self._frames_total = 0
         self._reconnect_count = 0
+        self._last_frame_at = 0.0
+        self._device_id = ""
 
     @property
     def connected(self) -> bool:
         return self._connected
 
+    @property
+    def last_frame_at(self) -> float:
+        return self._last_frame_at
+
     async def _get_device_id(self) -> str:
         """用 cookie + a_bogus 调 query/user 拿 device_id（对照 DouYin_Spider get_device_id）。"""
+        if self._device_id:
+            return self._device_id
         import httpx
 
         from core.douyin.runtime.transport.sign import js_signer
@@ -110,7 +128,8 @@ class FrontierImWsClient:
         async with httpx.AsyncClient(timeout=15.0, proxy=self._proxy, verify=True) as c:
             r = await c.get(url, headers=headers)
             data = r.json()
-            return str(data.get("id") or "")
+            self._device_id = str(data.get("id") or "")
+            return self._device_id
 
     async def _build_url(self) -> tuple[str, str]:
         device_id = await self._get_device_id()
@@ -219,6 +238,7 @@ class FrontierImWsClient:
             return
 
         self._frames_total += 1
+        self._last_frame_at = time.monotonic()
         logger.debug(f"[frontier.ws] 收到原始二进制帧 account={self._account_id} len={len(message)}")
 
         # 深度解包二进制帧
@@ -262,16 +282,70 @@ class FrontierWsDecorator(AccountTransport):
     name = "ws_inbound"
 
     def __init__(self, inner: AccountTransport) -> None:
+        from django.conf import settings
+
         self._inner = inner
         self._signal: asyncio.Event = asyncio.Event()
         self._queue: "asyncio.Queue[InboundEvent]" = asyncio.Queue(maxsize=64)
         self._scanned_messages_queue: "asyncio.Queue[ScannedMessage]" = asyncio.Queue(maxsize=64)
+        inbound_queue_size = max(
+            32,
+            int(getattr(settings, "DOUYIN_WS_INBOUND_QUEUE_SIZE", 256) or 256),
+        )
+        self._raw_inbound_queue: "asyncio.Queue[Any]" = asyncio.Queue(
+            maxsize=inbound_queue_size
+        )
         self._account_id: Optional[str] = None
         self._account_sec_uid: Optional[str] = None
         self._self_uid: int = 0
         self._client: Optional[FrontierImWsClient] = None
         self._task: Optional[asyncio.Task] = None
+        self._processor_task: Optional[asyncio.Task] = None
+        self._inbound_overflow_count = 0
         self._last_http_fallback_at: float = 0.0
+
+    def _http_fallback_interval(self, *, ws_ok: bool, now: float) -> tuple[float, str]:
+        """按 WS 健康度返回当前账号的 HTTP 对账间隔与原因。"""
+        from django.conf import settings
+
+        if not ws_ok:
+            base = float(
+                getattr(settings, "DOUYIN_WS_HTTP_FALLBACK_OFFLINE_INTERVAL", 20)
+                or 20
+            )
+            reason = "ws_offline"
+        else:
+            last_frame_at = float(getattr(self._client, "last_frame_at", 0.0) or 0.0)
+            stale_after = float(
+                getattr(settings, "DOUYIN_WS_STALE_AFTER_S", 600) or 600
+            )
+            is_stale = bool(last_frame_at > 0 and now - last_frame_at >= stale_after)
+            if is_stale:
+                base = float(
+                    getattr(settings, "DOUYIN_WS_HTTP_FALLBACK_STALE_INTERVAL", 120)
+                    or 120
+                )
+                reason = "ws_stale"
+            else:
+                # 兼容旧环境变量：若部署显式设置过旧值，仍可覆盖新默认值。
+                legacy = float(
+                    getattr(settings, "DOUYIN_WS_HTTP_FALLBACK_INTERVAL", 300)
+                    or 300
+                )
+                base = float(
+                    getattr(
+                        settings,
+                        "DOUYIN_WS_HTTP_FALLBACK_HEALTHY_INTERVAL",
+                        legacy,
+                    )
+                    or legacy
+                )
+                reason = "ws_healthy_reconcile"
+        jitter_ratio = float(
+            getattr(settings, "DOUYIN_WS_HTTP_FALLBACK_JITTER_RATIO", 0.2) or 0
+        )
+        factor = _stable_jitter_factor(self._account_id or "", jitter_ratio)
+        return max(5.0, base * factor), reason
 
     async def start(self, account: "DouyinAccount") -> None:
         self._account_id = str(account.id)
@@ -308,6 +382,9 @@ class FrontierWsDecorator(AccountTransport):
             on_inbound=self._on_inbound,
             proxy=(getattr(account, "proxy_url", "") or "").strip() or None,
         )
+        self._processor_task = asyncio.create_task(
+            self._consume_inbound(), name=f"frontier-process-{self._account_id[:8]}"
+        )
         self._task = asyncio.create_task(
             self._client.run(), name=f"frontier-ws-{self._account_id[:8]}"
         )
@@ -320,6 +397,11 @@ class FrontierWsDecorator(AccountTransport):
             self._task.cancel()
             with suppress(Exception, asyncio.CancelledError):
                 await self._task
+        if self._processor_task is not None:
+            self._processor_task.cancel()
+            with suppress(Exception, asyncio.CancelledError):
+                await self._processor_task
+            self._processor_task = None
         self._signal.set()
         with suppress(Exception):
             await self._inner.stop(account)
@@ -333,11 +415,13 @@ class FrontierWsDecorator(AccountTransport):
         if include_recent_without_unread:
             # 首轮历史补扫（Baseline），走 HTTP 路径
             logger.info(f"[frontier.ws] 执行首次历史补扫（Baseline）account={self._account_id}")
-            return await self._inner.scan_inbox(
+            result = await self._inner.scan_inbox(
                 account, max_conversations=max_conversations,
                 include_recent_without_unread=include_recent_without_unread,
                 conversation_hint=conversation_hint,
             )
+            self._last_http_fallback_at = time.monotonic()
+            return result
 
         # 优先消费 WS 实时队列
         msgs: list[ScannedMessage] = []
@@ -348,17 +432,15 @@ class FrontierWsDecorator(AccountTransport):
             logger.info(f"[frontier.ws] 增量扫描消费 WS 实时消息 count={len(msgs)}")
             return msgs
 
-        # WS 离线或定期兜底：走 HTTP 增量，避免纯 WS 解码失败时完全收不到消息
-        from django.conf import settings
-
+        # WS 离线或定期对账：健康连接低频校准，断线连接较快回退 HTTP。
         ws_ok = self._client is not None and self._client.connected
-        fallback_iv = float(getattr(settings, 'DOUYIN_WS_HTTP_FALLBACK_INTERVAL', 25) or 25)
         now = time.monotonic()
-        if not ws_ok or (now - self._last_http_fallback_at >= fallback_iv):
+        fallback_iv, reason = self._http_fallback_interval(ws_ok=ws_ok, now=now)
+        if now - self._last_http_fallback_at >= fallback_iv:
             self._last_http_fallback_at = now
-            reason = 'ws_offline' if not ws_ok else 'periodic_fallback'
             logger.debug(
-                f"[frontier.ws] HTTP 兜底扫描 account={self._account_id} reason={reason}"
+                f"[frontier.ws] HTTP 对账扫描 account={self._account_id} "
+                f"reason={reason} interval={fallback_iv:.1f}s"
             )
             return await self._inner.scan_inbox(
                 account,
@@ -402,8 +484,34 @@ class FrontierWsDecorator(AccountTransport):
         return evt
 
     def _on_inbound(self, m: Any) -> None:
-        """WS 线程接收消息的回调入口。"""
-        asyncio.create_task(self._process_message(m))
+        """WS 回调只入有界队列，固定 consumer 顺序处理，避免突发时无限建任务。"""
+        try:
+            self._raw_inbound_queue.put_nowait(m)
+        except asyncio.QueueFull:
+            self._inbound_overflow_count += 1
+            # 让 worker 立即醒来执行一次 HTTP 对账，补回队列拥塞期间的消息。
+            self._last_http_fallback_at = 0.0
+            self._signal.set()
+            if self._inbound_overflow_count == 1 or self._inbound_overflow_count % 100 == 0:
+                logger.warning(
+                    f"[frontier.ws] 入站处理队列已满 account={self._account_id} "
+                    f"overflow={self._inbound_overflow_count}，已触发 HTTP 对账"
+                )
+
+    async def _consume_inbound(self) -> None:
+        while True:
+            message = await self._raw_inbound_queue.get()
+            try:
+                await self._process_message(message)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    f"[frontier.ws] 入站消息处理异常 account={self._account_id} "
+                    f"err={type(exc).__name__}: {exc}"
+                )
+            finally:
+                self._raw_inbound_queue.task_done()
 
     def _infer_message_direction(self, m: Any) -> str:
         """判定 WS 帧方向：优先 sec_uid，再用 conversation_id 中的 numeric uid。"""
@@ -498,25 +606,12 @@ class FrontierWsDecorator(AccountTransport):
             else datetime.now(tz=timezone.utc)
         )
 
-        # 3. 解析或缓存用户信息
+        # 3. 只读本地用户信息。远程 profile/other 已移到 worker 的低优先级
+        # 后台补全任务，昵称/头像接口延迟不会阻塞消息落库和自动回复。
         peer_nickname = None
         peer_avatar = None
         if direction == "in":
             peer_nickname, peer_avatar = await self._get_existing_peer_info(m.sender_sec_uid)
-            if not peer_nickname:
-                try:
-                    account_orm = await self._get_account_orm()
-                    if account_orm:
-                        details = await self._inner._resolve_user_details_by_sec_uids(
-                            account_orm, [m.sender_sec_uid]
-                        )
-                        if m.sender_sec_uid in details:
-                            peer_nickname = details[m.sender_sec_uid].get("nickname")
-                            peer_avatar = details[m.sender_sec_uid].get("avatar")
-                except Exception as ex:
-                    logger.warning(
-                        f"[frontier.ws] 无法在线解析用户详情 sec_uid={m.sender_sec_uid}: {ex}"
-                    )
 
         # 4. 落库
         try:
@@ -530,6 +625,9 @@ class FrontierWsDecorator(AccountTransport):
                 raw={
                     "source": "frontier_ws.message",
                     "conversation_id": m.conversation_id,
+                    "conversation_short_id": int(
+                        getattr(m, "conversation_short_id", 0) or 0
+                    ),
                     "msg_type": m.msg_type,
                     "server_message_id": m.server_message_id,
                     "client_message_id": m.client_message_id,
@@ -538,6 +636,9 @@ class FrontierWsDecorator(AccountTransport):
                 },
                 external_msg_id=f"srv_{m.server_message_id}",
                 platform_conversation_id=m.conversation_id,
+                platform_conversation_short_id=int(
+                    getattr(m, "conversation_short_id", 0) or 0
+                ),
                 direction=direction,
                 content_type=getattr(m, "content_type", "text"),
                 media=getattr(m, "media", None),
@@ -556,7 +657,12 @@ class FrontierWsDecorator(AccountTransport):
                 peer_nickname=peer_nickname,
                 text=m.text,
                 received_at=received_at.isoformat(),
-                raw={"conversation_id": m.conversation_id},
+                raw={
+                    "conversation_id": m.conversation_id,
+                    "conversation_short_id": int(
+                        getattr(m, "conversation_short_id", 0) or 0
+                    ),
+                },
             )
             try:
                 self._scanned_messages_queue.put_nowait(scanned)

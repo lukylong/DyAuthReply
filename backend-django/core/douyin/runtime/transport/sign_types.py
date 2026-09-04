@@ -37,6 +37,25 @@ class LoginExpiredError(RuntimeError):
         self.proto_status_code = proto_status_code
 
 
+class SendRiskControlError(RuntimeError):
+    """抖音账号仍可登录/收信，但发送能力被平台风控拦截。
+
+    这类响应不能归类为 ``LoginExpiredError``，否则会把仍在线的账号错误打回登录；
+    也不能退化成普通 ``RuntimeError``，否则 worker 无法把账号持久化为“仅接收/发送封控”。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        biz_status_code: int,
+        raw_check_code: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.biz_status_code = int(biz_status_code)
+        self.raw_check_code = int(raw_check_code)
+
+
 @dataclass
 class SignedResponse:
     """signed_fetch 的标准化返回。

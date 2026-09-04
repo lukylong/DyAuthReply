@@ -67,10 +67,57 @@ DOUYIN_WORKER_SHARD_INDEX = int(_env('DOUYIN_WORKER_SHARD_INDEX', '0'))
 DOUYIN_WORKER_LEASE_ENABLED = _env('DOUYIN_WORKER_LEASE_ENABLED', 'false').lower() == 'true'
 DOUYIN_TRANSPORT_WS_INBOUND = _env('DOUYIN_TRANSPORT_WS_INBOUND', 'true').lower() == 'true'
 
-# Worker 空闲轮询（WS 不可用时 HTTP 兜底；客户端默认更快）
+# 客户端 Worker 已持续通过 Frontier 长连接 + HTTP 兜底扫描验证登录态；再对全部账号
+# 周期性发 get_by_user 探活属于重复流量，而且批量启动签名器会在多账号场景形成尖峰。
+# 接收扫描中的明确失效信号仍会立即把账号标为登录失效；公网调度器不受此配置影响。
+DOUYIN_PROBE_ENABLED = _env('DOUYIN_PROBE_ENABLED', 'false').lower() == 'true'
+
+# Worker 空闲轮询：协程主要由 WS 信号唤醒；HTTP 只承担低频一致性对账和断线兜底。
 DOUYIN_WORKER_IDLE_POLL_MIN = int(_env('DOUYIN_WORKER_IDLE_POLL_MIN', '8'))
 DOUYIN_WORKER_IDLE_POLL_MAX = int(_env('DOUYIN_WORKER_IDLE_POLL_MAX', '15'))
-DOUYIN_WS_HTTP_FALLBACK_INTERVAL = float(_env('DOUYIN_WS_HTTP_FALLBACK_INTERVAL', '25'))
+DOUYIN_WS_HTTP_FALLBACK_INTERVAL = float(_env('DOUYIN_WS_HTTP_FALLBACK_INTERVAL', '300'))
+DOUYIN_WS_HTTP_FALLBACK_HEALTHY_INTERVAL = float(
+    _env('DOUYIN_WS_HTTP_FALLBACK_HEALTHY_INTERVAL', str(DOUYIN_WS_HTTP_FALLBACK_INTERVAL))
+)
+DOUYIN_WS_HTTP_FALLBACK_STALE_INTERVAL = float(
+    _env('DOUYIN_WS_HTTP_FALLBACK_STALE_INTERVAL', '120')
+)
+DOUYIN_WS_HTTP_FALLBACK_OFFLINE_INTERVAL = float(
+    _env('DOUYIN_WS_HTTP_FALLBACK_OFFLINE_INTERVAL', '20')
+)
+DOUYIN_WS_HTTP_FALLBACK_JITTER_RATIO = float(
+    _env('DOUYIN_WS_HTTP_FALLBACK_JITTER_RATIO', '0.2')
+)
+DOUYIN_WS_STALE_AFTER_S = float(_env('DOUYIN_WS_STALE_AFTER_S', '600'))
+DOUYIN_WS_INBOUND_QUEUE_SIZE = int(_env('DOUYIN_WS_INBOUND_QUEUE_SIZE', '256'))
+
+# 用户资料只在后台补全。正缓存一天、失败结果缓存一小时；所有账号合计最多
+# 4 个资料请求并发，每账号最多每 5 分钟启动一次缺资料补全。
+DOUYIN_PROFILE_CACHE_TTL_S = float(_env('DOUYIN_PROFILE_CACHE_TTL_S', '86400'))
+DOUYIN_PROFILE_NEGATIVE_CACHE_TTL_S = float(
+    _env('DOUYIN_PROFILE_NEGATIVE_CACHE_TTL_S', '3600')
+)
+DOUYIN_PROFILE_CACHE_MAX_ENTRIES = int(
+    _env('DOUYIN_PROFILE_CACHE_MAX_ENTRIES', '4096')
+)
+DOUYIN_PROFILE_FETCH_CONCURRENCY = int(
+    _env('DOUYIN_PROFILE_FETCH_CONCURRENCY', '4')
+)
+DOUYIN_PROFILE_FETCH_JITTER_S = float(_env('DOUYIN_PROFILE_FETCH_JITTER_S', '0.2'))
+DOUYIN_PROFILE_BACKFILL_INTERVAL_S = float(
+    _env('DOUYIN_PROFILE_BACKFILL_INTERVAL_S', '300')
+)
+DOUYIN_SEND_CONTEXT_TTL_S = float(_env('DOUYIN_SEND_CONTEXT_TTL_S', '900'))
+DOUYIN_PENDING_RECOVERY_INTERVAL_S = float(
+    _env('DOUYIN_PENDING_RECOVERY_INTERVAL_S', '60')
+)
+DOUYIN_PENDING_RECOVERY_JITTER_RATIO = float(
+    _env('DOUYIN_PENDING_RECOVERY_JITTER_RATIO', '0.2')
+)
+
+# 每账号仍保持独立 Cookie/代理/UA 客户端，但桌面端默认只保留少量连接；协议请求
+# 已受全局 IO 闸和资料专用并发闸约束，避免账号数乘以 8 放大连接容量。
+DOUYIN_HTTP_MAX_CONNECTIONS = int(_env('DOUYIN_HTTP_MAX_CONNECTIONS', '3'))
 
 # ---------------- 多账号 / 低端机性能调优（默认面向 4核8G + 20+ 账号）----------------
 # 签名为 CPU 密集，可用并行度受核数约束；签名调用已改为 thread_sensitive=False，

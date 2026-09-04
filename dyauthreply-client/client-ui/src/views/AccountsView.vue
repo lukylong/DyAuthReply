@@ -5,7 +5,6 @@ import { Ellipsis, Plus, Search, Smartphone, TriangleAlert } from 'lucide-vue-ne
 import AppModal from '../components/AppModal.vue';
 import AccountProfileDrawer from '../components/AccountProfileDrawer.vue';
 import {
-  credentialLabel,
   deleteAccount,
   importCredential,
   listAccounts,
@@ -15,6 +14,7 @@ import {
   type DouyinAccount,
 } from '../api/client';
 import { useClientLicense } from '../composables/useClientLicense';
+import { useClientRealtime } from '../composables/useClientRealtime';
 
 const loading = ref(true);
 const error = ref('');
@@ -28,6 +28,8 @@ const importSuccess = ref('');
 const reimportTarget = ref<DouyinAccount | null>(null);
 const savingId = ref('');
 const searchQuery = ref('');
+const { start: startRealtime, subscribe: subscribeRealtime } = useClientRealtime();
+let unsubscribeRealtime: (() => void) | null = null;
 
 const filteredAccounts = computed(() => {
   const q = searchQuery.value.trim().toLowerCase();
@@ -99,6 +101,37 @@ async function load() {
   }
 }
 
+async function refreshAccounts() {
+  try {
+    accounts.value = await listAccounts();
+  } catch {
+    // 后台刷新失败时保留现有列表；显式加载仍会展示错误。
+  }
+}
+
+function accountStatusLabel(acc: DouyinAccount) {
+  if (acc.credential_state === 'receive_only') {
+    return isSendRestricted(acc) ? '发送封控（仅接收）' : '仅接收（发送凭证不完整）';
+  }
+  if (acc.credential_state === 'invalid' || acc.status === 2) return '登录失效';
+  return statusLabel(acc.status);
+}
+
+function isSendRestricted(acc: DouyinAccount) {
+  const detail = acc.last_probe_error || '';
+  return acc.credential_state === 'receive_only'
+    && ['发送封控', '发送风控', 'business=', 'raw_check='].some((marker) => detail.includes(marker));
+}
+
+function accountCredentialLabel(acc: DouyinAccount) {
+  if (acc.credential_state === 'sendable') return '可发送';
+  if (acc.credential_state === 'invalid') return '登录失效';
+  if (acc.credential_state === 'receive_only') {
+    return isSendRestricted(acc) ? '发送封控（仅接收）' : '仅接收';
+  }
+  return '待检测';
+}
+
 function openImport(account?: DouyinAccount) {
   reimportTarget.value = account ?? null;
   bundle.value = '';
@@ -154,11 +187,19 @@ onBeforeRouteLeave(() => {
 onMounted(() => {
   document.addEventListener('click', onDocumentClick);
   document.addEventListener('keydown', onEscapeKey);
+  unsubscribeRealtime = subscribeRealtime({
+    onAccountStateChanged: () => void refreshAccounts(),
+    // API/Worker 重启后长连接会自动恢复；重连成功时重新取一次快照，避免页面保留旧状态。
+    onOpen: () => void refreshAccounts(),
+  });
+  startRealtime();
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', onDocumentClick);
   document.removeEventListener('keydown', onEscapeKey);
+  unsubscribeRealtime?.();
+  unsubscribeRealtime = null;
 });
 
 async function submitImport() {
@@ -284,7 +325,15 @@ onMounted(load);
             <img v-if="acc.avatar" :src="acc.avatar" alt="" />
             <span v-else>{{ avatarInitial(acc.nickname) }}</span>
           </div>
-          <span class="status-dot" :class="{ online: acc.status === 1 }" :title="statusLabel(acc.status)"></span>
+          <span
+            class="status-dot"
+            :class="{
+              online: acc.status === 1 && acc.credential_state === 'sendable',
+              risk: acc.credential_state === 'receive_only',
+              invalid: acc.credential_state === 'invalid' || acc.status === 2,
+            }"
+            :title="accountStatusLabel(acc)"
+          ></span>
           <div class="menu-wrap">
             <button
               type="button"
@@ -304,9 +353,24 @@ onMounted(load);
         </div>
 
         <strong class="nickname" :title="acc.nickname">{{ acc.nickname }}</strong>
-        <span class="credential-badge" :class="{ success: acc.credential_state === 'sendable', danger: acc.credential_state === 'invalid' }">
-          {{ credentialLabel(acc.credential_state) }}
+        <span
+          class="credential-badge"
+          :class="{
+            success: acc.credential_state === 'sendable',
+            warning: acc.credential_state === 'receive_only',
+            danger: acc.credential_state === 'invalid',
+          }"
+        >
+          {{ accountCredentialLabel(acc) }}
         </span>
+        <p v-if="acc.credential_state === 'receive_only'" class="account-alert risk-alert">
+          <TriangleAlert :size="14" />
+          <span>{{ acc.last_probe_error || '当前仅可接收消息，请更新发送凭证' }}</span>
+        </p>
+        <p v-else-if="acc.credential_state === 'invalid' || acc.status === 2" class="account-alert invalid-alert">
+          <TriangleAlert :size="14" />
+          <span>{{ acc.last_probe_error || '登录状态已失效，请更新凭证' }}</span>
+        </p>
 
         <div class="card-divider"></div>
 
@@ -589,6 +653,14 @@ onMounted(load);
   background: var(--success);
 }
 
+.status-dot.risk {
+  background: var(--warning);
+}
+
+.status-dot.invalid {
+  background: var(--danger);
+}
+
 .menu-wrap {
   position: relative;
   margin-left: auto;
@@ -674,10 +746,41 @@ onMounted(load);
   border-color: rgba(5, 150, 105, 0.2);
   color: var(--success);
 }
+.credential-badge.warning {
+  background: var(--warning-soft);
+  border-color: rgba(217, 119, 6, 0.2);
+  color: var(--warning);
+}
 .credential-badge.danger {
   background: var(--danger-soft);
   border-color: rgba(220, 38, 38, 0.2);
   color: var(--danger);
+}
+
+.account-alert {
+  margin: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  border-radius: 8px;
+  padding: 7px 8px;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.account-alert svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.risk-alert {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.invalid-alert {
+  color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .card-divider {

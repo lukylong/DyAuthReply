@@ -266,7 +266,10 @@ def _write_reply_log(
 
     if result == 'success':
         DouyinRule.objects.filter(id=rule_id).update(hit_count=F('hit_count') + 1)
-        DouyinAccount.objects.filter(id=account_id).update(reply_today=F('reply_today') + 1)
+        DouyinAccount.objects.filter(id=account_id).update(
+            reply_today=F('reply_today') + 1,
+            sys_update_datetime=timezone.now(),
+        )
         DouyinMessage.objects.filter(id=trigger_message_id).update(processed=True)
     elif result in ('skipped', 'cooldown', 'quota_exceeded', 'silent'):
         DouyinMessage.objects.filter(id=trigger_message_id).update(processed=True)

@@ -14,7 +14,6 @@ import {
 import {
   checkAppUpdate,
   checkUpdateViaTauri,
-  getHealth,
   inTauriRuntime,
   openExternalUrl,
   runUpdateViaTauri,
@@ -22,6 +21,7 @@ import {
   type UpdateProgress,
 } from '../api/client';
 import { useClientLicense } from '../composables/useClientLicense';
+import { useClientRealtime } from '../composables/useClientRealtime';
 import { APP_VERSION, useHiddenAdminEntry } from '../composables/useHiddenAdminEntry';
 import { useVersionUpdate } from '../composables/useVersionUpdate';
 import { useAnnouncementListener } from '../composables/useAnnouncementListener';
@@ -32,9 +32,12 @@ const route = useRoute();
 const router = useRouter();
 const isWide = computed(() => Boolean(route.meta.wide));
 
-const isOnline = ref(false);
 const { licenseStatus, ensureStatus } = useClientLicense();
-let healthTimer: ReturnType<typeof setInterval> | null = null;
+const {
+  connected: isOnline,
+  start: startRealtime,
+  stop: stopRealtime,
+} = useClientRealtime();
 
 // 集成版本更新和公告监听
 const { hasUpdate: hasVersionUpdate } = useVersionUpdate();
@@ -112,15 +115,6 @@ async function startInAppUpdate() {
         // 外链信息也拿不到，仅展示错误提示
       }
     }
-  }
-}
-
-async function checkHealth() {
-  try {
-    const res = await getHealth();
-    isOnline.value = res.ok;
-  } catch (e) {
-    isOnline.value = false;
   }
 }
 
@@ -217,14 +211,13 @@ function dismissUpdate() {
 }
 
 onMounted(() => {
-  checkHealth();
+  startRealtime();
   ensureStatus();
-  healthTimer = setInterval(checkHealth, 5000);
   window.setTimeout(() => runUpdateCheck(false), 3000);
 });
 
 onUnmounted(() => {
-  if (healthTimer) clearInterval(healthTimer);
+  stopRealtime();
 });
 
 const { onHiddenAdminClick } = useHiddenAdminEntry(() => {

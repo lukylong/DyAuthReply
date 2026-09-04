@@ -335,11 +335,27 @@ def _update_probe_ok(account_id: str, has_send: bool) -> None:
     from django.utils import timezone
     from core.douyin.douyin_account_model import DouyinAccount
 
+    now = timezone.now()
     state = CRED_SENDABLE if has_send else CRED_RECEIVE_ONLY
+    account = DouyinAccount.objects.filter(id=account_id).first()
+    if account is None:
+        return
+
+    # 只读探活只能证明 Cookie/接收链路仍有效，不能证明平台允许发送。
+    # 发送风控必须由一次真实发送成功（mark_account_sendable）解除；否则定时探活
+    # 会把 receive_only 错误覆盖为 sendable，账号页随即显示成“可发送”。
+    if _has_confirmed_send_restriction(account.credential_state, account.last_probe_error):
+        DouyinAccount.objects.filter(id=account_id).update(
+            last_probe_at=now,
+            sys_update_datetime=now,
+        )
+        return
+
     DouyinAccount.objects.filter(id=account_id).update(
         credential_state=state,
-        last_probe_at=timezone.now(),
+        last_probe_at=now,
         last_probe_error=None,
+        sys_update_datetime=now,
     )
 
 
@@ -347,20 +363,37 @@ def _update_probe_inconclusive(account_id: str, detail: str) -> None:
     from django.utils import timezone
     from core.douyin.douyin_account_model import DouyinAccount
 
-    DouyinAccount.objects.filter(id=account_id).update(
-        last_probe_at=timezone.now(),
-        last_probe_error=(detail or "")[:255] or None,
-    )
+    now = timezone.now()
+    account = DouyinAccount.objects.filter(id=account_id).first()
+    if account is None:
+        return
+    updates = {
+        "last_probe_at": now,
+        "sys_update_datetime": now,
+    }
+    # 未确认的网络/签名异常不能覆盖已经确认的发送封控原因。
+    if not _has_confirmed_send_restriction(account.credential_state, account.last_probe_error):
+        updates["last_probe_error"] = (detail or "")[:255] or None
+    DouyinAccount.objects.filter(id=account_id).update(**updates)
+
+
+def _has_confirmed_send_restriction(state: str, detail: str | None) -> bool:
+    """区分平台发送封控与普通的探活/凭证错误。"""
+    if state != CRED_RECEIVE_ONLY or not detail:
+        return False
+    return any(marker in detail for marker in ("发送封控", "发送风控", "business=", "raw_check="))
 
 
 def _update_probe_invalid(account_id: str, reason: str) -> None:
     from django.utils import timezone
     from core.douyin.douyin_account_model import DouyinAccount
 
+    now = timezone.now()
     DouyinAccount.objects.filter(id=account_id).update(
         credential_state=CRED_INVALID,
-        last_probe_at=timezone.now(),
+        last_probe_at=now,
         last_probe_error=(reason or "")[:255] or None,
+        sys_update_datetime=now,
     )
 
 

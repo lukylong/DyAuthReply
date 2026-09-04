@@ -19,8 +19,8 @@
     cookie               —— 监控/接收 + 发送都需要（必填）
     bd_ticket(priK/...)  —— 仅「发送/建会话」需要；监控只读接口可不带
 
-signed_fetch 收到的 url 是**裸 endpoint**（无 query）。creator IM 的 imapi
-请求保持裸 URL；其它 Web 接口继续补齐：
+signed_fetch 收到的 url 是**裸 endpoint**（无 query）。参考项目的
+`/v1/message/send` 补齐签名查询串；其它 creator IM 读取接口保持裸 URL：
     最终 query = 签名前参数 + msToken + a_bogus + 签名后参数
     imapi 写接口额外注入 bd-ticket-guard 头（有 bd_ticket 凭证时）
 """
@@ -200,14 +200,20 @@ class JsSignProvider:
         parsed = urlparse(url)
         host = parsed.netloc.lower()
         path = parsed.path
-        request_cookies = self._cookies_for_host(host)
 
-        # creator.douyin.com 的 2026 PC IM 请求对 imapi 使用裸 URL，不携带
-        # msToken/a_bogus/verifyFp。主站与 creator JSON 接口仍走查询签名。
-        is_creator_im = host == "imapi.douyin.com"
+        # DouYin_Spider master 的 send 路径携带
+        # msToken -> a_bogus -> verifyFp -> fp；其它 imapi 读取路径保持裸 URL。
+        is_reference_send = (
+            host == "imapi.douyin.com" and path == "/v1/message/send"
+        )
+        # 参考项目用 auth.cookie（主站会话）向 imapi 发信，不使用 creator
+        # 页面按域抓到的 imapi Cookie 子集。
+        cookie_host = "www.douyin.com" if is_reference_send else host
+        request_cookies = self._cookies_for_host(cookie_host)
+        skip_query_sign = host == "imapi.douyin.com" and not is_reference_send
         final_url = url
         params_with_token = ""
-        if not is_creator_im:
+        if not skip_query_sign:
             base = base_params if base_params is not None else _common_params_for(host, self._user_agent)
             token = resolve_mstoken(request_cookies)
             params_with_token = f"{base}&msToken={token}" if base else f"msToken={token}"
@@ -233,15 +239,15 @@ class JsSignProvider:
             # 放到独立线程池并行执行，避免占用 Django 共享线程（默认 thread_sensitive=True
             # 会让所有签名与 DB 操作在同一线程串行，多账号下成为延迟主因）。
             a_bogus = ""
-            if not is_creator_im:
+            if not skip_query_sign:
                 a_bogus = await sync_to_async(js_signer.get_ab, thread_sensitive=False)(
                     params_with_token, body_str
                 )
         except js_signer.JsSignerUnavailable as e:
             raise SignerUnavailable(f"JS a_bogus 失败: {e}") from e
-        if not is_creator_im:
+        if not skip_query_sign:
             final_url = f"{url}?{params_with_token}&a_bogus={a_bogus}"
-        if post_sign_params and not is_creator_im:
+        if post_sign_params and not skip_query_sign:
             post = "&".join(
                 f"{k}={quote(str(v), safe='')}" for k, v in post_sign_params.items()
             )
@@ -250,7 +256,7 @@ class JsSignProvider:
         # 组装请求头：默认 + UA + Cookie + （imapi 写接口）bd-ticket-guard
         req_headers: dict[str, str] = {
             "user-agent": self._user_agent,
-            "cookie": self._cookie_header_for_host(host),
+            "cookie": self._cookie_header_for_host(cookie_host),
         }
         for k, v in (headers or {}).items():
             req_headers[k.lower()] = v
@@ -313,13 +319,11 @@ class JsSignProvider:
     async def _maybe_inject_session_dtrait(
         self, req_headers: dict[str, str], *, host: str, path: str
     ) -> None:
-        """Attach a fresh creator passport dtrait header when captured material exists."""
+        """Attach a fresh passport dtrait header when captured material exists."""
 
         if req_headers.get("x-tt-session-dtrait"):
             return
-        is_identity = (
-            host == "creator.douyin.com" and path == _IDENTITY_SECURITY_PATH
-        )
+        is_identity = host in {"www.douyin.com", "creator.douyin.com"} and path == _IDENTITY_SECURITY_PATH
         if not is_identity:
             return
         blob = str(self._dtrait.get("blob") or "").strip()

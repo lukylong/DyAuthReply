@@ -147,6 +147,7 @@ export interface DouyinAccount {
   nickname: string;
   status: number;
   credential_state?: string;
+  last_probe_error?: string | null;
   auto_reply_enabled?: boolean;
   reply_today?: number;
   daily_reply_quota?: number;
@@ -221,6 +222,19 @@ export interface AppUpdateInfo {
 
 export function checkAppUpdate(current = '') {
   return request<AppUpdateInfo>(withQuery('/app-update/check', { current }));
+}
+
+export interface ClientAnnouncement {
+  id: string;
+  title: string;
+  content: string;
+  level: 'info' | 'warning' | 'urgent';
+  publish_time: string | null;
+  expire_time: string | null;
+}
+
+export function listClientAnnouncements(limit = 10) {
+  return request<ClientAnnouncement[]>(withQuery('/announcements', { limit }));
 }
 
 // ==================== 应用内自动更新（tauri-plugin-updater + 多镜像竞速）====================
@@ -922,7 +936,7 @@ export function statusLabel(status: number): string {
   const map: Record<number, string> = {
     0: '未登录',
     1: '在线',
-    2: '暂停',
+    2: '登录失效',
     3: '已禁用',
   };
   return map[status] ?? `状态${status}`;
@@ -931,7 +945,7 @@ export function statusLabel(status: number): string {
 export function credentialLabel(state?: string): string {
   const map: Record<string, string> = {
     sendable: '可发送',
-    receive_only: '仅接收',
+    receive_only: '发送封控（仅接收）',
     invalid: '已失效',
     unknown: '未知',
   };
@@ -964,8 +978,13 @@ export interface RealtimeNewMessage {
   conversation_ids: string[];
 }
 
+export interface RealtimeAccountStateChanged {
+  revision: string;
+}
+
 export interface RealtimeHandlers {
   onNewMessage?: (data: RealtimeNewMessage) => void;
+  onAccountStateChanged?: (data: RealtimeAccountStateChanged) => void;
   onOpen?: () => void;
   onClose?: () => void;
 }
@@ -1015,6 +1034,8 @@ export class DouyinRealtime {
         const msg = JSON.parse(ev.data as string) as { type?: string; data?: any };
         if (msg.type === 'new_message' && msg.data) {
           this.handlers.onNewMessage?.(msg.data as RealtimeNewMessage);
+        } else if (msg.type === 'account_state_changed' && msg.data) {
+          this.handlers.onAccountStateChanged?.(msg.data as RealtimeAccountStateChanged);
         }
       } catch {
         // ignore malformed frame

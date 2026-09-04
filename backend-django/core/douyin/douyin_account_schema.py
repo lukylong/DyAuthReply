@@ -127,6 +127,7 @@ class DouyinAccountSimpleOut(Schema):
     reply_today: int = 0
     daily_reply_quota: int = 200
     credential_state: Optional[str] = None
+    last_probe_error: Optional[str] = None
     sec_uid: Optional[str] = None
 
     @staticmethod

@@ -584,7 +584,7 @@ fn validate_credentials(
         MAX_QUERY_VALUE_BYTES,
     )?;
     validate_bounded_text("fp", input.fingerprint.fp, MAX_QUERY_VALUE_BYTES)?;
-    validate_required_bounded(
+    validate_required_private_key(
         "private_key",
         input.ticket_guard.private_key,
         MAX_TICKET_FIELD_BYTES,
@@ -940,6 +940,38 @@ fn validate_required_bounded(
     validate_bounded_text(field, value, maximum)
 }
 
+fn validate_required_private_key(
+    field: &'static str,
+    value: &str,
+    maximum: usize,
+    missing: Option<RequestPlanError>,
+) -> Result<(), RequestPlanError> {
+    if value.is_empty() {
+        return Err(missing.unwrap_or(RequestPlanError::FieldTooLarge {
+            field,
+            actual: 0,
+            maximum,
+        }));
+    }
+    // Live ticket-guard keys are PEM-like signer inputs and therefore contain
+    // LF, or CRLF on Windows. They never enter an HTTP header or URL. Preserve
+    // those bytes exactly while keeping every other control character banned.
+    if value
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\r' | '\n'))
+    {
+        return Err(RequestPlanError::InvalidControlCharacter { field });
+    }
+    if value.len() > maximum {
+        return Err(RequestPlanError::FieldTooLarge {
+            field,
+            actual: value.len(),
+            maximum,
+        });
+    }
+    Ok(())
+}
+
 fn validate_bounded_text(
     field: &'static str,
     value: &str,
@@ -1288,6 +1320,24 @@ mod tests {
         let mut control = caller_headers();
         control[0].value = "application/x-protobuf\r\nX: injected".to_owned();
         let error = prepare_send_request(&input(&control)).expect_err("header injection must fail");
+        assert_eq!(error.code(), "invalid_control_character");
+    }
+
+    #[test]
+    fn private_key_accepts_pem_line_endings_but_rejects_other_controls() {
+        let headers = caller_headers();
+        let mut pem = input(&headers);
+        pem.ticket_guard.private_key =
+            "-----BEGIN PRIVATE KEY-----\r\nsynthetic-private-key\n-----END PRIVATE KEY-----";
+        let prepared = prepare_send_request(&pem).expect("PEM line endings must be accepted");
+        assert_eq!(
+            prepared.signer_requests().ticket_guard.private_key,
+            pem.ticket_guard.private_key
+        );
+
+        let mut invalid = input(&headers);
+        invalid.ticket_guard.private_key = "synthetic-private-key\0suffix";
+        let error = prepare_send_request(&invalid).expect_err("NUL must remain forbidden");
         assert_eq!(error.code(), "invalid_control_character");
     }
 

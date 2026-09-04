@@ -1499,7 +1499,7 @@ class DouyinWorker:
                     'reason': '凭证已失效，请重新导入登录态',
                     'source': 'manual_send',
                 })
-            _log_event(account_id, 'manual_reply_failed', 'error', '手动发送失败', err, self.worker_id)
+            await _log_event(account_id, 'manual_reply_failed', 'error', '手动发送失败', err, self.worker_id)
             return {'status': 'failed', 'error': err}
         except SendRiskControlError as e:
             err = (
@@ -1518,7 +1518,7 @@ class DouyinWorker:
                     'reason': err,
                     'source': 'manual_send',
                 })
-            _log_event(account_id, 'manual_reply_failed', 'error', '手动发送被封控', err, self.worker_id)
+            await _log_event(account_id, 'manual_reply_failed', 'error', '手动发送被封控', err, self.worker_id)
             return {'status': 'failed', 'error': err}
         except Exception as e:  # noqa: BLE001
             err = str(e)
@@ -1528,7 +1528,7 @@ class DouyinWorker:
                 'peer_nickname': conv.peer_nickname,
                 'error': err,
             })
-            _log_event(account_id, 'manual_reply_failed', 'error', '手动发送失败', err, self.worker_id)
+            await _log_event(account_id, 'manual_reply_failed', 'error', '手动发送失败', err, self.worker_id)
             return {'status': 'failed', 'error': err}
 
     async def _run_manual_auto_reply_test(self, account_id: str, *, conversation_id: str, text: str) -> None:

@@ -225,6 +225,23 @@ class DouyinHttpRequestPlanCorpusTests(unittest.TestCase):
                         )
                 self.assertEqual(caught.exception.code, case["expected_error"])
 
+    def test_private_key_accepts_pem_line_endings_but_rejects_other_controls(self):
+        case_input = copy.deepcopy(self.corpus["happy_cases"][0]["input"])
+        pem_key = (
+            "-----BEGIN PRIVATE KEY-----\r\n"
+            "synthetic-private-key\n"
+            "-----END PRIVATE KEY-----"
+        )
+        case_input["ticket_guard"]["private_key"] = pem_key
+
+        prepared = _prepare(case_input, self.wire_cases)
+        self.assertEqual(prepared.private_key, pem_key)
+
+        case_input["ticket_guard"]["private_key"] = f"{pem_key}\x00"
+        with self.assertRaises(RequestPlanError) as caught:
+            _prepare(case_input, self.wire_cases)
+        self.assertEqual(caught.exception.code, "invalid_control_character")
+
 
 class DouyinHttpRequestPlanProductionSeamTests(unittest.IsolatedAsyncioTestCase):
     @classmethod

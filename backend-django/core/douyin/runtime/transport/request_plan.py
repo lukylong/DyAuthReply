@@ -214,8 +214,9 @@ def prepare_reference_send_request(
     if not user_agent:
         raise RequestPlanError("field_too_large", "user-agent must not be empty")
     _bounded_text(user_agent, MAX_USER_AGENT_BYTES)
-    for value in (ms_token, verify_fp, fp, private_key, ticket, ts_sign):
+    for value in (ms_token, verify_fp, fp, ticket, ts_sign):
         _bounded_text(value, MAX_FIELD_BYTES)
+    _bounded_private_key(private_key, MAX_FIELD_BYTES)
 
     try:
         timeout_ms = int(timeout_ms)
@@ -437,6 +438,26 @@ def _reject_controls(value: str) -> None:
 def _bounded_text(value: str, limit: int) -> None:
     _reject_controls(value)
     if len(str(value).encode("utf-8")) > limit:
+        raise RequestPlanError("field_too_large", "request-plan field exceeds its byte limit")
+
+
+def _bounded_private_key(value: str, limit: int) -> None:
+    """Validate opaque ticket key text while preserving PEM line endings.
+
+    Ticket-guard private keys captured from the live client are PEM-like and
+    legitimately contain LF (and may contain CRLF on Windows).  They are signer
+    inputs, never an HTTP header or URL component, so line endings are safe and
+    must remain byte-exact for both signing and the plan digest.  Other control
+    characters stay rejected.
+    """
+
+    text = str(value)
+    if any(
+        unicodedata.category(ch) == "Cc" and ch not in ("\r", "\n")
+        for ch in text
+    ):
+        raise RequestPlanError("invalid_control_character", "control character is not allowed")
+    if len(text.encode("utf-8")) > limit:
         raise RequestPlanError("field_too_large", "request-plan field exceeds its byte limit")
 
 

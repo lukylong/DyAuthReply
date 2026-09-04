@@ -1,12 +1,13 @@
 //! Typed loader and fail-closed verifier for the shared protocol corpus.
 
-use std::fmt::Write as _;
+use std::{collections::BTreeMap, fmt::Write as _};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::classify::{classify_delivery, DeliveryClass};
+use super::http_fixtures::{verify_embedded_http_plan_corpus, HttpFixtureError};
 use super::im::{
     decode_send_message_response, encode_send_message_request, ProtocolError, SendMessageResponse,
     SendRequestInput,
@@ -29,6 +30,13 @@ pub struct ParityReport {
     pub request_cases: usize,
     pub response_cases: usize,
     pub corpus_sha256: String,
+    pub request_plan_corpus_id: String,
+    pub request_plan_reference_revision: String,
+    pub request_plan_cases: usize,
+    pub request_plan_rejection_cases: usize,
+    pub request_plan_corpus_sha256: String,
+    pub request_plan_verified: bool,
+    pub all_verified: bool,
     pub verified: bool,
 }
 
@@ -61,6 +69,8 @@ pub enum FixtureError {
         expected: String,
         actual: String,
     },
+    #[error(transparent)]
+    HttpPlan(#[from] HttpFixtureError),
 }
 
 #[derive(Debug, Deserialize)]
@@ -142,7 +152,37 @@ struct ResponseExpected {
 /// Returns [`FixtureError`] when metadata, hex, deterministic encoding,
 /// decoding, hashing, or a frozen expected value differs.
 pub fn verify_embedded_corpus() -> Result<ParityReport, FixtureError> {
-    verify_corpus_source(EMBEDDED_CORPUS)
+    let mut report = verify_corpus_source(EMBEDDED_CORPUS)?;
+    let corpus: ProtocolCorpus = serde_json::from_str(EMBEDDED_CORPUS)?;
+    let mut wire_bodies = BTreeMap::new();
+    for case in &corpus.request_cases {
+        let body = encode_send_message_request(&case.input).map_err(|source| {
+            FixtureError::RequestEncoding {
+                case: case.id.clone(),
+                source,
+            }
+        })?;
+        if wire_bodies.insert(case.id.clone(), body).is_some() {
+            return Err(FixtureError::InvalidMetadata(format!(
+                "duplicate wire request case id {:?}",
+                case.id
+            )));
+        }
+    }
+    let http = verify_embedded_http_plan_corpus(
+        &wire_bodies,
+        &report.corpus_sha256,
+        report.request_cases,
+        report.response_cases,
+    )?;
+    report.request_plan_corpus_id = http.corpus_id;
+    report.request_plan_reference_revision = http.reference_revision;
+    report.request_plan_cases = http.happy_cases;
+    report.request_plan_rejection_cases = http.rejection_cases;
+    report.request_plan_corpus_sha256 = http.corpus_sha256;
+    report.request_plan_verified = http.verified;
+    report.all_verified = report.verified && report.request_plan_verified;
+    Ok(report)
 }
 
 fn verify_corpus_source(source: &str) -> Result<ParityReport, FixtureError> {
@@ -163,6 +203,13 @@ fn verify_corpus_source(source: &str) -> Result<ParityReport, FixtureError> {
         request_cases: corpus.request_cases.len(),
         response_cases: corpus.response_cases.len(),
         corpus_sha256: sha256_hex(source.as_bytes()),
+        request_plan_corpus_id: String::new(),
+        request_plan_reference_revision: String::new(),
+        request_plan_cases: 0,
+        request_plan_rejection_cases: 0,
+        request_plan_corpus_sha256: String::new(),
+        request_plan_verified: false,
+        all_verified: false,
         verified: true,
     })
 }
@@ -381,6 +428,16 @@ mod tests {
         assert_eq!(report.request_cases, 2);
         assert_eq!(report.response_cases, 31);
         assert_eq!(report.corpus_sha256.len(), 64);
+        assert_eq!(report.request_plan_corpus_id, "douyin-pc-im-http-plan-v1");
+        assert_eq!(
+            report.request_plan_reference_revision,
+            EXPECTED_REFERENCE_REVISION
+        );
+        assert_eq!(report.request_plan_cases, 2);
+        assert_eq!(report.request_plan_rejection_cases, 30);
+        assert_eq!(report.request_plan_corpus_sha256.len(), 64);
+        assert!(report.request_plan_verified);
+        assert!(report.all_verified);
         assert!(report.verified);
     }
 

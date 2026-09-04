@@ -97,6 +97,7 @@ async fn serve(config: AgentConfig, health: HealthResponse, _store: CoreStore) -
         data_dir = %config.data_dir.display(),
         protocol_mode = %health.protocol_mode,
         protocol_parity_verified = health.protocol_parity_verified,
+        protocol_parity_all_verified = health.protocol_parity_all_verified,
         "dy-agent runtime is ready"
     );
 

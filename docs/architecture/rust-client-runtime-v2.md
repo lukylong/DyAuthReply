@@ -194,11 +194,21 @@ REST 用于启动 bootstrap、全量快照、修复和审计查询。一个鉴�
 ## 9. 当前实现状态与刻意限制
 
 Foundation 已完成。Parity-A 使用 Python 与 Rust 共用的
-`protocol-fixtures/douyin_pc_im_v1.json`，冻结当前 PC IM send 请求/响应；Rust 启动前验证
-完整请求字节、响应字段、业务分类、参考提交和语料摘要。`--verify-protocol` 在访问数据目录或
-监听端口前离线退出，`/health` 单独报告 parity 状态。
+`protocol-fixtures/douyin_pc_im_v1.json`，冻结当前 PC IM send 请求/响应。Parity-B 新增独立的
+`protocol-fixtures/douyin_pc_im_http_plan_v1.json`，冻结参考提交
+`9afaf79580b1ee84e8954ff906ff26869d5b7f1f` 的 send HTTP 请求规划：显式 query `msToken`、
+原始 `www.douyin.com` Cookie、A-Bogus 输入、ticket-guard 输入、URL 编码/顺序、有序逻辑头、
+protobuf body 和 timeout。query token 与 Cookie 字节分离；Cookie 中没有 `msToken` 或仍有旧值
+都不能改变本次签名 token。A-Bogus 只签 `msToken=<RFC3986 value>`，body 固定为空字符串。
+
+Rust 只实现纯 `prepare -> canned signer outputs -> finalize`，摘要绑定包括具体 ECDH key bytes，
+禁止把另一个账号/请求的 signer 输出复用过来。共享语料包含 2 个成功形态和 30 个拒绝形态，
+覆盖 ts.1/ECDSA、ts.2/HMAC、trust、保留字符、边界大小、Cookie 覆盖、ECDH 和摘要复用。
+`--verify-protocol` 在访问数据目录或监听端口前离线校验两份语料并退出；Health API v3 分别报告
+wire parity、HTTP-plan parity 和聚合结果，只有两者都通过才 ready。
 
 协议模式仍固定为 `shadow-disabled`。当前实现不会连接抖音、不会读取 Cookie 或现有客户端
-数据库、不会签名、不会抢占账号租约、不会发送消息，也不会绑定现有生产端口。离线 send
-语料不覆盖 URL/query/header/Cookie、TLS/HTTP2、A-Bogus、inbox 或 WebSocket；这些必须通过
-后续独立语料及集成门禁，不能由本阶段的 protobuf 测试推断为已完成。
+数据库、不会执行 A-Bogus/ECDSA/HMAC/ECDH/ree-key 算法、不会抢占账号租约、不会发送消息，
+也不会绑定现有生产端口。当前 HTTP plan 只验证签名输入和 canned 输出的组装，不覆盖真实 signer、
+证书网络获取、TLS/HTTP2 wire 行为、inbox 或 WebSocket；这些必须通过后续独立语料及集成门禁，
+不能由本阶段的离线测试推断为已完成。

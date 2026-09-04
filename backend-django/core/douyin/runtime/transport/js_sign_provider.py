@@ -31,7 +31,7 @@ import json
 import logging
 import time
 from contextlib import suppress
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Callable, Optional, Union
 from urllib.parse import urlparse
 
 from asgiref.sync import sync_to_async
@@ -46,6 +46,13 @@ from core.douyin.runtime.transport.chrome_http_client import (
 )
 from core.douyin.runtime.transport.sign.mstoken import resolve_mstoken
 from core.douyin.runtime.transport.browser_fingerprint import browser_fingerprint
+from core.douyin.runtime.transport.request_plan import (
+    RequestPlanError,
+    SignerOutputs,
+    finalize_reference_send_request,
+    percent_encode_query_value,
+    prepare_reference_send_request,
+)
 # 复用 LocalSignProvider 已经校准过的 web 公共参数表与小工具，避免重复维护
 from core.douyin.runtime.transport.local_sign_provider import (
     _DEFAULT_UA,
@@ -75,10 +82,17 @@ _CSRF_BOOTSTRAP_PATH = "/service/2/abtest_config/"
 class JsSignProvider:
     """每账号一份；用 dy_ab.js 做 a_bogus + bd-ticket-guard 签名，httpx 直发，无浏览器。"""
 
-    def __init__(self, *, request_timeout_s: Optional[float] = None, verify_tls: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        request_timeout_s: Optional[float] = None,
+        verify_tls: bool = True,
+        clock: Optional[Callable[[], float]] = None,
+    ) -> None:
         self._account_id: Optional[str] = None
         self._client: Optional[AsyncChromeHttpClient] = None
         self._cookies: dict[str, str] = {}
+        self._query_ms_token = ""
         self._cookie_headers: dict[str, str] = {}
         self._bd_ticket: dict[str, str] = {}  # {private_key, ticket, ts_sign}
         self._dtrait: dict[str, str] = {}
@@ -92,6 +106,7 @@ class JsSignProvider:
             request_timeout_s = _setting_float("DOUYIN_HTTP_TIMEOUT_S", 15.0)
         self._timeout_s = float(request_timeout_s)
         self._verify_tls = bool(verify_tls)
+        self._clock = clock or time.time
         self._ready = False
 
     # ---------------- 生命周期 ----------------
@@ -105,6 +120,7 @@ class JsSignProvider:
             self._cookie_headers,
             self._dtrait,
         ) = await _load_account_credentials(self._account_id)
+        self._query_ms_token = ""
         self._ecdh_key = None
         self._ecdh_retry_at = 0.0
         self._dtrait_material = None
@@ -197,7 +213,16 @@ class JsSignProvider:
         if not self.is_ready or self._client is None:
             raise SignerUnavailable("JsSignProvider 未就绪")
 
-        parsed = urlparse(url)
+        try:
+            parsed = urlparse(url)
+        except ValueError as exc:
+            # Keep malformed endpoints inside the same stable production error
+            # boundary as the strict reference request planner.  In particular,
+            # urllib raises directly for malformed bracketed IPv6 hosts before
+            # we can classify the request as the reference send endpoint.
+            raise SignerUnavailable(
+                "request_plan[unsupported_endpoint]: unsupported reference send endpoint"
+            ) from exc
         host = parsed.netloc.lower()
         path = parsed.path
 
@@ -210,67 +235,8 @@ class JsSignProvider:
         # 页面按域抓到的 imapi Cookie 子集。
         cookie_host = "www.douyin.com" if is_reference_send else host
         request_cookies = self._cookies_for_host(cookie_host)
+        raw_cookie_header = self._cookie_header_for_host(cookie_host)
         skip_query_sign = host == "imapi.douyin.com" and not is_reference_send
-        final_url = url
-        params_with_token = ""
-        if not skip_query_sign:
-            base = base_params if base_params is not None else _common_params_for(host, self._user_agent)
-            token = resolve_mstoken(request_cookies)
-            params_with_token = f"{base}&msToken={token}" if base else f"msToken={token}"
-            if extra_params:
-                extra = "&".join(f"{k}={quote(str(v), safe='')}" for k, v in extra_params.items())
-                params_with_token = f"{params_with_token}&{extra}"
-        body_str = ""
-        if isinstance(body, str):
-            body_str = body
-        elif isinstance(body, bytes):
-            try:
-                body_str = body.decode("utf-8")
-            except Exception:
-                pass
-        elif isinstance(body, (bytearray, memoryview)):
-            try:
-                body_str = bytes(body).decode("utf-8")
-            except Exception:
-                pass
-
-        try:
-            # thread_sensitive=False：签名只与常驻 Node 进程池通信、不触碰 Django ORM，
-            # 放到独立线程池并行执行，避免占用 Django 共享线程（默认 thread_sensitive=True
-            # 会让所有签名与 DB 操作在同一线程串行，多账号下成为延迟主因）。
-            a_bogus = ""
-            if not skip_query_sign:
-                a_bogus = await sync_to_async(js_signer.get_ab, thread_sensitive=False)(
-                    params_with_token, body_str
-                )
-        except js_signer.JsSignerUnavailable as e:
-            raise SignerUnavailable(f"JS a_bogus 失败: {e}") from e
-        if not skip_query_sign:
-            final_url = f"{url}?{params_with_token}&a_bogus={a_bogus}"
-        if post_sign_params and not skip_query_sign:
-            post = "&".join(
-                f"{k}={quote(str(v), safe='')}" for k, v in post_sign_params.items()
-            )
-            final_url = f"{final_url}&{post}"
-
-        # 组装请求头：默认 + UA + Cookie + （imapi 写接口）bd-ticket-guard
-        req_headers: dict[str, str] = {
-            "user-agent": self._user_agent,
-            "cookie": self._cookie_header_for_host(cookie_host),
-        }
-        for k, v in (headers or {}).items():
-            req_headers[k.lower()] = v
-        fingerprint = browser_fingerprint(self._user_agent)
-        req_headers.setdefault("sec-ch-ua", fingerprint["sec_ch_ua"])
-        req_headers.setdefault("sec-ch-ua-mobile", "?0")
-        req_headers.setdefault("sec-ch-ua-platform", fingerprint["sec_ch_ua_platform"])
-        await self._maybe_inject_session_dtrait(req_headers, host=host, path=path)
-        await self._maybe_inject_bd_ticket(
-            req_headers,
-            host=host,
-            path=path,
-            cookies=request_cookies,
-        )
 
         content: Optional[bytes] = None
         if isinstance(body, (bytes, bytearray, memoryview)):
@@ -278,7 +244,180 @@ class JsSignProvider:
         elif isinstance(body, str):
             content = body.encode("utf-8")
 
-        timeout_s = (timeout_ms / 1000.0) if timeout_ms else self._timeout_s
+        # The normal send caller supplies the two post-sign fingerprint fields.
+        # That complete shape goes through the strict two-stage production seam;
+        # legacy direct callers without those fields retain their historical
+        # ticket helper while still receiving the corrected URL/body semantics.
+        use_reference_plan = is_reference_send and post_sign_params is not None
+        if use_reference_plan:
+            try:
+                prik = self._bd_ticket.get("private_key") or ""
+                ticket = self._bd_ticket.get("ticket") or ""
+                ts_sign = self._bd_ticket.get("ts_sign") or ""
+                timeout_ms_effective = (
+                    timeout_ms if timeout_ms is not None else int(self._timeout_s * 1000)
+                )
+                timestamp = int(self._clock())
+                query_ms_token = self._query_mstoken(request_cookies)
+                prepare_kwargs = dict(
+                    method=method,
+                    url=url,
+                    raw_cookie_header=raw_cookie_header,
+                    user_agent=self._user_agent,
+                    caller_headers=list((headers or {}).items()),
+                    body=content or b"",
+                    timeout_ms=timeout_ms_effective,
+                    query_ms_token=query_ms_token,
+                    verify_fp=str(post_sign_params.get("verifyFp") or ""),
+                    fp=str(post_sign_params.get("fp") or ""),
+                    private_key=prik,
+                    ticket=ticket,
+                    ts_sign=ts_sign,
+                    timestamp=timestamp,
+                )
+                # Validate the complete non-crypto plan before certificate I/O.
+                prepared = prepare_reference_send_request(
+                    **prepare_kwargs,
+                    ecdh_key=None,
+                )
+            except RequestPlanError as exc:
+                raise SignerUnavailable(f"request_plan[{exc.code}]: {exc}") from exc
+
+            ecdh_key = await self._resolve_ecdh_key(prik)
+            if ecdh_key:
+                try:
+                    prepared = prepare_reference_send_request(
+                        **prepare_kwargs,
+                        ecdh_key=ecdh_key,
+                    )
+                except RequestPlanError as exc:
+                    raise SignerUnavailable(
+                        f"request_plan[{exc.code}]: {exc}"
+                    ) from exc
+
+            try:
+                a_bogus = await sync_to_async(js_signer.get_ab, thread_sensitive=False)(
+                    prepared.a_bogus_query,
+                    prepared.a_bogus_body,
+                )
+                client_data, ree_key = await asyncio.gather(
+                    sync_to_async(
+                        js_signer.build_bd_ticket_client_data,
+                        thread_sensitive=False,
+                    )(
+                        prepared.path,
+                        prepared.ticket,
+                        prepared.ts_sign,
+                        prepared.private_key,
+                        ecdh_key=prepared.ecdh_key,
+                        timestamp=prepared.timestamp,
+                        t_trust=prepared.t_trust,
+                    ),
+                    sync_to_async(js_signer.get_ree_key, thread_sensitive=False)(
+                        prepared.private_key
+                    ),
+                )
+            except js_signer.JsSignerUnavailable as exc:
+                raise SignerUnavailable(f"reference send signer failed: {exc}") from exc
+            try:
+                finalized = finalize_reference_send_request(
+                    prepared,
+                    SignerOutputs(
+                        plan_digest=prepared.plan_digest,
+                        a_bogus=str(a_bogus),
+                        client_data=str(client_data),
+                        ree_public_key=str(ree_key),
+                    ),
+                )
+            except RequestPlanError as exc:
+                raise SignerUnavailable(f"request_plan[{exc.code}]: {exc}") from exc
+            final_url = finalized.url
+            req_headers = dict(finalized.headers)
+            timeout_s = finalized.timeout_ms / 1000.0
+        else:
+            final_url = url
+            params_with_token = ""
+            if not skip_query_sign:
+                base = (
+                    base_params
+                    if base_params is not None
+                    else _common_params_for(host, self._user_agent)
+                )
+                token = (
+                    self._query_mstoken(request_cookies)
+                    if is_reference_send
+                    else resolve_mstoken(request_cookies)
+                )
+                encoded_token = (
+                    percent_encode_query_value(token) if is_reference_send else token
+                )
+                params_with_token = (
+                    f"{base}&msToken={encoded_token}"
+                    if base
+                    else f"msToken={encoded_token}"
+                )
+                if extra_params:
+                    extra = "&".join(
+                        f"{k}={quote(str(v), safe='')}"
+                        for k, v in extra_params.items()
+                    )
+                    params_with_token = f"{params_with_token}&{extra}"
+            body_str = ""
+            if not is_reference_send:
+                if isinstance(body, str):
+                    body_str = body
+                elif isinstance(body, bytes):
+                    try:
+                        body_str = body.decode("utf-8")
+                    except Exception:
+                        pass
+                elif isinstance(body, (bytearray, memoryview)):
+                    try:
+                        body_str = bytes(body).decode("utf-8")
+                    except Exception:
+                        pass
+
+            try:
+                # thread_sensitive=False：签名只与常驻 Node 进程池通信、不触碰 Django ORM，
+                # 放到独立线程池并行执行，避免占用 Django 共享线程（默认 thread_sensitive=True
+                # 会让所有签名与 DB 操作在同一线程串行，多账号下成为延迟主因）。
+                a_bogus = ""
+                if not skip_query_sign:
+                    a_bogus = await sync_to_async(js_signer.get_ab, thread_sensitive=False)(
+                        params_with_token, body_str
+                    )
+            except js_signer.JsSignerUnavailable as e:
+                raise SignerUnavailable(f"JS a_bogus 失败: {e}") from e
+            if not skip_query_sign:
+                encoded_a_bogus = (
+                    percent_encode_query_value(a_bogus) if is_reference_send else a_bogus
+                )
+                final_url = f"{url}?{params_with_token}&a_bogus={encoded_a_bogus}"
+            if post_sign_params and not skip_query_sign:
+                post = "&".join(
+                    f"{k}={quote(str(v), safe='')}" for k, v in post_sign_params.items()
+                )
+                final_url = f"{final_url}&{post}"
+
+            # 组装请求头：默认 + UA + Cookie + （imapi 写接口）bd-ticket-guard
+            req_headers: dict[str, str] = {
+                "user-agent": self._user_agent,
+                "cookie": raw_cookie_header,
+            }
+            for k, v in (headers or {}).items():
+                req_headers[k.lower()] = v
+            fingerprint = browser_fingerprint(self._user_agent)
+            req_headers.setdefault("sec-ch-ua", fingerprint["sec_ch_ua"])
+            req_headers.setdefault("sec-ch-ua-mobile", "?0")
+            req_headers.setdefault("sec-ch-ua-platform", fingerprint["sec_ch_ua_platform"])
+            await self._maybe_inject_session_dtrait(req_headers, host=host, path=path)
+            await self._maybe_inject_bd_ticket(
+                req_headers,
+                host=host,
+                path=path,
+                cookies=request_cookies,
+            )
+            timeout_s = (timeout_ms / 1000.0) if timeout_ms else self._timeout_s
         try:
             resp = await self._client.request(
                 method.upper(),
@@ -315,6 +454,15 @@ class JsSignProvider:
         return self._cookie_headers.get((host or "").lower(), "") or _cookie_header(
             self._cookies
         )
+
+    def _query_mstoken(self, request_cookies: dict[str, str]) -> str:
+        """Return one provider-scoped query token, independent of Cookie bytes."""
+
+        if not self._query_ms_token:
+            # The structured account snapshot may retain the query token even
+            # when the exact outbound www Cookie header correctly omits it.
+            self._query_ms_token = resolve_mstoken(self._cookies or request_cookies)
+        return self._query_ms_token
 
     async def _maybe_inject_session_dtrait(
         self, req_headers: dict[str, str], *, host: str, path: str
@@ -522,6 +670,7 @@ class JsSignProvider:
         """直接注入 cookie（验证/调试用：从抓包复制的 Cookie 头）。"""
         self._cookies = dict(cookies or {})
         self._cookie_headers = {}
+        self._query_ms_token = ""
         self._ecdh_key = None
         self._ecdh_retry_at = 0.0
 

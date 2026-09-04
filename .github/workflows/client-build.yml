@@ -48,7 +48,11 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install protocol verifier dependency
-        run: python -m pip install 'Django==5.2.7' 'protobuf>=5.27.1,<6'
+        run: >-
+          python -m pip install
+          'Django==5.2.7'
+          'protobuf>=5.27.1,<6'
+          'cryptography>=42.0.5,<45'
 
       - name: Cache Rust Agent dependencies
         uses: Swatinem/rust-cache@v2
@@ -71,6 +75,7 @@ jobs:
           python -m unittest -q
           core.tests.test_douyin_wire_codec
           core.tests.test_douyin_protocol_corpus
+          core.tests.test_douyin_http_request_plan_corpus
 
       - name: Verify embedded Rust protocol corpus
         run: >-

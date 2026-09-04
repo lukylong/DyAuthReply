@@ -8,9 +8,10 @@ use crate::{
     protocol::fixtures::ParityReport, state::LifecycleState, CORE_SCHEMA_VERSION, PROTOCOL_MODE,
 };
 
-pub const HEALTH_API_VERSION: u32 = 2;
+pub const HEALTH_API_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct HealthResponse {
     pub api_version: u32,
     pub service: String,
@@ -21,11 +22,18 @@ pub struct HealthResponse {
     pub schema_version: u32,
     pub protocol_mode: String,
     pub protocol_parity_verified: bool,
+    pub protocol_parity_all_verified: bool,
     pub protocol_corpus: String,
     pub protocol_corpus_sha256: String,
     pub protocol_reference_revision: String,
     pub protocol_request_cases: usize,
     pub protocol_response_cases: usize,
+    pub protocol_request_plan_verified: bool,
+    pub protocol_request_plan_corpus: String,
+    pub protocol_request_plan_corpus_sha256: String,
+    pub protocol_request_plan_reference_revision: String,
+    pub protocol_request_plan_cases: usize,
+    pub protocol_request_plan_rejection_cases: usize,
     pub lifecycle: LifecycleState,
     pub ready: bool,
     pub degraded_reasons: Vec<String>,
@@ -34,6 +42,13 @@ pub struct HealthResponse {
 impl HealthResponse {
     #[must_use]
     pub fn foundation(instance_id: Uuid, boot_id: Uuid, parity: &ParityReport) -> Self {
+        let mut degraded_reasons = Vec::new();
+        if !parity.verified {
+            degraded_reasons.push("wire_protocol_parity_failed".to_owned());
+        }
+        if !parity.request_plan_verified {
+            degraded_reasons.push("http_request_plan_parity_failed".to_owned());
+        }
         Self {
             api_version: HEALTH_API_VERSION,
             service: "dy-agent".to_owned(),
@@ -46,14 +61,23 @@ impl HealthResponse {
             schema_version: CORE_SCHEMA_VERSION,
             protocol_mode: PROTOCOL_MODE.to_owned(),
             protocol_parity_verified: parity.verified,
+            protocol_parity_all_verified: parity.all_verified,
             protocol_corpus: parity.corpus_id.clone(),
             protocol_corpus_sha256: parity.corpus_sha256.clone(),
             protocol_reference_revision: parity.reference_revision.clone(),
             protocol_request_cases: parity.request_cases,
             protocol_response_cases: parity.response_cases,
+            protocol_request_plan_verified: parity.request_plan_verified,
+            protocol_request_plan_corpus: parity.request_plan_corpus_id.clone(),
+            protocol_request_plan_corpus_sha256: parity.request_plan_corpus_sha256.clone(),
+            protocol_request_plan_reference_revision: parity
+                .request_plan_reference_revision
+                .clone(),
+            protocol_request_plan_cases: parity.request_plan_cases,
+            protocol_request_plan_rejection_cases: parity.request_plan_rejection_cases,
             lifecycle: LifecycleState::Running,
-            ready: true,
-            degraded_reasons: Vec::new(),
+            ready: parity.all_verified,
+            degraded_reasons,
         }
     }
 }
@@ -111,6 +135,7 @@ mod tests {
         assert_eq!(health.schema_version, CORE_SCHEMA_VERSION);
         assert_eq!(health.protocol_mode, "shadow-disabled");
         assert!(health.protocol_parity_verified);
+        assert!(health.protocol_parity_all_verified);
         assert_eq!(health.protocol_corpus, "douyin-pc-im-send-v1");
         assert_eq!(
             health.protocol_reference_revision,
@@ -119,8 +144,38 @@ mod tests {
         assert_eq!(health.protocol_request_cases, 2);
         assert_eq!(health.protocol_response_cases, 31);
         assert_eq!(health.protocol_corpus_sha256.len(), 64);
+        assert!(health.protocol_request_plan_verified);
+        assert_eq!(
+            health.protocol_request_plan_corpus,
+            "douyin-pc-im-http-plan-v1"
+        );
+        assert_eq!(health.protocol_request_plan_corpus_sha256.len(), 64);
+        assert_eq!(
+            health.protocol_request_plan_reference_revision,
+            "9afaf79580b1ee84e8954ff906ff26869d5b7f1f"
+        );
+        assert_eq!(health.protocol_request_plan_cases, 2);
+        assert_eq!(health.protocol_request_plan_rejection_cases, 30);
         assert_eq!(health.lifecycle, LifecycleState::Running);
         assert!(health.ready);
         assert!(health.degraded_reasons.is_empty());
+    }
+
+    #[test]
+    fn wire_and_http_plan_parity_remain_diagnostically_distinct() {
+        let mut parity = crate::protocol::fixtures::verify_embedded_corpus()
+            .expect("embedded protocol corpora must verify");
+        parity.request_plan_verified = false;
+        parity.all_verified = false;
+        let health = HealthResponse::foundation(Uuid::new_v4(), Uuid::new_v4(), &parity);
+
+        assert!(health.protocol_parity_verified);
+        assert!(!health.protocol_request_plan_verified);
+        assert!(!health.protocol_parity_all_verified);
+        assert!(!health.ready);
+        assert_eq!(
+            health.degraded_reasons,
+            vec!["http_request_plan_parity_failed"]
+        );
     }
 }

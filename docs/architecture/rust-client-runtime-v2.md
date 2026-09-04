@@ -180,7 +180,8 @@ REST 用于启动 bootstrap、全量快照、修复和审计查询。一个鉴�
 ## 8. 交付阶段与门禁
 
 1. **Foundation**：进程身份、单实例锁、正交状态、SQLite 正确性原语、非生产 health；
-2. **Parity**：Rust codec/transport/signer 与冻结协议语料逐字节比对，只读 shadow；
+2. **Parity**：分门禁迁移协议，先完成 send protobuf 离线黄金语料，再分别验证 HTTP 请求规划、
+   signer、收消息/WebSocket，最后才允许真实只读 shadow；
 3. **Scheduler**：Actor、中央时间轮、有界公平队列、状态事件流和仿真压测；
 4. **Canary**：只给一个测试账号转移更高 fence，先手动回复再自动回复；
 5. **Storage**：滚动分段、水位清理、故障注入、备份/恢复；
@@ -190,8 +191,14 @@ REST 用于启动 bootstrap、全量快照、修复和审计查询。一个鉴�
 每一阶段都必须可以单独回退。进入 Canary 以前 Rust 没有生产发送入口；删除旧运行时以前，安装包
 必须通过冷启动、睡眠恢复、断网、磁盘压力、强杀、覆盖安装，以及 10/100/300 账号仿真门禁。
 
-## 9. 当前 Foundation 的刻意限制
+## 9. 当前实现状态与刻意限制
 
-首个实现切片默认监听 `127.0.0.1:18765`，协议模式为 `shadow-disabled`。它不会连接抖音、
-不会读取现有客户端数据库、不会抢占现有账号租约、不会发送消息，也不会绑定现有生产端口。
-这一限制用于先证明身份、锁、状态和持久化不变量，再进入协议兼容工作。
+Foundation 已完成。Parity-A 使用 Python 与 Rust 共用的
+`protocol-fixtures/douyin_pc_im_v1.json`，冻结当前 PC IM send 请求/响应；Rust 启动前验证
+完整请求字节、响应字段、业务分类、参考提交和语料摘要。`--verify-protocol` 在访问数据目录或
+监听端口前离线退出，`/health` 单独报告 parity 状态。
+
+协议模式仍固定为 `shadow-disabled`。当前实现不会连接抖音、不会读取 Cookie 或现有客户端
+数据库、不会签名、不会抢占账号租约、不会发送消息，也不会绑定现有生产端口。离线 send
+语料不覆盖 URL/query/header/Cookie、TLS/HTTP2、A-Bogus、inbox 或 WebSocket；这些必须通过
+后续独立语料及集成门禁，不能由本阶段的 protobuf 测试推断为已完成。

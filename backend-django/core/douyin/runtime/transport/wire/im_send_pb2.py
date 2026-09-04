@@ -107,6 +107,9 @@ def encode_send_message_request_pb2(
     identity_security_device_id: str = "",
     mentioned_users: Optional[list[int]] = None,
     ext: Optional[dict[str, str]] = None,
+    sequence_id: Optional[int] = None,
+    stime: Optional[str] = None,
+    deterministic: bool = False,
 ) -> tuple[bytes, str, int]:
     """构造 2026 PC IM send_message 的 HTTP protobuf body。
 
@@ -121,6 +124,10 @@ def encode_send_message_request_pb2(
     Returns:
         (body_bytes, client_msg_id, sequence_id)
 
+        ``sequence_id`` / ``stime`` / ``deterministic`` are explicit parity-fixture
+        controls.  Their defaults preserve the live sender's random identifiers and
+        normal protobuf serialization.
+
     Raises:
         ValueError: 入参非法。
     """
@@ -128,12 +135,26 @@ def encode_send_message_request_pb2(
         raise ValueError("conversation_id 不能为空")
     if not text and content_override is None:
         raise ValueError("text 不能为空")
+    if deterministic and (
+        not client_msg_id or sequence_id is None or stime is None
+    ):
+        raise ValueError(
+            "deterministic 模式必须显式提供 client_msg_id、sequence_id 和 stime"
+        )
     cm_id = client_msg_id or str(uuid.uuid4())
     short_id = int(conversation_short_id or 0)
+    if sequence_id is not None:
+        sequence_id = int(sequence_id)
+        if sequence_id <= 0 or sequence_id > 0x7FFF_FFFF_FFFF_FFFF:
+            raise ValueError("sequence_id 必须是正 int64")
+    if stime is not None and not str(stime):
+        raise ValueError("stime 不能为空")
 
     req = _build_envelope(
         SEND_MESSAGE_CMD_ID, bd_ticket, s_v_web_id=s_v_web_id, user_agent=user_agent
     )
+    if sequence_id is not None:
+        req.sequence_id = sequence_id
 
     # content_override：发送非文本消息（如伪装卡片），直接用调用方给的完整 content dict。
     if content_override is not None:
@@ -158,7 +179,14 @@ def encode_send_message_request_pb2(
         if key not in {"s:mentioned_users", "s:client_message_id", "s:stime"}:
             body.ext.append(R.ExtValue(key=str(key), value=str(value)))
     body.ext.append(
-        R.ExtValue(key="s:stime", value=f"{_now_ms()}.{random.randrange(100000):05d}")
+        R.ExtValue(
+            key="s:stime",
+            value=(
+                str(stime)
+                if stime is not None
+                else f"{_now_ms()}.{random.randrange(100000):05d}"
+            ),
+        )
     )
     if mentioned_users:
         body.mentioned_users.extend(int(uid) for uid in mentioned_users)
@@ -172,6 +200,8 @@ def encode_send_message_request_pb2(
     if identity_security_device_id:
         req.headers["identity_security_device_id"] = str(identity_security_device_id)
     req.headers["identity_security_aid"] = ""
+    if deterministic:
+        return req.SerializeToString(deterministic=True), cm_id, req.sequence_id
     return req.SerializeToString(), cm_id, req.sequence_id
 
 

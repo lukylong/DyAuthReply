@@ -7,6 +7,7 @@
 pub mod config;
 pub mod health;
 pub mod identity;
+pub mod protocol;
 pub mod state;
 pub mod store;
 

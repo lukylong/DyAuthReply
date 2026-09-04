@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 import time
 import uuid
@@ -376,10 +377,22 @@ class SendMessageResult:
     biz_status_code: int = 0    # inner 业务状态码；0=业务成功，非 0 代表平台拒绝/风控
     biz_status_text: str = ""   # inner 业务提示
     biz_raw_check_code: int = 0
+    outer_status_present: bool = False
+    has_response_body: bool = False
+    has_inner_response: bool = False
+    business_payload_present: bool = False
+    business_payload_valid: bool = True
 
 
-def decode_send_message_response(buf: bytes) -> SendMessageResult:
-    """解析 send_message 响应 envelope。"""
+def decode_send_message_response(
+    buf: bytes, *, strict_business_payload: bool = False
+) -> SendMessageResult:
+    """解析 send_message 响应 envelope。
+
+    默认业务 JSON 取值规则保持现有 Python sender 行为。协议语料和新运行时使用
+    ``strict_business_payload=True``，把 UTF-8、数值类型或提示结构异常标记为不可信，
+    而不是把畸形响应当作成功。
+    """
     if not buf:
         raise ValueError("响应 body 为空")
 
@@ -387,6 +400,7 @@ def decode_send_message_response(buf: bytes) -> SendMessageResult:
     for fnum, _w, val in iter_fields(buf):
         envelope.setdefault(fnum, []).append(val)
 
+    outer_status_present = RESP_STATUS_CODE in envelope
     status_code = get_first_int(envelope, RESP_STATUS_CODE, default=-1)
     status_msg = get_first_str(envelope, RESP_STATUS_MSG)
 
@@ -397,31 +411,32 @@ def decode_send_message_response(buf: bytes) -> SendMessageResult:
     biz_status_text = ""
     biz_raw_check_code = 0
 
+    has_response_body = RESP_BODY_FIELD in envelope
+    has_inner_response = False
+    business_payload_present = False
+    business_payload_valid = True
+
     if inner:
         # inner = field 100 wrapper
         for fnum, _w, val in iter_fields(inner):
             if fnum == RESP_BODY_INNER_FIELD and isinstance(val, (bytes, bytearray)):
+                has_inner_response = True
                 inner2: dict[int, list] = {}
                 for f2, _w2, v2 in iter_fields(val):
                     inner2.setdefault(f2, []).append(v2)
                 server_msg_id = get_first_int(inner2, SMResp_SERVER_MSG_ID)
                 client_msg_id = get_first_str(inner2, SMResp_CLIENT_MSG_ID)
+                business_payload_present = 6 in inner2
                 biz_raw = get_first_bytes(inner2, 6)
-                if biz_raw:
-                    try:
-                        biz_obj = json.loads(biz_raw.decode("utf-8", "ignore"))
-                    except Exception:
-                        biz_obj = {}
-                    if isinstance(biz_obj, dict):
-                        biz_status_code = int(biz_obj.get("status_code") or 0)
-                        biz_raw_check_code = int(biz_obj.get("raw_check_code") or 0)
-                        biz_msg = biz_obj.get("status_msg") or {}
-                        if isinstance(biz_msg, dict):
-                            biz_status_text = (
-                                (biz_msg.get("msg_content") or {}).get("tips") or ""
-                            )
-                        elif isinstance(biz_msg, str):
-                            biz_status_text = biz_msg
+                if business_payload_present:
+                    (
+                        biz_status_code,
+                        biz_status_text,
+                        biz_raw_check_code,
+                        business_payload_valid,
+                    ) = _decode_business_payload(
+                        biz_raw, strict=strict_business_payload
+                    )
                 break
 
     return SendMessageResult(
@@ -432,5 +447,211 @@ def decode_send_message_response(buf: bytes) -> SendMessageResult:
         biz_status_code=biz_status_code,
         biz_status_text=biz_status_text,
         biz_raw_check_code=biz_raw_check_code,
+        outer_status_present=outer_status_present,
+        has_response_body=has_response_body,
+        has_inner_response=has_inner_response,
+        business_payload_present=business_payload_present,
+        business_payload_valid=business_payload_valid,
         raw_envelope=envelope,
     )
+
+
+def _strict_business_int(payload: dict, key: str) -> tuple[int, bool]:
+    value = payload.get(key)
+    if value is None:
+        return 0, True
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < -(1 << 63)
+        or value > (1 << 63) - 1
+    ):
+        return 0, False
+    return value, True
+
+
+def _decode_business_payload(
+    raw: bytes, *, strict: bool
+) -> tuple[int, str, int, bool]:
+    strict_result = _decode_business_payload_strict(raw)
+    if strict:
+        return strict_result
+
+    # Preserve the existing live Python sender's permissive extraction exactly.
+    try:
+        payload = json.loads(raw.decode("utf-8", "ignore"))
+    except Exception:
+        payload = {}
+    status_code = 0
+    raw_check_code = 0
+    status_text = ""
+    if isinstance(payload, dict):
+        status_code = int(payload.get("status_code") or 0)
+        raw_check_code = int(payload.get("raw_check_code") or 0)
+        status_message = payload.get("status_msg") or {}
+        if isinstance(status_message, dict):
+            status_text = (
+                (status_message.get("msg_content") or {}).get("tips") or ""
+            )
+        elif isinstance(status_message, str):
+            status_text = status_message
+    return status_code, status_text, raw_check_code, strict_result[3]
+
+
+def _decode_business_payload_strict(raw: bytes) -> tuple[int, str, int, bool]:
+    try:
+        payload = json.loads(
+            raw.decode("utf-8"),
+            parse_constant=_reject_nonstandard_json_constant,
+        )
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return 0, "", 0, False
+    if not isinstance(payload, dict) or not _json_value_is_supported(payload):
+        return 0, "", 0, False
+
+    status_code, status_code_valid = _strict_business_int(payload, "status_code")
+    raw_check_code, raw_check_valid = _strict_business_int(
+        payload, "raw_check_code"
+    )
+    status_text = ""
+    status_message_valid = True
+    status_message = payload.get("status_msg")
+    if isinstance(status_message, dict):
+        msg_content = status_message.get("msg_content")
+        if msg_content is None:
+            msg_content = {}
+        if not isinstance(msg_content, dict):
+            status_message_valid = False
+        else:
+            tips = msg_content.get("tips")
+            if tips is None:
+                tips = ""
+            if isinstance(tips, str):
+                status_text = tips
+            else:
+                status_message_valid = False
+    elif isinstance(status_message, str):
+        status_text = status_message
+    elif status_message is not None:
+        status_message_valid = False
+    return (
+        status_code,
+        status_text,
+        raw_check_code,
+        status_code_valid and raw_check_valid and status_message_valid,
+    )
+
+
+def _reject_nonstandard_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def _json_value_is_supported(value, *, max_depth: int = 64) -> bool:
+    """Mirror serde_json's scalar limits and impose a smaller shared depth cap."""
+
+    stack = [(value, 0)]
+    while stack:
+        item, depth = stack.pop()
+        if depth > max_depth:
+            return False
+        if item is None or isinstance(item, bool):
+            continue
+        if isinstance(item, int):
+            if item < -(1 << 63) or item > (1 << 64) - 1:
+                return False
+            continue
+        if isinstance(item, float):
+            if not math.isfinite(item):
+                return False
+            continue
+        if isinstance(item, str):
+            try:
+                item.encode("utf-8")
+            except UnicodeEncodeError:
+                return False
+            continue
+        if isinstance(item, list):
+            stack.extend((child, depth + 1) for child in item)
+            continue
+        if isinstance(item, dict):
+            for key, child in item.items():
+                try:
+                    key.encode("utf-8")
+                except UnicodeEncodeError:
+                    return False
+                stack.append((child, depth + 1))
+            continue
+        return False
+    return True
+
+
+DELIVERY_DELIVERED = "delivered"
+DELIVERY_DELIVERED_SOFT = "delivered_soft"
+DELIVERY_LOGIN_EXPIRED = "login_expired"
+DELIVERY_RISK_CONTROLLED = "risk_controlled"
+DELIVERY_PROTOCOL_REJECTED = "protocol_rejected"
+DELIVERY_BUSINESS_REJECTED = "business_rejected"
+DELIVERY_INCONCLUSIVE = "inconclusive"
+DELIVERY_UNCERTAIN = "uncertain"
+
+_DELIVERY_HARD_BIZ_CODES = frozenset({60021, 7905, 7911, 8610})
+_DELIVERY_EXPIRED_MESSAGES = (
+    "unexepcted session length",
+    "unexpected session length",
+)
+
+
+def classify_send_message_delivery(
+    *,
+    http_status: Optional[int],
+    result: SendMessageResult,
+    expected_client_msg_id: str = "",
+) -> str:
+    """Conservatively classify one send result without triggering a retry.
+
+    ``uncertain`` means the platform may have accepted the request but the
+    response cannot prove which client message was acknowledged.  Callers must
+    reconcile it instead of blindly replaying the send.
+    """
+
+    if http_status == 401:
+        return DELIVERY_LOGIN_EXPIRED
+    explicit_risk = (
+        result.biz_status_code in _DELIVERY_HARD_BIZ_CODES
+        or result.biz_raw_check_code == 2
+    )
+    if http_status == 403:
+        return DELIVERY_RISK_CONTROLLED if explicit_risk else DELIVERY_LOGIN_EXPIRED
+    if http_status is None or http_status < 200 or http_status >= 300:
+        return DELIVERY_INCONCLUSIVE
+
+    status_message = (result.status_msg or "").lower()
+    if any(marker in status_message for marker in _DELIVERY_EXPIRED_MESSAGES):
+        return DELIVERY_LOGIN_EXPIRED
+    if not result.outer_status_present:
+        return DELIVERY_UNCERTAIN
+    if result.status_code != 0:
+        return DELIVERY_PROTOCOL_REJECTED
+
+    if explicit_risk:
+        return DELIVERY_RISK_CONTROLLED
+
+    if (
+        not result.has_response_body
+        or not result.has_inner_response
+        or not result.business_payload_valid
+        or result.server_msg_id <= 0
+        or not expected_client_msg_id
+        or result.client_msg_id != expected_client_msg_id
+    ):
+        return DELIVERY_UNCERTAIN
+
+    if result.biz_status_code == 8101:
+        return (
+            DELIVERY_BUSINESS_REJECTED
+            if result.biz_status_text
+            else DELIVERY_DELIVERED
+        )
+    if result.biz_status_code != 0:
+        return DELIVERY_DELIVERED_SOFT
+    return DELIVERY_DELIVERED

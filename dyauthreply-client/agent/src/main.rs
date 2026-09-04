@@ -5,6 +5,7 @@ use dy_agent::{
     config::AgentConfig,
     health::{router, HealthResponse},
     identity,
+    protocol::fixtures::verify_embedded_corpus,
     store::CoreStore,
     CORE_SCHEMA_VERSION,
 };
@@ -26,6 +27,17 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    let parity =
+        verify_embedded_corpus().context("embedded protocol corpus verification failed")?;
+    if command == Command::VerifyProtocol {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&parity)
+                .context("cannot serialize protocol parity report")?
+        );
+        return Ok(());
+    }
+
     let config = AgentConfig::from_env()?;
     let (identity, _instance_lock) = identity::initialize(&config.data_dir)?;
     let store = CoreStore::open(&config.data_dir)?;
@@ -34,7 +46,7 @@ async fn main() -> Result<()> {
         bail!("unsupported core schema version {schema_version}; expected {CORE_SCHEMA_VERSION}");
     }
 
-    let health = HealthResponse::foundation(identity.installation_id, identity.boot_id);
+    let health = HealthResponse::foundation(identity.installation_id, identity.boot_id, &parity);
     match command {
         Command::Check => {
             println!(
@@ -43,7 +55,9 @@ async fn main() -> Result<()> {
             );
         }
         Command::Serve => serve(config, health, store).await?,
-        Command::Version => unreachable!("version exits before initializing the Agent"),
+        Command::Version | Command::VerifyProtocol => {
+            unreachable!("offline commands exit before initializing the Agent")
+        }
     }
 
     Ok(())
@@ -54,6 +68,7 @@ enum Command {
     Serve,
     Check,
     Version,
+    VerifyProtocol,
 }
 
 fn parse_command() -> Result<Command> {
@@ -62,7 +77,10 @@ fn parse_command() -> Result<Command> {
         None => Command::Serve,
         Some("--check") => Command::Check,
         Some("--version" | "-V") => Command::Version,
-        Some(argument) => bail!("unknown argument {argument:?}; expected --check or --version"),
+        Some("--verify-protocol") => Command::VerifyProtocol,
+        Some(argument) => bail!(
+            "unknown argument {argument:?}; expected --check, --verify-protocol, or --version"
+        ),
     };
     if let Some(argument) = arguments.next() {
         bail!("unexpected extra argument {argument:?}");
@@ -78,7 +96,8 @@ async fn serve(config: AgentConfig, health: HealthResponse, _store: CoreStore) -
         address = %config.bind_addr,
         data_dir = %config.data_dir.display(),
         protocol_mode = %health.protocol_mode,
-        "dy-agent foundation is ready"
+        protocol_parity_verified = health.protocol_parity_verified,
+        "dy-agent runtime is ready"
     );
 
     axum::serve(listener, router(health))

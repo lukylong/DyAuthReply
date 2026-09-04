@@ -124,14 +124,15 @@ def classify_signed_response(
       5. 协议层 status_code 非 0（其它）→ inconclusive（业务错误，不一定是登录失效）
       6. 其余（HTTP 2xx 且协议层 0/未知）→ valid
     """
-    if http_status is not None:
-        if http_status in _expired_http_status():
-            return PROBE_LOGIN_EXPIRED
-        if http_status >= 500:
-            return PROBE_INCONCLUSIVE
-        if http_status < 200 or http_status >= 300:
-            # 其它非 2xx（如 429 限流、451 风控）：不判登录失效，交给重试/限流处理
-            return PROBE_INCONCLUSIVE
+    if http_status is None:
+        return PROBE_INCONCLUSIVE
+    if http_status in _expired_http_status():
+        return PROBE_LOGIN_EXPIRED
+    if http_status >= 500:
+        return PROBE_INCONCLUSIVE
+    if http_status < 200 or http_status >= 300:
+        # 其它非 2xx（如 429 限流、451 风控）：不判登录失效，交给重试/限流处理
+        return PROBE_INCONCLUSIVE
 
     if proto_status_code is not None and proto_status_code != 0:
         if proto_status_code in _expired_proto_codes():

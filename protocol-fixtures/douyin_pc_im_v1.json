@@ -1,0 +1,726 @@
+{
+  "schema_version": 1,
+  "corpus_id": "douyin-pc-im-send-v1",
+  "protocol": "douyin_pc_im_send",
+  "contains_secrets": false,
+  "reference": {
+    "repository": "https://github.com/lukylong/DouYin_Spider",
+    "revision": "9afaf79580b1ee84e8954ff906ff26869d5b7f1f"
+  },
+  "scope": {
+    "send_request": true,
+    "send_response": true,
+    "signer": false,
+    "http_transport": false,
+    "inbox": false,
+    "websocket": false
+  },
+  "request_cases": [
+    {
+      "id": "canonical_unicode",
+      "input": {
+        "conversation_id": "0:1:123:456",
+        "conversation_short_id": 987,
+        "ticket": "conversation-ticket",
+        "text": "你好",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+        "client_msg_id": "client-1",
+        "sequence_id": 10013,
+        "stime": "1700000000123.00042",
+        "message_type": 7,
+        "identity_security_token": "identity-token",
+        "identity_security_device_id": "device-1",
+        "mentioned_users": [
+          456
+        ],
+        "ext": [
+          {
+            "key": "custom",
+            "value": "value"
+          }
+        ]
+      },
+      "expected": {
+        "body_hex": "0864109d4e1a05302e312e3828033a19306435303933353a666561742f70632d696d2d67726f75704242df01a206db010a0b303a313a3132333a343536100118db07223b7b2261776554797065223a3730302c2274797065223a302c227269636854657874496e666f73223a5b5d2c2274657874223a22e4bda0e5a5bd227d2a130a11733a6d656e74696f6e65645f75736572732a1f0a13733a636c69656e745f6d6573736167655f69641208636c69656e742d312a0f0a06637573746f6d120576616c75652a1e0a07733a7374696d651213313730303030303030303132332e303030343230073a13636f6e766572736174696f6e2d7469636b65744208636c69656e742d314a02c8034a01305a09646f7579696e5f706372063336303030307a150a086170705f6e616d651209646f7579696e5f70637a190a1062726f777365725f6c616e677561676512057a682d434e7a170a0c62726f777365725f6e616d6512074d6f7a696c6c617a160a0e62726f777365725f6f6e6c696e651204747275657a190a1062726f777365725f706c6174666f726d120557696e33327a7a0a0f62726f777365725f76657273696f6e1267352e30202857696e646f7773204e542031302e303b2057696e36343b2078363429204170706c655765624b69742f3533372e333620284b48544d4c2c206c696b65204765636b6f29204368726f6d652f3135312e302e302e30205361666172692f3533372e33367a160a0e636f6f6b69655f656e61626c65641204747275657a0d0a0864657669636549641201307a190a156964656e746974795f73656375726974795f61696412007a270a1b6964656e746974795f73656375726974795f6465766963655f696412086465766963652d317a350a176964656e746974795f73656375726974795f746f6b656e121a7b22746f6b656e223a226964656e746974792d746f6b656e227d7a0d0a0869732d72657472791201307a150a0f7072696f726974795f726567696f6e1202636e7a2a0a0772656665726572121f68747470733a2f2f7777772e646f7579696e2e636f6d2f6a696e677875616e7a150a0d73637265656e5f6865696768741204313434307a140a0c73637265656e5f77696474681204323536307a130a0b73657373696f6e5f6169641204363338337a100a0b73657373696f6e5f6469641201307a1e0a0d74696d657a6f6e655f6e616d65120d417369612f5368616e676861697a7d0a0a757365725f6167656e74126f4d6f7a696c6c612f352e30202857696e646f7773204e542031302e303b2057696e36343b2078363429204170706c655765624b69742f3533372e333620284b48544d4c2c206c696b65204765636b6f29204368726f6d652f3135312e302e302e30205361666172692f3533372e3336900104aa010a646f7579696e5f776562b201077765625f73646b",
+        "body_sha256": "1fcb8e0391d50963dc1a6873a08f5b4891ce3207b5484b2c5017af76216c02c2",
+        "body_length": 1052
+      }
+    },
+    {
+      "id": "nonprefix_user_agent",
+      "input": {
+        "conversation_id": "0:1:synthetic:peer",
+        "conversation_short_id": 0,
+        "ticket": "",
+        "text": "UA parity",
+        "user_agent": "SyntheticAgent Mozilla/9.9",
+        "client_msg_id": "client-2",
+        "sequence_id": 10014,
+        "stime": "1700000000124.00043",
+        "message_type": 7,
+        "identity_security_token": "",
+        "identity_security_device_id": "",
+        "mentioned_users": [],
+        "ext": []
+      },
+      "expected": {
+        "body_hex": "0864109e4e1a05302e312e3828033a19306435303933353a666561742f70632d696d2d67726f75704242bc01a206b8010a12303a313a73796e7468657469633a706565721001223e7b2261776554797065223a3730302c2274797065223a302c227269636854657874496e666f73223a5b5d2c2274657874223a22554120706172697479227d2a130a11733a6d656e74696f6e65645f75736572732a1f0a13733a636c69656e745f6d6573736167655f69641208636c69656e742d322a1e0a07733a7374696d651213313730303030303030303132342e303030343330074208636c69656e742d324a01305a09646f7579696e5f706372063336303030307a150a086170705f6e616d651209646f7579696e5f70637a190a1062726f777365725f6c616e677561676512057a682d434e7a170a0c62726f777365725f6e616d6512074d6f7a696c6c617a160a0e62726f777365725f6f6e6c696e651204747275657a190a1062726f777365725f706c6174666f726d120557696e33327a250a0f62726f777365725f76657273696f6e121253796e7468657469634167656e7420392e397a160a0e636f6f6b69655f656e61626c65641204747275657a0d0a0864657669636549641201307a190a156964656e746974795f73656375726974795f61696412007a0d0a0869732d72657472791201307a150a0f7072696f726974795f726567696f6e1202636e7a2a0a0772656665726572121f68747470733a2f2f7777772e646f7579696e2e636f6d2f6a696e677875616e7a150a0d73637265656e5f6865696768741204313434307a140a0c73637265656e5f77696474681204323536307a130a0b73657373696f6e5f6169641204363338337a100a0b73657373696f6e5f6469641201307a1e0a0d74696d657a6f6e655f6e616d65120d417369612f5368616e676861697a280a0a757365725f6167656e74121a53796e7468657469634167656e74204d6f7a696c6c612f392e39900104aa010a646f7579696e5f776562b201077765625f73646b",
+        "body_sha256": "f40ff386e4a5487dae32e7cb1a5b64cad2cea77e5f4a229afb844c12d290dde2",
+        "body_length": 751
+      }
+    }
+  ],
+  "response_cases": [
+    {
+      "id": "delivered",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b3214a2061108959aef3a18002208636c69656e742d31",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": false,
+        "business_payload_valid": true,
+        "classification": "delivered"
+      }
+    },
+    {
+      "id": "risk_8610_raw_check_2",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b327fa2067c18002208636c69656e742d31326e7b227374617475735f636f6465223a383631302c227374617475735f6d7367223a7b226d73675f636f6e74656e74223a7b2274697073223a22e68a96e99fb3e5b9b3e58fb0e58f91e98081e9a38ee68ea7e68ba6e688aa227d7d2c227261775f636865636b5f636f6465223a327d",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 0,
+        "client_msg_id": "client-1",
+        "biz_status_code": 8610,
+        "biz_status_text": "抖音平台发送风控拦截",
+        "biz_raw_check_code": 2,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": true,
+        "classification": "risk_controlled"
+      }
+    },
+    {
+      "id": "risk_8610_raw_check_2_http_403",
+      "http_status": 403,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b3275a2067218002208636c69656e742d3132647b227374617475735f636f6465223a383631302c227374617475735f6d7367223a7b226d73675f636f6e74656e74223a7b2274697073223a226578706c69636974207269736b207369676e616c227d7d2c227261775f636865636b5f636f6465223a327d",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 0,
+        "client_msg_id": "client-1",
+        "biz_status_code": 8610,
+        "biz_status_text": "explicit risk signal",
+        "biz_raw_check_code": 2,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": true,
+        "classification": "risk_controlled"
+      }
+    },
+    {
+      "id": "delivered_soft_8513",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b3272a2066f08959aef3a18002208636c69656e742d31325c7b227374617475735f636f6465223a383531332c227374617475735f6d7367223a7b226d73675f636f6e74656e74223a7b2274697073223a22736f6674207761726e696e67227d7d2c227261775f636865636b5f636f6465223a307d",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 8513,
+        "biz_status_text": "soft warning",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": true,
+        "classification": "delivered_soft"
+      }
+    },
+    {
+      "id": "delivered_8101_without_text",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b324da2064a08959aef3a18002208636c69656e742d3132377b227374617475735f636f6465223a383130312c227374617475735f6d7367223a22222c227261775f636865636b5f636f6465223a307d",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 8101,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": true,
+        "classification": "delivered"
+      }
+    },
+    {
+      "id": "business_rejected_8101_with_text",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b325ea2065b08959aef3a18002208636c69656e742d3132487b227374617475735f636f6465223a383130312c227374617475735f6d7367223a22706c6174666f726d2072656a6563746564222c227261775f636865636b5f636f6465223a307d",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 8101,
+        "biz_status_text": "platform rejected",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": true,
+        "classification": "business_rejected"
+      }
+    },
+    {
+      "id": "login_expired_protocol_message",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e18012219756e65786570637465642073657373696f6e206c656e677468",
+      "expected": {
+        "status_code": 1,
+        "status_msg": "unexepcted session length",
+        "server_msg_id": 0,
+        "client_msg_id": "",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": false,
+        "has_inner_response": false,
+        "business_payload_present": false,
+        "business_payload_valid": true,
+        "classification": "login_expired"
+      }
+    },
+    {
+      "id": "protocol_rejected_rate_limit",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e18a11f220a72617465206c696d6974",
+      "expected": {
+        "status_code": 4001,
+        "status_msg": "rate limit",
+        "server_msg_id": 0,
+        "client_msg_id": "",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": false,
+        "has_inner_response": false,
+        "business_payload_present": false,
+        "business_payload_valid": true,
+        "classification": "protocol_rejected"
+      }
+    },
+    {
+      "id": "uncertain_missing_body",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 0,
+        "client_msg_id": "",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": false,
+        "has_inner_response": false,
+        "business_payload_present": false,
+        "business_payload_valid": true,
+        "classification": "uncertain"
+      }
+    },
+    {
+      "id": "uncertain_missing_inner_wrapper",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b32159a06120a106e6f742d73656e642d77726170706572",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 0,
+        "client_msg_id": "",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": false,
+        "business_payload_present": false,
+        "business_payload_valid": true,
+        "classification": "uncertain"
+      }
+    },
+    {
+      "id": "uncertain_missing_server_id",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b320fa2060c18002208636c69656e742d31",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 0,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": false,
+        "business_payload_valid": true,
+        "classification": "uncertain"
+      }
+    },
+    {
+      "id": "uncertain_missing_outer_status",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e22024f4b3214a2061108959aef3a18002208636c69656e742d31",
+      "expected": {
+        "status_code": -1,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": false,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": false,
+        "business_payload_valid": true,
+        "classification": "uncertain"
+      }
+    },
+    {
+      "id": "uncertain_client_echo_mismatch",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b321ca2061908959aef3a18002210646966666572656e742d636c69656e74",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "different-client",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": false,
+        "business_payload_valid": true,
+        "classification": "uncertain"
+      }
+    },
+    {
+      "id": "uncertain_missing_expected_client_id",
+      "http_status": 200,
+      "expected_client_msg_id": "",
+      "body_hex": "0864109d4e180022024f4b3214a2061108959aef3a18002208636c69656e742d31",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": false,
+        "business_payload_valid": true,
+        "classification": "uncertain"
+      }
+    },
+    {
+      "id": "uncertain_invalid_business_json",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b321fa2061c08959aef3a18002208636c69656e742d3132097b6e6f742d6a736f6e",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": false,
+        "classification": "uncertain"
+      }
+    },
+    {
+      "id": "uncertain_deeply_nested_business_json",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b32f912a206f51208959aef3a18002208636c69656e742d3132e1125b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b305d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": false,
+        "classification": "uncertain"
+      }
+    },
+    {
+      "id": "uncertain_nonstandard_json_constant",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b3246a2064308959aef3a18002208636c69656e742d3132307b227374617475735f636f6465223a302c227261775f636865636b5f636f6465223a302c226578747261223a4e614e7d",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": false,
+        "classification": "uncertain"
+      }
+    },
+    {
+      "id": "uncertain_nonfinite_json_number",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b3248a2064508959aef3a18002208636c69656e742d3132327b227374617475735f636f6465223a302c227261775f636865636b5f636f6465223a302c226578747261223a31653430307d",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": false,
+        "classification": "uncertain"
+      }
+    },
+    {
+      "id": "uncertain_positive_integer_overflow",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b3257a2065408959aef3a18002208636c69656e742d3132417b227374617475735f636f6465223a302c227261775f636865636b5f636f6465223a302c226578747261223a31383434363734343037333730393535313631367d",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": false,
+        "classification": "uncertain"
+      }
+    },
+    {
+      "id": "uncertain_negative_integer_overflow",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b3257a2065408959aef3a18002208636c69656e742d3132417b227374617475735f636f6465223a302c227261775f636865636b5f636f6465223a302c226578747261223a2d393232333337323033363835343737353830397d",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": false,
+        "classification": "uncertain"
+      }
+    },
+    {
+      "id": "uncertain_lone_surrogate_json_string",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b324ba2064808959aef3a18002208636c69656e742d3132357b227374617475735f636f6465223a302c227261775f636865636b5f636f6465223a302c226578747261223a225c7564383030227d",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": false,
+        "classification": "uncertain"
+      }
+    },
+    {
+      "id": "uncertain_business_json_depth_over_64",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b32d201a206ce0108959aef3a18002208636c69656e742d3132ba017b227374617475735f636f6465223a302c227261775f636865636b5f636f6465223a302c226578747261223a5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b305d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d7d",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": false,
+        "classification": "uncertain"
+      }
+    },
+    {
+      "id": "uncertain_string_business_code",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b323fa2063c08959aef3a18002208636c69656e742d3132297b227374617475735f636f6465223a2238363130222c227261775f636865636b5f636f6465223a307d",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": false,
+        "classification": "uncertain"
+      }
+    },
+    {
+      "id": "uncertain_float_business_code",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b323fa2063c08959aef3a18002208636c69656e742d3132297b227374617475735f636f6465223a383531332e302c227261775f636865636b5f636f6465223a307d",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": false,
+        "classification": "uncertain"
+      }
+    },
+    {
+      "id": "uncertain_boolean_raw_check",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b323da2063a08959aef3a18002208636c69656e742d3132277b227374617475735f636f6465223a302c227261775f636865636b5f636f6465223a747275657d",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": false,
+        "classification": "uncertain"
+      }
+    },
+    {
+      "id": "uncertain_invalid_status_message_shape",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b3267a2066408959aef3a18002208636c69656e742d3132517b227374617475735f636f6465223a302c227374617475735f6d7367223a7b226d73675f636f6e74656e74223a226e6f742d616e2d6f626a656374227d2c227261775f636865636b5f636f6465223a307d",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": false,
+        "classification": "uncertain"
+      }
+    },
+    {
+      "id": "inconclusive_missing_http_status",
+      "http_status": null,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b3214a2061108959aef3a18002208636c69656e742d31",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": false,
+        "business_payload_valid": true,
+        "classification": "inconclusive"
+      }
+    },
+    {
+      "id": "inconclusive_http_503",
+      "http_status": 503,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b3214a2061108959aef3a18002208636c69656e742d31",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": false,
+        "business_payload_valid": true,
+        "classification": "inconclusive"
+      }
+    },
+    {
+      "id": "login_expired_http_401",
+      "http_status": 401,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b3214a2061108959aef3a18002208636c69656e742d31",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456789,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": false,
+        "business_payload_valid": true,
+        "classification": "login_expired"
+      }
+    },
+    {
+      "id": "uncertain_empty_response_body",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b3200",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 0,
+        "client_msg_id": "",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": false,
+        "business_payload_present": false,
+        "business_payload_valid": true,
+        "classification": "uncertain"
+      }
+    },
+    {
+      "id": "uncertain_empty_inner_wrapper",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b3203a20600",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 0,
+        "client_msg_id": "",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 0,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": false,
+        "business_payload_valid": true,
+        "classification": "uncertain"
+      }
+    }
+  ]
+}

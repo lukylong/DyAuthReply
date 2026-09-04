@@ -11,6 +11,8 @@ class DouyinWorkerCommand(RootModel):
 
     channel = models.CharField(max_length=255, db_index=True, help_text='同 Redis 频道名')
     payload = models.JSONField(default=dict, blank=True)
+    claimed_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    claim_owner = models.CharField(max_length=255, blank=True, default='', db_index=True)
     consumed_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
     class Meta:

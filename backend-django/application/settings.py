@@ -545,15 +545,13 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.24'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.25'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '启用全新 D 助手桌面图标\n'
-    '多账号状态与私信增量改为单条本机 WebSocket 实时广播，减少轮询负载\n'
-    '持久化会话发送上下文，修复新会话首条自动回复缺少 short_id 或 ticket\n'
-    '账号可发送、登录失效与平台风控状态按真实探测结果展示\n'
-    '同步抖音创作者中心当前 PC IM 协议并优化批量账号调度',
+    '修复客户端手动回复偶发重复发送：SQLite 命令在执行前由单个 Worker 原子领取\n'
+    '多个 Worker 同时观察到同一命令时仅一个实例执行，避免产生两条平台消息\n'
+    'Worker 异常退出后的未完成命令可在租约超时后自动恢复，不会永久卡住',
 )

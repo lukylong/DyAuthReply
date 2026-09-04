@@ -719,9 +719,17 @@ def _log_event(account_id: Optional[str], event_type: str, level: str, title: st
 @sync_to_async
 def _fetch_pending_worker_commands() -> list[dict]:
     from core.douyin.douyin_worker_command_model import DouyinWorkerCommand
+    from django.db.models import Q
 
     cmds = (
-        DouyinWorkerCommand.objects.filter(consumed_at__isnull=True, is_deleted=False)
+        DouyinWorkerCommand.objects.filter(
+            consumed_at__isnull=True,
+            is_deleted=False,
+        )
+        .filter(
+            Q(claimed_at__isnull=True)
+            | Q(claimed_at__lt=_worker_command_claim_stale_before())
+        )
         .order_by('sys_create_datetime')[:50]
     )
     return [
@@ -730,20 +738,67 @@ def _fetch_pending_worker_commands() -> list[dict]:
     ]
 
 
+def _worker_command_claim_stale_before():
+    """返回命令租约的过期边界，允许崩溃 worker 留下的命令被重新领取。"""
+    ttl_s = max(
+        30,
+        int(getattr(settings, 'DOUYIN_DB_COMMAND_CLAIM_TTL_S', 300) or 300),
+    )
+    return timezone.now() - timedelta(seconds=ttl_s)
+
+
 @sync_to_async
-def _mark_worker_command_consumed(command_id: str, result: Optional[dict] = None) -> None:
+def _claim_worker_command(command_id: str, worker_id: str) -> bool:
+    """在执行副作用前原子领取命令；跨进程仅一个 worker 能成功。"""
+    from core.douyin.douyin_worker_command_model import DouyinWorkerCommand
+    from django.db.models import Q
+
+    updated = (
+        DouyinWorkerCommand.objects.filter(
+            id=command_id,
+            consumed_at__isnull=True,
+            is_deleted=False,
+        )
+        .filter(
+            Q(claimed_at__isnull=True)
+            | Q(claimed_at__lt=_worker_command_claim_stale_before())
+        )
+        .update(claimed_at=timezone.now(), claim_owner=worker_id)
+    )
+    return updated == 1
+
+
+@sync_to_async
+def _mark_worker_command_consumed(
+    command_id: str,
+    worker_id: str,
+    result: Optional[dict] = None,
+) -> bool:
     from core.douyin.douyin_worker_command_model import DouyinWorkerCommand
 
-    qs = DouyinWorkerCommand.objects.filter(id=command_id, consumed_at__isnull=True)
+    qs = DouyinWorkerCommand.objects.filter(
+        id=command_id,
+        consumed_at__isnull=True,
+        claim_owner=worker_id,
+        is_deleted=False,
+    )
     if result is not None:
         cmd = qs.first()
         if cmd is None:
-            return
+            return False
         payload = dict(cmd.payload or {})
         payload['_result'] = result
-        qs.update(consumed_at=timezone.now(), payload=payload)
-        return
-    qs.update(consumed_at=timezone.now())
+        return qs.update(
+            consumed_at=timezone.now(),
+            payload=payload,
+            claimed_at=None,
+            claim_owner='',
+        ) == 1
+    return qs.update(
+        consumed_at=timezone.now(),
+        claimed_at=None,
+        claim_owner='',
+    ) == 1
 
 
 def _in_silent_window(silent_start: Optional[str], silent_end: Optional[str]) -> bool:
@@ -1149,6 +1204,8 @@ class DouyinWorker:
                 pending = await _fetch_pending_worker_commands()
                 for cmd in pending:
                     cmd_id = cmd['id']
+                    if not await _claim_worker_command(cmd_id, self.worker_id):
+                        continue
                     try:
                         result = await self._dispatch_command(cmd['channel'], cmd['payload'])
                         if result is None:
@@ -1159,7 +1216,16 @@ class DouyinWorker:
                         )
                         result = {'status': 'failed', 'error': str(e)}
                     try:
-                        await _mark_worker_command_consumed(cmd_id, result)
+                        marked = await _mark_worker_command_consumed(
+                            cmd_id,
+                            self.worker_id,
+                            result,
+                        )
+                        if not marked:
+                            logger.error(
+                                f"[worker] SQLite 命令回写被拒绝 id={cmd_id} "
+                                f"claim_owner={self.worker_id}"
+                            )
                     except Exception as mark_err:  # noqa: BLE001
                         logger.error(
                             f"[worker] SQLite 命令回写失败 id={cmd_id}: {mark_err}"

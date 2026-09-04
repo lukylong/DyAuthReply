@@ -1,16 +1,21 @@
 import asyncio
 import unittest
+from datetime import timedelta
 from types import SimpleNamespace
 
 from django.test import SimpleTestCase, TestCase, override_settings
+from django.utils import timezone
 from unittest.mock import AsyncMock, patch
 
 from core.douyin.runtime.worker import (
     DouyinWorker,
     ReplyGuardSnapshot,
     _can_process_reply,
+    _claim_worker_command,
     _client_business_allowed,
+    _fetch_pending_worker_commands,
     _load_reply_guard_snapshot,
+    _mark_worker_command_consumed,
     _should_enforce_daily_peer_limit,
 )
 from core.douyin.runtime.message_store import ScannedMessage
@@ -57,6 +62,69 @@ class DouyinWorkerRuntimeTests(SimpleTestCase):
     @patch('core.client.license_auth.client_can_use_business', return_value=False)
     def test_client_business_blocked_when_license_invalid(self, _mock):
         self.assertFalse(_client_business_allowed())
+
+
+class DouyinWorkerCommandClaimTests(TestCase):
+    def _create_command(self, **kwargs):
+        from core.douyin.douyin_worker_command_model import DouyinWorkerCommand
+
+        defaults = {
+            'channel': 'douyin:cmd:manual_reply:account-a',
+            'payload': {'text': 'claim-test'},
+        }
+        defaults.update(kwargs)
+        return DouyinWorkerCommand.objects.create(**defaults)
+
+    def test_two_workers_fetching_same_row_only_one_can_claim_and_dispatch(self):
+        command = self._create_command()
+
+        first_snapshot = _fetch_pending_worker_commands.func()
+        second_snapshot = _fetch_pending_worker_commands.func()
+        self.assertEqual([row['id'] for row in first_snapshot], [str(command.id)])
+        self.assertEqual([row['id'] for row in second_snapshot], [str(command.id)])
+
+        self.assertTrue(_claim_worker_command.func(str(command.id), 'worker-a'))
+        self.assertFalse(_claim_worker_command.func(str(command.id), 'worker-b'))
+        self.assertEqual(_fetch_pending_worker_commands.func(), [])
+
+        result = {'status': 'success', 'server_msg_id': 'server-message-a'}
+        self.assertFalse(
+            _mark_worker_command_consumed.func(str(command.id), 'worker-b', result)
+        )
+        self.assertTrue(
+            _mark_worker_command_consumed.func(str(command.id), 'worker-a', result)
+        )
+
+        command.refresh_from_db()
+        self.assertIsNotNone(command.consumed_at)
+        self.assertIsNone(command.claimed_at)
+        self.assertEqual(command.claim_owner, '')
+        self.assertEqual(command.payload['_result'], result)
+
+    @override_settings(DOUYIN_DB_COMMAND_CLAIM_TTL_S=60)
+    def test_fresh_claim_is_hidden_but_stale_claim_can_be_recovered(self):
+        fresh = self._create_command(
+            payload={'text': 'fresh'},
+            claimed_at=timezone.now(),
+            claim_owner='worker-old',
+        )
+        stale = self._create_command(
+            payload={'text': 'stale'},
+            claimed_at=timezone.now() - timedelta(seconds=61),
+            claim_owner='worker-dead',
+        )
+
+        pending_ids = {
+            row['id'] for row in _fetch_pending_worker_commands.func()
+        }
+        self.assertNotIn(str(fresh.id), pending_ids)
+        self.assertIn(str(stale.id), pending_ids)
+        self.assertFalse(_claim_worker_command.func(str(fresh.id), 'worker-new'))
+        self.assertTrue(_claim_worker_command.func(str(stale.id), 'worker-new'))
+
+        stale.refresh_from_db()
+        self.assertEqual(stale.claim_owner, 'worker-new')
+        self.assertGreater(stale.claimed_at, timezone.now() - timedelta(seconds=5))
 
 
 class DouyinProfileBackfillSchedulingTests(unittest.IsolatedAsyncioTestCase):

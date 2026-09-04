@@ -1,20 +1,35 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{Mutex, MutexGuard},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{
+    backup::Backup, params, Connection, OpenFlags, OptionalExtension, Transaction,
+    TransactionBehavior,
+};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::CORE_SCHEMA_VERSION;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+use crate::{
+    storage::{
+        retention::DiskPressure, validate_manifest_identity, CatalogError, PendingSegmentDeletion,
+        SegmentCatalog, SegmentFamily, SegmentManifest,
+    },
+    CORE_SCHEMA_VERSION,
+};
 
 const DATABASE_FILE_NAME: &str = "core.sqlite3";
 const INITIALIZED_MARKER_FILE_NAME: &str = "core.initialized";
 const DATABASE_ID_META_KEY: &str = "database_id";
+const BACKUP_DIRECTORY_NAME: &str = "backups";
+const SCHEMA_V1: u32 = 1;
+const SCHEMA_V2: u32 = 2;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const LEASE_TRANSFER_UNCERTAIN_REASON: &str =
     "lease epoch changed while the previous send outcome was unresolved";
@@ -105,7 +120,59 @@ const SCHEMA_V1_SQL: &str = "CREATE TABLE account_leases (
          CREATE INDEX inbound_receipts_pending_idx
              ON inbound_receipts(account_id, status, received_at_ms, event_id)
              WHERE status = 'pending';";
-const REQUIRED_TABLES: &[(&str, &[&str])] = &[
+const SCHEMA_V2_SQL: &str = "CREATE TABLE segment_manifests (
+             segment_id TEXT PRIMARY KEY NOT NULL,
+             family TEXT NOT NULL CHECK (family IN ('chat', 'audit', 'debug')),
+             relative_path TEXT NOT NULL UNIQUE,
+             record_count INTEGER NOT NULL CHECK (record_count > 0),
+             uncompressed_bytes INTEGER NOT NULL CHECK (uncompressed_bytes > 0),
+             stored_bytes INTEGER NOT NULL CHECK (stored_bytes > 0),
+             content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+             file_sha256 TEXT NOT NULL CHECK (length(file_sha256) = 64),
+             created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+             sealed_at_ms INTEGER NOT NULL CHECK (sealed_at_ms >= created_at_ms),
+             compression TEXT CHECK (compression IS NULL OR compression = 'zstd')
+         );
+
+         CREATE TABLE storage_cleanup_journal (
+             segment_id TEXT PRIMARY KEY NOT NULL
+                 REFERENCES segment_manifests(segment_id) ON DELETE CASCADE,
+             intent_created_at_ms INTEGER NOT NULL CHECK (intent_created_at_ms >= 0)
+         );
+
+         CREATE TABLE storage_cleanup_state (
+             singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+             last_cleanup_at_ms INTEGER,
+             last_pressure TEXT CHECK (
+                 last_pressure IS NULL OR last_pressure IN ('normal', 'high', 'critical')
+             ),
+             CHECK (
+                 (last_cleanup_at_ms IS NULL AND last_pressure IS NULL)
+                 OR (last_cleanup_at_ms >= 0 AND last_pressure IS NOT NULL)
+             )
+         );
+
+         CREATE TABLE schema_migrations (
+             from_version INTEGER NOT NULL CHECK (from_version >= 0),
+             to_version INTEGER NOT NULL CHECK (to_version > from_version),
+             database_id TEXT NOT NULL,
+             backup_relative_path TEXT NOT NULL,
+             backup_bytes INTEGER NOT NULL CHECK (backup_bytes > 0),
+             backup_created_at_ms INTEGER NOT NULL CHECK (backup_created_at_ms >= 0),
+             applied_at_ms INTEGER NOT NULL CHECK (applied_at_ms >= backup_created_at_ms),
+             backup_quick_check TEXT NOT NULL CHECK (backup_quick_check = 'ok'),
+             backup_foreign_key_violations INTEGER NOT NULL
+                 CHECK (backup_foreign_key_violations = 0),
+             PRIMARY KEY (from_version, to_version)
+         );
+
+         CREATE INDEX segment_manifests_family_sealed_idx
+             ON segment_manifests(family, sealed_at_ms, segment_id);
+         CREATE INDEX storage_cleanup_journal_intent_idx
+             ON storage_cleanup_journal(intent_created_at_ms, segment_id);
+
+         INSERT INTO storage_cleanup_state(singleton) VALUES (1);";
+const REQUIRED_TABLES_V1: &[(&str, &[&str])] = &[
     ("meta", &["key", "value"]),
     (
         "account_leases",
@@ -117,6 +184,7 @@ const REQUIRED_TABLES: &[(&str, &[&str])] = &[
             "lease_until_ms",
             "status",
             "last_observed_at_ms",
+            "updated_at_ms",
         ],
     ),
     (
@@ -130,16 +198,36 @@ const REQUIRED_TABLES: &[(&str, &[&str])] = &[
             "payload",
             "payload_hash",
             "status",
+            "fence_epoch",
+            "received_at_ms",
             "processed_at_ms",
+            "processed_fence_epoch",
         ],
     ),
     (
         "inbound_checkpoints",
-        &["account_id", "stream", "stream_generation", "checkpoint"],
+        &[
+            "account_id",
+            "stream",
+            "stream_generation",
+            "checkpoint",
+            "fence_epoch",
+            "updated_at_ms",
+        ],
     ),
     (
         "outbound_batches",
-        &["id", "account_id", "trigger_id", "response_id", "status"],
+        &[
+            "id",
+            "account_id",
+            "trigger_id",
+            "response_id",
+            "status",
+            "created_fence_epoch",
+            "last_fence_epoch",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
     ),
     (
         "outbound_segments",
@@ -147,8 +235,56 @@ const REQUIRED_TABLES: &[(&str, &[&str])] = &[
             "id",
             "client_message_id",
             "batch_id",
+            "ordinal",
+            "kind",
+            "payload",
             "status",
             "attempt_count",
+            "platform_message_id",
+            "last_error",
+            "last_fence_epoch",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+    ),
+];
+const REQUIRED_TABLES_V2: &[(&str, &[&str])] = &[
+    (
+        "segment_manifests",
+        &[
+            "segment_id",
+            "family",
+            "relative_path",
+            "record_count",
+            "uncompressed_bytes",
+            "stored_bytes",
+            "content_sha256",
+            "file_sha256",
+            "created_at_ms",
+            "sealed_at_ms",
+            "compression",
+        ],
+    ),
+    (
+        "storage_cleanup_journal",
+        &["segment_id", "intent_created_at_ms"],
+    ),
+    (
+        "storage_cleanup_state",
+        &["singleton", "last_cleanup_at_ms", "last_pressure"],
+    ),
+    (
+        "schema_migrations",
+        &[
+            "from_version",
+            "to_version",
+            "database_id",
+            "backup_relative_path",
+            "backup_bytes",
+            "backup_created_at_ms",
+            "applied_at_ms",
+            "backup_quick_check",
+            "backup_foreign_key_violations",
         ],
     ),
 ];
@@ -189,6 +325,12 @@ pub enum StoreError {
     SchemaInvariant(String),
     #[error("invalid store input: {0}")]
     InvalidInput(&'static str),
+    #[error("pre-migration backup verification failed: {0}")]
+    BackupVerification(String),
+    #[error("unsafe storage path {path:?}: {reason}")]
+    UnsafeStoragePath { path: PathBuf, reason: String },
+    #[error("invalid segment manifest: {0}")]
+    InvalidSegmentManifest(String),
     #[error(
         "account {account_id:?} is leased by instance {owner_instance_id:?} boot {owner_boot_id:?} until {lease_until_ms}"
     )]
@@ -258,6 +400,41 @@ pub enum StoreError {
         from: String,
         to: String,
     },
+}
+
+/// Result of `SQLite`'s built-in integrity checks for a durable database.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DatabaseIntegrity {
+    pub quick_check: String,
+    pub foreign_key_violations: u64,
+}
+
+impl DatabaseIntegrity {
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        self.quick_check == "ok" && self.foreign_key_violations == 0
+    }
+}
+
+/// Durable audit row describing the verified snapshot taken before schema v1
+/// was upgraded to schema v2.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreMigrationBackup {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub database_id: Uuid,
+    pub relative_path: PathBuf,
+    pub bytes: u64,
+    pub created_at_ms: i64,
+    pub applied_at_ms: i64,
+    pub integrity: DatabaseIntegrity,
+}
+
+/// Last completed storage-maintenance pass, persisted for health reporting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StorageCleanupState {
+    pub last_cleanup_at_ms: i64,
+    pub last_pressure: DiskPressure,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -552,11 +729,11 @@ impl CoreStore {
     /// pragmas cannot be enabled, its schema is incompatible, or an initialized
     /// database was deleted or replaced.
     pub fn open(data_dir: &Path) -> Result<Self, StoreError> {
-        fs::create_dir_all(data_dir)?;
+        prepare_private_directory(data_dir)?;
         let database_path = data_dir.join(DATABASE_FILE_NAME);
         let marker_path = data_dir.join(INITIALIZED_MARKER_FILE_NAME);
         let marker_database_id = read_initialized_marker(&marker_path)?;
-        let database_exists = database_path.try_exists()?;
+        let database_exists = optional_regular_file_exists(&database_path)?;
 
         if marker_database_id.is_some() && !database_exists {
             return Err(StoreError::DatabaseMissingAfterInitialization {
@@ -566,6 +743,7 @@ impl CoreStore {
         }
 
         let mut connection = Connection::open(&database_path)?;
+        enforce_private_file_permissions(&database_path)?;
 
         connection.busy_timeout(BUSY_TIMEOUT)?;
         connection.pragma_update(None, "foreign_keys", true)?;
@@ -577,7 +755,18 @@ impl CoreStore {
         let database_id = if may_initialize {
             initialize_new_database(&mut connection)?
         } else {
-            validate_existing_database(&connection)?
+            if let Some(expected_database_id) = marker_database_id {
+                if table_exists(&connection, "meta")? {
+                    let database_database_id = read_database_id(&connection)?;
+                    if expected_database_id != database_database_id {
+                        return Err(StoreError::DatabaseIdentityMismatch {
+                            marker_database_id: expected_database_id,
+                            database_database_id,
+                        });
+                    }
+                }
+            }
+            validate_or_migrate_existing_database(&mut connection, data_dir)?
         };
         if let Some(marker_database_id) = marker_database_id {
             if marker_database_id != database_id {
@@ -610,6 +799,30 @@ impl CoreStore {
     pub fn schema_version(&self) -> Result<u32, StoreError> {
         let connection = self.lock_connection()?;
         read_schema_version(&connection)
+    }
+
+    /// Runs `SQLite`'s quick and foreign-key checks against the live correctness
+    /// database without changing its contents.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection cannot be locked or either check
+    /// cannot be completed.
+    pub fn database_integrity(&self) -> Result<DatabaseIntegrity, StoreError> {
+        let connection = self.lock_connection()?;
+        inspect_database_integrity(&connection)
+    }
+
+    /// Returns the durable metadata for the v1-to-v2 pre-migration snapshot.
+    /// New databases that were created directly at schema v2 return `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection is unavailable or the persisted
+    /// migration metadata is malformed.
+    pub fn pre_migration_backup(&self) -> Result<Option<PreMigrationBackup>, StoreError> {
+        let connection = self.lock_connection()?;
+        load_pre_migration_backup(&connection)
     }
 
     /// Installs a lease already verified by the remote control plane.
@@ -1358,12 +1571,369 @@ impl CoreStore {
         Ok(batches)
     }
 
+    /// Returns the last completed cleanup pass, or `None` before the first pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the persisted pressure value is corrupt or the
+    /// database query fails.
+    pub fn storage_cleanup_state(&self) -> Result<Option<StorageCleanupState>, StoreError> {
+        let connection = self.lock_connection()?;
+        let raw = connection.query_row(
+            "SELECT last_cleanup_at_ms, last_pressure
+             FROM storage_cleanup_state WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )?;
+        match raw {
+            (None, None) => Ok(None),
+            (Some(last_cleanup_at_ms), Some(raw_pressure)) if last_cleanup_at_ms >= 0 => {
+                let last_pressure = decode_disk_pressure(&raw_pressure)?;
+                Ok(Some(StorageCleanupState {
+                    last_cleanup_at_ms,
+                    last_pressure,
+                }))
+            }
+            value => Err(StoreError::CorruptData {
+                field: "storage_cleanup_state",
+                value: format!("{value:?}"),
+            }),
+        }
+    }
+
+    /// Persists a completed cleanup pass for subsequent health reporting.
+    /// The scheduler supplies the same observation timestamp used to calculate
+    /// its cleanup plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a negative timestamp or a failed transaction.
+    pub fn record_storage_cleanup_state(
+        &self,
+        at_ms: i64,
+        pressure: DiskPressure,
+    ) -> Result<(), StoreError> {
+        if at_ms < 0 {
+            return Err(StoreError::InvalidInput(
+                "cleanup timestamp must not be negative",
+            ));
+        }
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "UPDATE storage_cleanup_state
+             SET last_cleanup_at_ms = ?1, last_pressure = ?2
+             WHERE singleton = 1",
+            params![at_ms, disk_pressure_as_str(pressure)],
+        )?;
+        if transaction.changes() != 1 {
+            return Err(StoreError::SchemaInvariant(
+                "storage cleanup singleton disappeared".to_owned(),
+            ));
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Returns one sealed-segment manifest by its stable ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid ID, corrupt persisted metadata, or a
+    /// database failure.
+    pub fn segment_manifest(
+        &self,
+        segment_id: &str,
+    ) -> Result<Option<SegmentManifest>, StoreError> {
+        validate_segment_id(segment_id)?;
+        let connection = self.lock_connection()?;
+        load_segment_manifest(&connection, segment_id)
+    }
+
+    /// Lists manifests in deterministic seal-time order, optionally limited to
+    /// a family and/or segments sealed at or before a timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a negative timestamp, corrupt persisted metadata,
+    /// or a database failure.
+    pub fn segment_manifests(
+        &self,
+        family: Option<SegmentFamily>,
+        sealed_before_or_at_ms: Option<i64>,
+    ) -> Result<Vec<SegmentManifest>, StoreError> {
+        if sealed_before_or_at_ms.is_some_and(|timestamp| timestamp < 0) {
+            return Err(StoreError::InvalidInput(
+                "sealed timestamp filter must not be negative",
+            ));
+        }
+        let connection = self.lock_connection()?;
+        let mut statement = connection.prepare(
+            "SELECT segment_id, family, relative_path, record_count,
+                    uncompressed_bytes, stored_bytes, content_sha256,
+                    file_sha256, created_at_ms, sealed_at_ms, compression
+             FROM segment_manifests
+             ORDER BY sealed_at_ms, segment_id",
+        )?;
+        let rows = statement.query_map([], read_segment_manifest_row)?;
+        let mut manifests = Vec::new();
+        for row in rows {
+            let manifest = decode_segment_manifest(row?)?;
+            if family.is_some_and(|wanted| manifest.family != wanted)
+                || sealed_before_or_at_ms.is_some_and(|cutoff| manifest.sealed_at_ms > cutoff)
+            {
+                continue;
+            }
+            manifests.push(manifest);
+        }
+        Ok(manifests)
+    }
+
+    /// Commits a sealed segment to the durable catalog. Repeating the exact
+    /// same manifest is idempotent; reusing its ID or path for different
+    /// metadata fails closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid metadata, an idempotency conflict, or a
+    /// database failure.
+    pub fn commit_segment_manifest(&self, manifest: &SegmentManifest) -> Result<(), StoreError> {
+        validate_segment_manifest(manifest)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = load_segment_manifest(&transaction, &manifest.segment_id)? {
+            if existing == *manifest {
+                transaction.commit()?;
+                return Ok(());
+            }
+            return Err(StoreError::IdempotencyConflict {
+                entity: "segment manifest",
+                key: manifest.segment_id.clone(),
+            });
+        }
+        let path_owner = transaction
+            .query_row(
+                "SELECT segment_id FROM segment_manifests WHERE relative_path = ?1",
+                params![manifest.relative_path],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(path_owner) = path_owner {
+            return Err(StoreError::IdempotencyConflict {
+                entity: "segment manifest path",
+                key: format!("{} owned by {path_owner}", manifest.relative_path),
+            });
+        }
+        transaction.execute(
+            "INSERT INTO segment_manifests
+             (segment_id, family, relative_path, record_count,
+              uncompressed_bytes, stored_bytes, content_sha256, file_sha256,
+              created_at_ms, sealed_at_ms, compression)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                manifest.segment_id,
+                manifest.family.as_str(),
+                manifest.relative_path,
+                u64_to_sqlite(
+                    manifest.record_count,
+                    "segment record_count exceeds SQLite integer range"
+                )?,
+                u64_to_sqlite(
+                    manifest.uncompressed_bytes,
+                    "segment uncompressed_bytes exceeds SQLite integer range"
+                )?,
+                u64_to_sqlite(
+                    manifest.stored_bytes,
+                    "segment stored_bytes exceeds SQLite integer range"
+                )?,
+                manifest.content_sha256,
+                manifest.file_sha256,
+                manifest.created_at_ms,
+                manifest.sealed_at_ms,
+                manifest.compression,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Durably records intent to delete a sealed segment. The manifest remains
+    /// readable until [`Self::complete_segment_deletion`] commits completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ID is invalid, the manifest is missing, the
+    /// system clock is unavailable, or the transaction fails.
+    pub fn mark_segment_deleting(&self, segment_id: &str) -> Result<(), StoreError> {
+        self.mark_segment_deleting_with_time(segment_id, OperationTime::System)
+    }
+
+    #[cfg(test)]
+    fn mark_segment_deleting_at(&self, segment_id: &str, now_ms: i64) -> Result<(), StoreError> {
+        self.mark_segment_deleting_with_time(segment_id, OperationTime::Fixed(now_ms))
+    }
+
+    fn mark_segment_deleting_with_time(
+        &self,
+        segment_id: &str,
+        operation_time: OperationTime,
+    ) -> Result<(), StoreError> {
+        validate_segment_id(segment_id)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let exists = transaction
+            .query_row(
+                "SELECT 1 FROM segment_manifests WHERE segment_id = ?1",
+                params![segment_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists {
+            return Err(StoreError::NotFound {
+                entity: "segment manifest",
+                id: segment_id.to_owned(),
+            });
+        }
+        let now_ms = operation_time.resolve()?;
+        if now_ms < 0 {
+            return Err(StoreError::InvalidInput(
+                "cleanup intent timestamp must not be negative",
+            ));
+        }
+        transaction.execute(
+            "INSERT INTO storage_cleanup_journal(segment_id, intent_created_at_ms)
+             VALUES (?1, ?2)
+             ON CONFLICT(segment_id) DO NOTHING",
+            params![segment_id, now_ms],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Lists deletion intents that must be replayed after a crash.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if persisted IDs are invalid or the query fails.
+    pub fn pending_segment_deletions(&self) -> Result<Vec<PendingSegmentDeletion>, StoreError> {
+        let connection = self.lock_connection()?;
+        let mut statement = connection.prepare(
+            "SELECT segment_id FROM storage_cleanup_journal
+             ORDER BY intent_created_at_ms, segment_id",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut pending = Vec::new();
+        for row in rows {
+            let segment_id = row?;
+            validate_segment_id(&segment_id).map_err(|_| StoreError::CorruptData {
+                field: "storage_cleanup_journal.segment_id",
+                value: segment_id.clone(),
+            })?;
+            pending.push(PendingSegmentDeletion { segment_id });
+        }
+        Ok(pending)
+    }
+
+    /// Atomically removes a manifest and its durable deletion intent after the
+    /// caller has unlinked and synchronized the sealed file. Repeating an
+    /// already completed deletion is harmless; skipping the intent is rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid ID, a manifest without a prior intent,
+    /// or a database failure.
+    pub fn complete_segment_deletion(&self, segment_id: &str) -> Result<(), StoreError> {
+        validate_segment_id(segment_id)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let manifest_exists = transaction
+            .query_row(
+                "SELECT 1 FROM segment_manifests WHERE segment_id = ?1",
+                params![segment_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        let intent_exists = transaction
+            .query_row(
+                "SELECT 1 FROM storage_cleanup_journal WHERE segment_id = ?1",
+                params![segment_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !manifest_exists && !intent_exists {
+            transaction.commit()?;
+            return Ok(());
+        }
+        if manifest_exists && !intent_exists {
+            return Err(StoreError::InvalidTransition {
+                entity: "segment manifest",
+                from: "sealed".to_owned(),
+                to: "deleted without cleanup intent".to_owned(),
+            });
+        }
+        if !manifest_exists {
+            return Err(StoreError::SchemaInvariant(format!(
+                "cleanup intent for {segment_id:?} has no manifest"
+            )));
+        }
+        transaction.execute(
+            "DELETE FROM storage_cleanup_journal WHERE segment_id = ?1",
+            params![segment_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM segment_manifests WHERE segment_id = ?1",
+            params![segment_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     fn lock_connection(&self) -> Result<MutexGuard<'_, Connection>, StoreError> {
         self.connection.lock().map_err(|_| StoreError::LockPoisoned)
     }
 }
 
+impl SegmentCatalog for CoreStore {
+    fn list_manifests(&self) -> Result<Vec<SegmentManifest>, CatalogError> {
+        self.segment_manifests(None, None)
+            .map_err(|error| CatalogError::new(error.to_string()))
+    }
+
+    fn commit_manifest(&self, manifest: &SegmentManifest) -> Result<(), CatalogError> {
+        self.commit_segment_manifest(manifest)
+            .map_err(|error| CatalogError::new(error.to_string()))
+    }
+
+    fn begin_delete(&self, segment_id: &str) -> Result<(), CatalogError> {
+        self.mark_segment_deleting(segment_id)
+            .map_err(|error| CatalogError::new(error.to_string()))
+    }
+
+    fn list_pending_deletions(&self) -> Result<Vec<PendingSegmentDeletion>, CatalogError> {
+        self.pending_segment_deletions()
+            .map_err(|error| CatalogError::new(error.to_string()))
+    }
+
+    fn finish_delete(&self, segment_id: &str) -> Result<(), CatalogError> {
+        self.complete_segment_deletion(segment_id)
+            .map_err(|error| CatalogError::new(error.to_string()))
+    }
+}
+
 fn initialize_new_database(connection: &mut Connection) -> Result<Uuid, StoreError> {
+    if CORE_SCHEMA_VERSION != SCHEMA_V2 {
+        return Err(StoreError::SchemaInvariant(format!(
+            "compiled schema version is {CORE_SCHEMA_VERSION}, expected {SCHEMA_V2}"
+        )));
+    }
     let database_id = Uuid::new_v4();
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute_batch(
@@ -1373,6 +1943,7 @@ fn initialize_new_database(connection: &mut Connection) -> Result<Uuid, StoreErr
          );",
     )?;
     transaction.execute_batch(SCHEMA_V1_SQL)?;
+    transaction.execute_batch(SCHEMA_V2_SQL)?;
     transaction.execute(
         "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)",
         params![CORE_SCHEMA_VERSION.to_string()],
@@ -1392,6 +1963,31 @@ fn initialize_new_database(connection: &mut Connection) -> Result<Uuid, StoreErr
     Ok(database_id)
 }
 
+fn validate_or_migrate_existing_database(
+    connection: &mut Connection,
+    data_dir: &Path,
+) -> Result<Uuid, StoreError> {
+    if CORE_SCHEMA_VERSION != SCHEMA_V2 {
+        return Err(StoreError::SchemaInvariant(format!(
+            "compiled schema version is {CORE_SCHEMA_VERSION}, expected {SCHEMA_V2}"
+        )));
+    }
+    if !table_exists(connection, "meta")? {
+        return Err(StoreError::SchemaInvariant(
+            "required table \"meta\" is missing".to_owned(),
+        ));
+    }
+
+    match read_schema_version(connection)? {
+        SCHEMA_V1 => migrate_v1_to_v2(connection, data_dir),
+        SCHEMA_V2 => validate_existing_database(connection),
+        found => Err(StoreError::UnsupportedSchema {
+            found,
+            supported: CORE_SCHEMA_VERSION,
+        }),
+    }
+}
+
 fn validate_existing_database(connection: &Connection) -> Result<Uuid, StoreError> {
     if !table_exists(connection, "meta")? {
         return Err(StoreError::SchemaInvariant(
@@ -1406,19 +2002,63 @@ fn validate_existing_database(connection: &Connection) -> Result<Uuid, StoreErro
             supported: CORE_SCHEMA_VERSION,
         });
     }
-    validate_schema_v1(connection)?;
+    validate_schema_v1(connection, SCHEMA_V2)?;
+    validate_schema_v2(connection)?;
+    let integrity = inspect_database_integrity(connection)?;
+    if !integrity.is_valid() {
+        return Err(StoreError::SchemaInvariant(format!(
+            "database integrity failed: quick_check={:?}, foreign_key_violations={}",
+            integrity.quick_check, integrity.foreign_key_violations
+        )));
+    }
     read_database_id(connection)
 }
 
-fn validate_schema_v1(connection: &Connection) -> Result<(), StoreError> {
+fn validate_schema_v1(connection: &Connection, expected_version: u32) -> Result<(), StoreError> {
     let user_version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if user_version != CORE_SCHEMA_VERSION {
+    if user_version != expected_version {
         return Err(StoreError::SchemaInvariant(format!(
-            "PRAGMA user_version is {user_version}, expected {CORE_SCHEMA_VERSION}"
+            "PRAGMA user_version is {user_version}, expected {expected_version}"
         )));
     }
 
-    for (table, required_columns) in REQUIRED_TABLES {
+    validate_required_tables(connection, REQUIRED_TABLES_V1)?;
+    for index in [
+        "outbound_batches_account_status_idx",
+        "outbound_segments_batch_status_idx",
+        "inbound_receipts_pending_idx",
+    ] {
+        validate_required_index(connection, index)?;
+    }
+    Ok(())
+}
+
+fn validate_schema_v2(connection: &Connection) -> Result<(), StoreError> {
+    validate_required_tables(connection, REQUIRED_TABLES_V2)?;
+    for index in [
+        "segment_manifests_family_sealed_idx",
+        "storage_cleanup_journal_intent_idx",
+    ] {
+        validate_required_index(connection, index)?;
+    }
+    let cleanup_state_count: u32 = connection.query_row(
+        "SELECT COUNT(*) FROM storage_cleanup_state WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    if cleanup_state_count != 1 {
+        return Err(StoreError::SchemaInvariant(
+            "storage_cleanup_state singleton row is missing".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_required_tables(
+    connection: &Connection,
+    required_tables: &[(&str, &[&str])],
+) -> Result<(), StoreError> {
+    for (table, required_columns) in required_tables {
         if !table_exists(connection, table)? {
             return Err(StoreError::SchemaInvariant(format!(
                 "required table {table:?} is missing"
@@ -1428,30 +2068,599 @@ fn validate_schema_v1(connection: &Connection) -> Result<(), StoreError> {
         let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
         let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
         let columns = rows.collect::<Result<Vec<_>, _>>()?;
-        for column in *required_columns {
-            if !columns.iter().any(|candidate| candidate == column) {
-                return Err(StoreError::SchemaInvariant(format!(
-                    "required column {table}.{column} is missing"
-                )));
-            }
+        let expected = required_columns
+            .iter()
+            .map(|column| (*column).to_owned())
+            .collect::<Vec<_>>();
+        if columns != expected {
+            return Err(StoreError::SchemaInvariant(format!(
+                "required columns for {table:?} drifted: found {columns:?}, expected {expected:?}"
+            )));
         }
     }
+    Ok(())
+}
 
-    let pending_index_exists = connection
+fn validate_required_index(connection: &Connection, index: &str) -> Result<(), StoreError> {
+    let exists = connection
         .query_row(
-            "SELECT 1 FROM sqlite_master
-             WHERE type = 'index' AND name = 'inbound_receipts_pending_idx'",
-            [],
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            params![index],
             |_| Ok(()),
         )
         .optional()?
         .is_some();
-    if !pending_index_exists {
+    if !exists {
+        return Err(StoreError::SchemaInvariant(format!(
+            "required index {index} is missing"
+        )));
+    }
+    Ok(())
+}
+
+fn migrate_v1_to_v2(connection: &mut Connection, data_dir: &Path) -> Result<Uuid, StoreError> {
+    validate_schema_v1(connection, SCHEMA_V1)?;
+    let database_id = read_database_id(connection)?;
+    let integrity = inspect_database_integrity(connection)?;
+    if !integrity.is_valid() {
+        return Err(StoreError::SchemaInvariant(format!(
+            "schema v1 integrity failed before migration: quick_check={:?}, foreign_key_violations={}",
+            integrity.quick_check, integrity.foreign_key_violations
+        )));
+    }
+    let backup = create_fresh_v1_backup(connection, data_dir, database_id)?;
+    let applied_at_ms = current_time_ms()?.max(backup.created_at_ms);
+
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(SCHEMA_V2_SQL)?;
+    transaction.execute(
+        "INSERT INTO schema_migrations
+         (from_version, to_version, database_id, backup_relative_path,
+          backup_bytes, backup_created_at_ms, applied_at_ms,
+          backup_quick_check, backup_foreign_key_violations)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            SCHEMA_V1,
+            SCHEMA_V2,
+            database_id.to_string(),
+            path_to_portable_string(&backup.relative_path)?,
+            u64_to_sqlite(backup.bytes, "backup bytes exceed SQLite integer range")?,
+            backup.created_at_ms,
+            applied_at_ms,
+            backup.integrity.quick_check,
+            u64_to_sqlite(
+                backup.integrity.foreign_key_violations,
+                "foreign key violation count exceeds SQLite integer range"
+            )?,
+        ],
+    )?;
+    transaction.execute(
+        "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+        params![SCHEMA_V2.to_string()],
+    )?;
+    if transaction.changes() != 1 {
         return Err(StoreError::SchemaInvariant(
-            "required index inbound_receipts_pending_idx is missing".to_owned(),
+            "schema version row disappeared during migration".to_owned(),
+        ));
+    }
+    transaction.pragma_update(None, "user_version", SCHEMA_V2)?;
+    transaction.commit()?;
+
+    let durable_database_id = validate_existing_database(connection)?;
+    if durable_database_id != database_id {
+        return Err(StoreError::SchemaInvariant(
+            "database identity changed during schema v1-to-v2 migration".to_owned(),
+        ));
+    }
+    Ok(database_id)
+}
+
+fn create_fresh_v1_backup(
+    source: &Connection,
+    data_dir: &Path,
+    database_id: Uuid,
+) -> Result<PreMigrationBackup, StoreError> {
+    let backup_directory = data_dir.join(BACKUP_DIRECTORY_NAME);
+    prepare_private_directory(&backup_directory)?;
+    // Persist creation of the backup directory before relying on a file inside
+    // it as the migration rollback boundary.
+    sync_directory(data_dir)?;
+    let backup_file_name = format!("core-v{SCHEMA_V1}-to-v{SCHEMA_V2}-{database_id}.sqlite3");
+    let relative_path = PathBuf::from(BACKUP_DIRECTORY_NAME).join(&backup_file_name);
+    let final_path = data_dir.join(&relative_path);
+    let temporary_path = backup_directory.join(format!(".{backup_file_name}.tmp"));
+    let previous_path = backup_directory.join(format!(".{backup_file_name}.previous"));
+
+    #[cfg(not(unix))]
+    recover_interrupted_backup_publish(
+        &final_path,
+        &previous_path,
+        &relative_path,
+        database_id,
+        &backup_directory,
+    )?;
+
+    if optional_regular_file_exists(&final_path)? {
+        // A previous failed migration may have left a valid but now stale
+        // snapshot. Verify it before touching it, then keep it in place until
+        // a freshly verified replacement is ready. This preserves a usable
+        // rollback point if the new Online Backup or its verification fails.
+        verify_v1_backup(&final_path, relative_path.clone(), database_id)?;
+    }
+    if optional_regular_file_exists(&temporary_path)? {
+        fs::remove_file(&temporary_path)?;
+        sync_directory(&backup_directory)?;
+    }
+
+    let backup_result = (|| -> Result<(), StoreError> {
+        let mut destination = Connection::open_with_flags(
+            &temporary_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+        )?;
+        let backup = Backup::new(source, &mut destination)?;
+        backup.run_to_completion(128, Duration::from_millis(2), None)?;
+        drop(backup);
+        destination.close().map_err(|(_, error)| error)?;
+        enforce_private_file_permissions(&temporary_path)?;
+
+        OpenOptions::new()
+            .read(true)
+            .open(&temporary_path)?
+            .sync_all()?;
+        verify_v1_backup(&temporary_path, relative_path.clone(), database_id)?;
+        publish_verified_backup(
+            &temporary_path,
+            &final_path,
+            &previous_path,
+            &backup_directory,
+        )?;
+        enforce_private_file_permissions(&final_path)?;
+        sync_directory(&backup_directory)?;
+        Ok(())
+    })();
+    if backup_result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    backup_result?;
+
+    verify_v1_backup(&final_path, relative_path, database_id)
+}
+
+#[cfg(not(unix))]
+fn recover_interrupted_backup_publish(
+    final_path: &Path,
+    previous_path: &Path,
+    relative_path: &Path,
+    database_id: Uuid,
+    backup_directory: &Path,
+) -> Result<(), StoreError> {
+    if !optional_regular_file_exists(previous_path)? {
+        return Ok(());
+    }
+    verify_v1_backup(previous_path, relative_path.to_owned(), database_id)?;
+    if optional_regular_file_exists(final_path)? {
+        if verify_v1_backup(final_path, relative_path.to_owned(), database_id).is_ok() {
+            fs::remove_file(previous_path)?;
+            sync_directory(backup_directory)?;
+            return Ok(());
+        }
+        fs::remove_file(final_path)?;
+    }
+    fs::rename(previous_path, final_path)?;
+    sync_directory(backup_directory)?;
+    verify_v1_backup(final_path, relative_path.to_owned(), database_id)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn publish_verified_backup(
+    temporary_path: &Path,
+    final_path: &Path,
+    _previous_path: &Path,
+    _backup_directory: &Path,
+) -> Result<(), StoreError> {
+    fs::rename(temporary_path, final_path)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn publish_verified_backup(
+    temporary_path: &Path,
+    final_path: &Path,
+    previous_path: &Path,
+    backup_directory: &Path,
+) -> Result<(), StoreError> {
+    if !optional_regular_file_exists(final_path)? {
+        fs::rename(temporary_path, final_path)?;
+        return Ok(());
+    }
+    if optional_regular_file_exists(previous_path)? {
+        return Err(StoreError::UnsafeStoragePath {
+            path: previous_path.to_owned(),
+            reason: "previous backup publish state was not recovered".to_owned(),
+        });
+    }
+    fs::rename(final_path, previous_path)?;
+    sync_directory(backup_directory)?;
+    if let Err(error) = fs::rename(temporary_path, final_path) {
+        fs::rename(previous_path, final_path).map_err(|restore_error| {
+            StoreError::BackupVerification(format!(
+                "backup publish failed ({error}) and rollback failed ({restore_error})"
+            ))
+        })?;
+        sync_directory(backup_directory)?;
+        return Err(StoreError::Io(error));
+    }
+    sync_directory(backup_directory)?;
+    fs::remove_file(previous_path)?;
+    sync_directory(backup_directory)?;
+    Ok(())
+}
+
+fn verify_v1_backup(
+    backup_path: &Path,
+    relative_path: PathBuf,
+    expected_database_id: Uuid,
+) -> Result<PreMigrationBackup, StoreError> {
+    require_regular_file(backup_path)?;
+    enforce_private_file_permissions(backup_path)?;
+    let connection = Connection::open_with_flags(backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let integrity = inspect_database_integrity(&connection)?;
+    if !integrity.is_valid() {
+        return Err(StoreError::BackupVerification(format!(
+            "{} has quick_check={:?} and {} foreign-key violations",
+            backup_path.display(),
+            integrity.quick_check,
+            integrity.foreign_key_violations
+        )));
+    }
+    let schema_version = read_schema_version(&connection)?;
+    if schema_version != SCHEMA_V1 {
+        return Err(StoreError::BackupVerification(format!(
+            "{} has schema version {schema_version}, expected {SCHEMA_V1}",
+            backup_path.display()
+        )));
+    }
+    validate_schema_v1(&connection, SCHEMA_V1).map_err(|error| {
+        StoreError::BackupVerification(format!(
+            "{} does not contain the expected schema v1: {error}",
+            backup_path.display()
+        ))
+    })?;
+    let database_id = read_database_id(&connection)?;
+    if database_id != expected_database_id {
+        return Err(StoreError::BackupVerification(format!(
+            "{} contains database id {database_id}, expected {expected_database_id}",
+            backup_path.display()
+        )));
+    }
+    drop(connection);
+
+    let metadata = fs::metadata(backup_path)?;
+    let bytes = metadata.len();
+    if bytes == 0 {
+        return Err(StoreError::BackupVerification(format!(
+            "{} is empty",
+            backup_path.display()
+        )));
+    }
+    let created_at_ms = system_time_to_ms(metadata.modified()?)?;
+    Ok(PreMigrationBackup {
+        from_version: SCHEMA_V1,
+        to_version: SCHEMA_V2,
+        database_id,
+        relative_path,
+        bytes,
+        created_at_ms,
+        applied_at_ms: created_at_ms,
+        integrity,
+    })
+}
+
+fn inspect_database_integrity(connection: &Connection) -> Result<DatabaseIntegrity, StoreError> {
+    let quick_rows = {
+        let mut statement = connection.prepare("PRAGMA quick_check")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let quick_check = if quick_rows.is_empty() {
+        "missing quick_check result".to_owned()
+    } else {
+        quick_rows.join("; ")
+    };
+
+    let mut statement = connection.prepare("PRAGMA foreign_key_check")?;
+    let mut rows = statement.query([])?;
+    let mut foreign_key_violations = 0_u64;
+    while rows.next()?.is_some() {
+        foreign_key_violations = foreign_key_violations.checked_add(1).ok_or_else(|| {
+            StoreError::SchemaInvariant("foreign-key violation count overflowed".to_owned())
+        })?;
+    }
+    Ok(DatabaseIntegrity {
+        quick_check,
+        foreign_key_violations,
+    })
+}
+
+fn load_pre_migration_backup(
+    connection: &Connection,
+) -> Result<Option<PreMigrationBackup>, StoreError> {
+    let raw = connection
+        .query_row(
+            "SELECT from_version, to_version, database_id, backup_relative_path,
+                    backup_bytes, backup_created_at_ms, applied_at_ms,
+                    backup_quick_check, backup_foreign_key_violations
+             FROM schema_migrations
+             WHERE from_version = ?1 AND to_version = ?2",
+            params![SCHEMA_V1, SCHEMA_V2],
+            |row| {
+                Ok((
+                    row.get::<_, u32>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, i64>(8)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let database_id = parse_database_id(&raw.2, "schema_migrations.database_id")?;
+    let relative_path = validate_relative_path(&raw.3)?.to_owned();
+    let bytes = u64::try_from(raw.4).map_err(|_| StoreError::CorruptData {
+        field: "schema_migrations.backup_bytes",
+        value: raw.4.to_string(),
+    })?;
+    let foreign_key_violations = u64::try_from(raw.8).map_err(|_| StoreError::CorruptData {
+        field: "schema_migrations.backup_foreign_key_violations",
+        value: raw.8.to_string(),
+    })?;
+    Ok(Some(PreMigrationBackup {
+        from_version: raw.0,
+        to_version: raw.1,
+        database_id,
+        relative_path,
+        bytes,
+        created_at_ms: raw.5,
+        applied_at_ms: raw.6,
+        integrity: DatabaseIntegrity {
+            quick_check: raw.7,
+            foreign_key_violations,
+        },
+    }))
+}
+
+type RawSegmentManifest = (
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    i64,
+    String,
+    String,
+    i64,
+    i64,
+    Option<String>,
+);
+
+fn read_segment_manifest_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawSegmentManifest> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+    ))
+}
+
+fn load_segment_manifest(
+    connection: &Connection,
+    segment_id: &str,
+) -> Result<Option<SegmentManifest>, StoreError> {
+    let raw = connection
+        .query_row(
+            "SELECT segment_id, family, relative_path, record_count,
+                    uncompressed_bytes, stored_bytes, content_sha256,
+                    file_sha256, created_at_ms, sealed_at_ms, compression
+             FROM segment_manifests WHERE segment_id = ?1",
+            params![segment_id],
+            read_segment_manifest_row,
+        )
+        .optional()?;
+    raw.map(decode_segment_manifest).transpose()
+}
+
+fn decode_segment_manifest(raw: RawSegmentManifest) -> Result<SegmentManifest, StoreError> {
+    let family = match raw.1.as_str() {
+        "chat" => SegmentFamily::Chat,
+        "audit" => SegmentFamily::Audit,
+        "debug" => SegmentFamily::Debug,
+        _ => {
+            return Err(StoreError::CorruptData {
+                field: "segment_manifests.family",
+                value: raw.1,
+            });
+        }
+    };
+    let manifest = SegmentManifest {
+        segment_id: raw.0,
+        family,
+        relative_path: raw.2,
+        record_count: decode_non_negative_u64("segment_manifests.record_count", raw.3)?,
+        uncompressed_bytes: decode_non_negative_u64("segment_manifests.uncompressed_bytes", raw.4)?,
+        stored_bytes: decode_non_negative_u64("segment_manifests.stored_bytes", raw.5)?,
+        content_sha256: raw.6,
+        file_sha256: raw.7,
+        created_at_ms: raw.8,
+        sealed_at_ms: raw.9,
+        compression: raw.10,
+    };
+    validate_segment_manifest(&manifest).map_err(|error| StoreError::CorruptData {
+        field: "segment_manifests row",
+        value: format!("{}: {error}", manifest.segment_id),
+    })?;
+    Ok(manifest)
+}
+
+fn decode_non_negative_u64(field: &'static str, value: i64) -> Result<u64, StoreError> {
+    u64::try_from(value).map_err(|_| StoreError::CorruptData {
+        field,
+        value: value.to_string(),
+    })
+}
+
+fn validate_segment_manifest(manifest: &SegmentManifest) -> Result<(), StoreError> {
+    validate_segment_id(&manifest.segment_id)?;
+    validate_manifest_identity(manifest)
+        .map_err(|error| StoreError::InvalidSegmentManifest(error.to_string()))?;
+    if manifest.record_count == 0 {
+        return Err(StoreError::InvalidInput(
+            "segment record_count must be greater than zero",
+        ));
+    }
+    if manifest.uncompressed_bytes == 0 || manifest.stored_bytes == 0 {
+        return Err(StoreError::InvalidInput(
+            "segment byte counts must be greater than zero",
+        ));
+    }
+    let _ = u64_to_sqlite(
+        manifest.record_count,
+        "segment record_count exceeds SQLite integer range",
+    )?;
+    let _ = u64_to_sqlite(
+        manifest.uncompressed_bytes,
+        "segment uncompressed_bytes exceeds SQLite integer range",
+    )?;
+    let _ = u64_to_sqlite(
+        manifest.stored_bytes,
+        "segment stored_bytes exceeds SQLite integer range",
+    )?;
+    validate_sha256(&manifest.content_sha256)?;
+    validate_sha256(&manifest.file_sha256)?;
+    if manifest.created_at_ms < 0 || manifest.sealed_at_ms < manifest.created_at_ms {
+        return Err(StoreError::InvalidInput(
+            "segment timestamps must be non-negative and monotonically ordered",
+        ));
+    }
+    match manifest.compression.as_deref() {
+        None => {
+            if manifest.uncompressed_bytes != manifest.stored_bytes
+                || manifest.content_sha256 != manifest.file_sha256
+            {
+                return Err(StoreError::InvalidInput(
+                    "uncompressed segment byte counts and digests must match",
+                ));
+            }
+        }
+        Some("zstd") => {}
+        Some(_) => {
+            return Err(StoreError::InvalidInput(
+                "segment compression must be absent or zstd",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_segment_id(segment_id: &str) -> Result<(), StoreError> {
+    if segment_id.is_empty()
+        || segment_id.len() > 128
+        || !segment_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(StoreError::InvalidInput(
+            "segment_id must use 1..=128 ASCII letters, digits, hyphens, or underscores",
         ));
     }
     Ok(())
+}
+
+fn validate_sha256(digest: &str) -> Result<(), StoreError> {
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(StoreError::InvalidInput(
+            "segment SHA-256 must contain exactly 64 lowercase hexadecimal characters",
+        ));
+    }
+    Ok(())
+}
+
+const fn disk_pressure_as_str(pressure: DiskPressure) -> &'static str {
+    match pressure {
+        DiskPressure::Normal => "normal",
+        DiskPressure::High => "high",
+        DiskPressure::Critical => "critical",
+    }
+}
+
+fn decode_disk_pressure(raw: &str) -> Result<DiskPressure, StoreError> {
+    match raw {
+        "normal" => Ok(DiskPressure::Normal),
+        "high" => Ok(DiskPressure::High),
+        "critical" => Ok(DiskPressure::Critical),
+        _ => Err(StoreError::CorruptData {
+            field: "storage_cleanup_state.last_pressure",
+            value: raw.to_owned(),
+        }),
+    }
+}
+
+fn current_time_ms() -> Result<i64, StoreError> {
+    system_time_to_ms(SystemTime::now())
+}
+
+fn system_time_to_ms(time: SystemTime) -> Result<i64, StoreError> {
+    let elapsed = time
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| StoreError::SystemClockBeforeUnixEpoch)?;
+    i64::try_from(elapsed.as_millis()).map_err(|_| StoreError::SystemTimeOverflow)
+}
+
+fn u64_to_sqlite(value: u64, message: &'static str) -> Result<i64, StoreError> {
+    i64::try_from(value).map_err(|_| StoreError::InvalidInput(message))
+}
+
+fn path_to_portable_string(path: &Path) -> Result<String, StoreError> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or(StoreError::InvalidInput("path must be valid UTF-8"))
+}
+
+fn validate_relative_path(raw: &str) -> Result<&Path, StoreError> {
+    if raw.is_empty() || raw.contains('\0') || raw.contains('\\') {
+        return Err(StoreError::InvalidInput(
+            "relative path must be non-empty portable UTF-8",
+        ));
+    }
+    let path = Path::new(raw);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(StoreError::InvalidInput(
+            "relative path must not contain roots, prefixes, or traversal components",
+        ));
+    }
+    Ok(path)
 }
 
 fn table_exists(connection: &Connection, table: &str) -> Result<bool, StoreError> {
@@ -1507,9 +2716,10 @@ fn read_database_id(connection: &Connection) -> Result<Uuid, StoreError> {
 }
 
 fn read_initialized_marker(marker_path: &Path) -> Result<Option<Uuid>, StoreError> {
-    if !marker_path.try_exists()? {
+    if !optional_regular_file_exists(marker_path)? {
         return Ok(None);
     }
+    enforce_private_file_permissions(marker_path)?;
     let raw = fs::read_to_string(marker_path)?;
     parse_database_id(raw.trim(), "core.initialized").map(Some)
 }
@@ -1541,14 +2751,16 @@ fn write_initialized_marker(
         Uuid::new_v4()
     ));
     let write_result = (|| -> Result<(), StoreError> {
-        let mut marker = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary_path)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut marker = options.open(&temporary_path)?;
         writeln!(marker, "{database_id}")?;
         marker.sync_all()?;
         drop(marker);
         fs::rename(&temporary_path, marker_path)?;
+        enforce_private_file_permissions(marker_path)?;
         sync_directory(data_dir)?;
         Ok(())
     })();
@@ -1556,6 +2768,75 @@ fn write_initialized_marker(
         let _ = fs::remove_file(&temporary_path);
     }
     write_result
+}
+
+fn prepare_private_directory(path: &Path) -> Result<(), StoreError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => {
+            return Err(StoreError::UnsafeStoragePath {
+                path: path.to_owned(),
+                reason: "expected a real directory, not a symlink or non-directory".to_owned(),
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(path)?;
+            let metadata = fs::symlink_metadata(path)?;
+            if !metadata.file_type().is_dir() {
+                return Err(StoreError::UnsafeStoragePath {
+                    path: path.to_owned(),
+                    reason: "created path is not a real directory".to_owned(),
+                });
+            }
+        }
+        Err(error) => return Err(StoreError::Io(error)),
+    }
+    enforce_private_directory_permissions(path)
+}
+
+fn optional_regular_file_exists(path: &Path) -> Result<bool, StoreError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err(StoreError::UnsafeStoragePath {
+            path: path.to_owned(),
+            reason: "expected a regular file, not a symlink or special entry".to_owned(),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(StoreError::Io(error)),
+    }
+}
+
+fn require_regular_file(path: &Path) -> Result<(), StoreError> {
+    if optional_regular_file_exists(path)? {
+        Ok(())
+    } else {
+        Err(StoreError::UnsafeStoragePath {
+            path: path.to_owned(),
+            reason: "required regular file is missing".to_owned(),
+        })
+    }
+}
+
+#[cfg(unix)]
+fn enforce_private_directory_permissions(path: &Path) -> Result<(), StoreError> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn enforce_private_directory_permissions(_path: &Path) -> Result<(), StoreError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn enforce_private_file_permissions(path: &Path) -> Result<(), StoreError> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn enforce_private_file_permissions(_path: &Path) -> Result<(), StoreError> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -2520,8 +3801,131 @@ mod tests {
         }
     }
 
+    fn manifest(segment_id: &str, family: SegmentFamily, sealed_at_ms: i64) -> SegmentManifest {
+        let created_at_ms = sealed_at_ms - 10;
+        SegmentManifest {
+            segment_id: segment_id.to_owned(),
+            family,
+            relative_path: format!(
+                "{}_{created_at_ms}_{segment_id}_{sealed_at_ms}.segment",
+                family.as_str()
+            ),
+            record_count: 2,
+            uncompressed_bytes: 512,
+            stored_bytes: 512,
+            content_sha256: "a".repeat(64),
+            file_sha256: "a".repeat(64),
+            created_at_ms,
+            sealed_at_ms,
+            compression: None,
+        }
+    }
+
+    fn create_schema_v1_fixture(data_dir: &Path) -> Uuid {
+        fs::create_dir_all(data_dir).unwrap();
+        let database_path = data_dir.join(DATABASE_FILE_NAME);
+        let mut connection = Connection::open(&database_path).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .unwrap();
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        connection
+            .pragma_update(None, "synchronous", "FULL")
+            .unwrap();
+        let database_id = Uuid::new_v4();
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        transaction
+            .execute_batch(
+                "CREATE TABLE meta (
+                     key TEXT PRIMARY KEY NOT NULL,
+                     value TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+        transaction.execute_batch(SCHEMA_V1_SQL).unwrap();
+        transaction
+            .execute(
+                "INSERT INTO meta(key, value) VALUES ('schema_version', '1')",
+                [],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO meta(key, value) VALUES (?1, ?2)",
+                params![DATABASE_ID_META_KEY, database_id.to_string()],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO account_leases
+                 (account_id, owner_instance_id, owner_boot_id, fence_epoch,
+                  lease_until_ms, status, last_observed_at_ms, updated_at_ms)
+                 VALUES ('fixture-account', 'fixture-instance', 'fixture-boot',
+                         7, 9000, 'active', 100, 100)",
+                [],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO inbound_receipts
+                 (account_id, stream, stream_generation, event_id,
+                  page_checkpoint, payload, payload_hash, status, fence_epoch,
+                  received_at_ms, processed_at_ms, processed_fence_epoch)
+                 VALUES ('fixture-account', 'messages', 3, 'event-1',
+                         44, X'010203', 'payload-sha', 'pending', 7, 101, NULL, NULL)",
+                [],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO inbound_checkpoints
+                 (account_id, stream, stream_generation, checkpoint,
+                  fence_epoch, updated_at_ms)
+                 VALUES ('fixture-account', 'messages', 3, 44, 7, 101)",
+                [],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO outbound_batches
+                 (id, account_id, trigger_id, response_id, status,
+                  created_fence_epoch, last_fence_epoch, created_at_ms, updated_at_ms)
+                 VALUES ('batch-1', 'fixture-account', 'trigger-1', 'response-1',
+                         'sending', 7, 7, 102, 103)",
+                [],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO outbound_segments
+                 (id, client_message_id, batch_id, ordinal, kind, payload, status,
+                  attempt_count, platform_message_id, last_error,
+                  last_fence_epoch, created_at_ms, updated_at_ms)
+                 VALUES ('segment-1', 'client-message-1', 'batch-1', 0, 'text',
+                         'fixture reply', 'sending', 1, NULL, NULL, 7, 102, 103)",
+                [],
+            )
+            .unwrap();
+        transaction
+            .pragma_update(None, "user_version", SCHEMA_V1)
+            .unwrap();
+        transaction.commit().unwrap();
+        drop(connection);
+        write_initialized_marker(
+            data_dir,
+            &data_dir.join(INITIALIZED_MARKER_FILE_NAME),
+            database_id,
+        )
+        .unwrap();
+        database_id
+    }
+
     #[test]
-    fn open_configures_full_durability_and_validates_schema_v1() {
+    fn open_configures_full_durability_and_validates_schema_v2() {
         let (_directory, store) = store();
         assert_eq!(store.schema_version().unwrap(), CORE_SCHEMA_VERSION);
         assert!(store.database_path().ends_with(DATABASE_FILE_NAME));
@@ -2552,6 +3956,17 @@ mod tests {
         assert_eq!(synchronous, 2);
         assert_eq!(busy_timeout, 5_000);
         assert_eq!(pending_index, 1);
+        assert!(table_exists(&connection, "segment_manifests").unwrap());
+        assert!(table_exists(&connection, "storage_cleanup_journal").unwrap());
+        assert!(table_exists(&connection, "schema_migrations").unwrap());
+        assert_eq!(load_pre_migration_backup(&connection).unwrap(), None);
+        assert_eq!(
+            inspect_database_integrity(&connection).unwrap(),
+            DatabaseIntegrity {
+                quick_check: "ok".to_owned(),
+                foreign_key_violations: 0,
+            }
+        );
 
         let foreign_key_failure = connection.execute(
             "INSERT INTO outbound_segments
@@ -2562,6 +3977,359 @@ mod tests {
             [],
         );
         assert!(foreign_key_failure.is_err());
+    }
+
+    #[test]
+    fn schema_v1_fixture_is_backed_up_and_migrated_once_without_changing_identity_or_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_id = create_schema_v1_fixture(directory.path());
+
+        let store = CoreStore::open(directory.path()).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_V2);
+        let backup = store
+            .pre_migration_backup()
+            .unwrap()
+            .expect("migration backup metadata");
+        assert_eq!(backup.from_version, SCHEMA_V1);
+        assert_eq!(backup.to_version, SCHEMA_V2);
+        assert_eq!(backup.database_id, database_id);
+        assert!(backup.integrity.is_valid());
+        assert!(backup.bytes > 0);
+
+        let backup_path = directory.path().join(&backup.relative_path);
+        assert!(backup_path.exists());
+        let backup_connection =
+            Connection::open_with_flags(&backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        assert_eq!(read_schema_version(&backup_connection).unwrap(), SCHEMA_V1);
+        assert_eq!(read_database_id(&backup_connection).unwrap(), database_id);
+        validate_schema_v1(&backup_connection, SCHEMA_V1).unwrap();
+        assert!(!table_exists(&backup_connection, "segment_manifests").unwrap());
+        for table in [
+            "account_leases",
+            "inbound_receipts",
+            "inbound_checkpoints",
+            "outbound_batches",
+            "outbound_segments",
+        ] {
+            let count: u32 = backup_connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 1, "backup row count for {table}");
+        }
+        drop(backup_connection);
+
+        {
+            let connection = store.lock_connection().unwrap();
+            assert_eq!(read_database_id(&connection).unwrap(), database_id);
+            for table in [
+                "account_leases",
+                "inbound_receipts",
+                "inbound_checkpoints",
+                "outbound_batches",
+                "outbound_segments",
+            ] {
+                let count: u32 = connection
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(count, 1, "migrated row count for {table}");
+            }
+        }
+        drop(store);
+
+        let reopened = CoreStore::open(directory.path()).unwrap();
+        assert_eq!(
+            reopened.pre_migration_backup().unwrap(),
+            Some(backup.clone())
+        );
+        let backup_files = fs::read_dir(directory.path().join(BACKUP_DIRECTORY_NAME))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "sqlite3"))
+            .count();
+        assert_eq!(backup_files, 1);
+    }
+
+    #[test]
+    fn online_backup_includes_rows_that_exist_only_in_the_live_wal() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_id = create_schema_v1_fixture(directory.path());
+        let database_path = directory.path().join(DATABASE_FILE_NAME);
+        let wal_writer = Connection::open(&database_path).unwrap();
+        wal_writer
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        wal_writer
+            .pragma_update(None, "wal_autocheckpoint", 0)
+            .unwrap();
+        wal_writer
+            .execute(
+                "INSERT INTO account_leases
+                 (account_id, owner_instance_id, owner_boot_id, fence_epoch,
+                  lease_until_ms, status, last_observed_at_ms, updated_at_ms)
+                 VALUES ('wal-only', 'fixture-instance', 'fixture-boot',
+                         8, 9000, 'active', 110, 110)",
+                [],
+            )
+            .unwrap();
+        let wal_path = PathBuf::from(format!("{}-wal", database_path.display()));
+        assert!(fs::metadata(&wal_path).unwrap().len() > 0);
+
+        let main_file_only = directory.path().join("main-file-only.sqlite3");
+        fs::copy(&database_path, &main_file_only).unwrap();
+        let stale =
+            Connection::open_with_flags(&main_file_only, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let stale_count: u32 = stale
+            .query_row(
+                "SELECT COUNT(*) FROM account_leases WHERE account_id = 'wal-only'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_count, 0, "fixture row must not be in the main file");
+        drop(stale);
+
+        let store = CoreStore::open(directory.path()).unwrap();
+        let backup = store.pre_migration_backup().unwrap().unwrap();
+        assert_eq!(backup.database_id, database_id);
+        let backup_connection = Connection::open_with_flags(
+            directory.path().join(backup.relative_path),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let backup_count: u32 = backup_connection
+            .query_row(
+                "SELECT COUNT(*) FROM account_leases WHERE account_id = 'wal-only'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(backup_count, 1, "online backup must include live WAL rows");
+        drop(backup_connection);
+        drop(store);
+        drop(wal_writer);
+    }
+
+    #[test]
+    fn valid_backup_is_refreshed_when_v1_source_changes_after_a_failed_attempt() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_id = create_schema_v1_fixture(directory.path());
+        let database_path = directory.path().join(DATABASE_FILE_NAME);
+        let source = Connection::open(&database_path).unwrap();
+
+        let first = create_fresh_v1_backup(&source, directory.path(), database_id).unwrap();
+        let first_backup = Connection::open_with_flags(
+            directory.path().join(&first.relative_path),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let first_count: u32 = first_backup
+            .query_row(
+                "SELECT COUNT(*) FROM account_leases WHERE account_id = 'after-first-backup'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(first_count, 0);
+        drop(first_backup);
+
+        source
+            .execute(
+                "INSERT INTO account_leases
+                 (account_id, owner_instance_id, owner_boot_id, fence_epoch,
+                  lease_until_ms, status, last_observed_at_ms, updated_at_ms)
+                 VALUES ('after-first-backup', 'fixture-instance', 'fixture-boot',
+                         9, 9000, 'active', 120, 120)",
+                [],
+            )
+            .unwrap();
+
+        let refreshed = create_fresh_v1_backup(&source, directory.path(), database_id).unwrap();
+        assert_eq!(refreshed.relative_path, first.relative_path);
+        let refreshed_backup = Connection::open_with_flags(
+            directory.path().join(&refreshed.relative_path),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let refreshed_count: u32 = refreshed_backup
+            .query_row(
+                "SELECT COUNT(*) FROM account_leases WHERE account_id = 'after-first-backup'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            refreshed_count, 1,
+            "retry backup must include newer v1 rows"
+        );
+    }
+
+    #[test]
+    fn refresh_failure_keeps_the_previous_verified_v1_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_id = create_schema_v1_fixture(directory.path());
+        let database_path = directory.path().join(DATABASE_FILE_NAME);
+        let source = Connection::open(&database_path).unwrap();
+        let first = create_fresh_v1_backup(&source, directory.path(), database_id).unwrap();
+        let final_path = directory.path().join(&first.relative_path);
+        let previous_bytes = fs::read(&final_path).unwrap();
+
+        let backup_file_name = final_path.file_name().unwrap().to_str().unwrap();
+        let blocked_temporary_path = directory
+            .path()
+            .join(BACKUP_DIRECTORY_NAME)
+            .join(format!(".{backup_file_name}.tmp"));
+        fs::create_dir(&blocked_temporary_path).unwrap();
+
+        assert!(matches!(
+            create_fresh_v1_backup(&source, directory.path(), database_id),
+            Err(StoreError::UnsafeStoragePath { .. })
+        ));
+        assert_eq!(
+            fs::read(&final_path).unwrap(),
+            previous_bytes,
+            "a failed refresh must not remove or replace the verified rollback point"
+        );
+        verify_v1_backup(&final_path, first.relative_path, database_id).unwrap();
+    }
+
+    #[test]
+    fn failed_schema_migration_keeps_a_verified_v1_backup_and_v1_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_id = create_schema_v1_fixture(directory.path());
+        let database_path = directory.path().join(DATABASE_FILE_NAME);
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute("CREATE TABLE segment_manifests (collision INTEGER)", [])
+            .unwrap();
+        drop(connection);
+
+        assert!(CoreStore::open(directory.path()).is_err());
+        let source =
+            Connection::open_with_flags(&database_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        assert_eq!(read_schema_version(&source).unwrap(), SCHEMA_V1);
+        assert_eq!(read_database_id(&source).unwrap(), database_id);
+        assert!(!table_exists(&source, "schema_migrations").unwrap());
+        drop(source);
+
+        let backup_name = format!("core-v{SCHEMA_V1}-to-v{SCHEMA_V2}-{database_id}.sqlite3");
+        let relative_path = PathBuf::from(BACKUP_DIRECTORY_NAME).join(backup_name);
+        let backup = verify_v1_backup(
+            &directory.path().join(&relative_path),
+            relative_path,
+            database_id,
+        )
+        .unwrap();
+        assert!(backup.integrity.is_valid());
+        assert_eq!(backup.from_version, SCHEMA_V1);
+    }
+
+    #[test]
+    fn invalid_existing_migration_backup_fails_closed_and_leaves_source_at_v1() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_id = create_schema_v1_fixture(directory.path());
+        let backup_directory = directory.path().join(BACKUP_DIRECTORY_NAME);
+        fs::create_dir_all(&backup_directory).unwrap();
+        let backup_path = backup_directory.join(format!(
+            "core-v{SCHEMA_V1}-to-v{SCHEMA_V2}-{database_id}.sqlite3"
+        ));
+        fs::write(&backup_path, b"not a sqlite database").unwrap();
+
+        assert!(CoreStore::open(directory.path()).is_err());
+        let source = Connection::open_with_flags(
+            directory.path().join(DATABASE_FILE_NAME),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(read_schema_version(&source).unwrap(), SCHEMA_V1);
+        assert_eq!(read_database_id(&source).unwrap(), database_id);
+        assert!(!table_exists(&source, "segment_manifests").unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn storage_paths_are_private_and_direct_symlinks_fail_closed() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = CoreStore::open(directory.path()).unwrap();
+        for path in [
+            store.database_path().to_owned(),
+            directory.path().join(INITIALIZED_MARKER_FILE_NAME),
+        ] {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert_eq!(
+            fs::metadata(directory.path()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        drop(store);
+
+        let migration_dir = tempfile::tempdir().unwrap();
+        create_schema_v1_fixture(migration_dir.path());
+        let migrated = CoreStore::open(migration_dir.path()).unwrap();
+        let backup = migrated.pre_migration_backup().unwrap().unwrap();
+        let backup_dir = migration_dir.path().join(BACKUP_DIRECTORY_NAME);
+        assert_eq!(
+            fs::metadata(&backup_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(migration_dir.path().join(backup.relative_path))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        drop(migrated);
+
+        let symlink_parent = tempfile::tempdir().unwrap();
+        let real_dir = symlink_parent.path().join("real");
+        fs::create_dir(&real_dir).unwrap();
+        let linked_dir = symlink_parent.path().join("linked");
+        symlink(&real_dir, &linked_dir).unwrap();
+        assert!(matches!(
+            CoreStore::open(&linked_dir),
+            Err(StoreError::UnsafeStoragePath { .. })
+        ));
+
+        let database_link_dir = tempfile::tempdir().unwrap();
+        let link_target = database_link_dir.path().join("target.sqlite3");
+        fs::write(&link_target, b"not opened").unwrap();
+        symlink(
+            &link_target,
+            database_link_dir.path().join(DATABASE_FILE_NAME),
+        )
+        .unwrap();
+        assert!(matches!(
+            CoreStore::open(database_link_dir.path()),
+            Err(StoreError::UnsafeStoragePath { .. })
+        ));
+
+        let backup_link_dir = tempfile::tempdir().unwrap();
+        let database_id = create_schema_v1_fixture(backup_link_dir.path());
+        let backup_dir = backup_link_dir.path().join(BACKUP_DIRECTORY_NAME);
+        fs::create_dir(&backup_dir).unwrap();
+        let target = backup_link_dir.path().join("foreign.sqlite3");
+        fs::write(&target, b"not opened").unwrap();
+        symlink(
+            target,
+            backup_dir.join(format!(
+                "core-v{SCHEMA_V1}-to-v{SCHEMA_V2}-{database_id}.sqlite3"
+            )),
+        )
+        .unwrap();
+        assert!(matches!(
+            CoreStore::open(backup_link_dir.path()),
+            Err(StoreError::UnsafeStoragePath { .. })
+        ));
     }
 
     #[test]
@@ -2712,6 +4480,40 @@ mod tests {
             CoreStore::open(missing_table_dir.path()),
             Err(StoreError::SchemaInvariant(_))
         ));
+
+        let future_version_dir = tempfile::tempdir().unwrap();
+        let store = CoreStore::open(future_version_dir.path()).unwrap();
+        let database_path = store.database_path().to_owned();
+        drop(store);
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute(
+                "UPDATE meta SET value = '999' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        assert!(matches!(
+            CoreStore::open(future_version_dir.path()),
+            Err(StoreError::UnsupportedSchema {
+                found: 999,
+                supported: SCHEMA_V2,
+            })
+        ));
+
+        let drifted_v2_dir = tempfile::tempdir().unwrap();
+        let store = CoreStore::open(drifted_v2_dir.path()).unwrap();
+        let database_path = store.database_path().to_owned();
+        drop(store);
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute("ALTER TABLE segment_manifests ADD COLUMN surprise TEXT", [])
+            .unwrap();
+        drop(connection);
+        assert!(matches!(
+            CoreStore::open(drifted_v2_dir.path()),
+            Err(StoreError::SchemaInvariant(_))
+        ));
     }
 
     fn remove_sqlite_files(database_path: &Path) {
@@ -2724,6 +4526,124 @@ mod tests {
                 fs::remove_file(path).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn segment_manifest_commit_is_strict_idempotent_and_filterable() {
+        const CHAT_ID: &str = "00000000-0000-4000-8000-000000000001";
+        const DEBUG_ID: &str = "00000000-0000-4000-8000-000000000002";
+        const CONFLICT_ID: &str = "00000000-0000-4000-8000-000000000003";
+        const INVALID_ID: &str = "00000000-0000-4000-8000-000000000004";
+        let (_directory, store) = store();
+        assert_eq!(store.storage_cleanup_state().unwrap(), None);
+        store
+            .record_storage_cleanup_state(150, DiskPressure::High)
+            .unwrap();
+        assert_eq!(
+            store.storage_cleanup_state().unwrap(),
+            Some(StorageCleanupState {
+                last_cleanup_at_ms: 150,
+                last_pressure: DiskPressure::High,
+            })
+        );
+        let chat = manifest(CHAT_ID, SegmentFamily::Chat, 200);
+        let debug = manifest(DEBUG_ID, SegmentFamily::Debug, 300);
+
+        store.commit_segment_manifest(&chat).unwrap();
+        store.commit_segment_manifest(&chat).unwrap();
+        SegmentCatalog::commit_manifest(&store, &debug).unwrap();
+        assert_eq!(store.segment_manifest(CHAT_ID).unwrap(), Some(chat.clone()));
+        assert_eq!(
+            store
+                .segment_manifests(Some(SegmentFamily::Chat), Some(250))
+                .unwrap(),
+            vec![chat.clone()]
+        );
+        assert_eq!(
+            SegmentCatalog::list_manifests(&store).unwrap(),
+            vec![chat.clone(), debug.clone()]
+        );
+
+        let mut conflicting_id = chat.clone();
+        conflicting_id.record_count = 3;
+        assert!(matches!(
+            store.commit_segment_manifest(&conflicting_id),
+            Err(StoreError::IdempotencyConflict {
+                entity: "segment manifest",
+                ..
+            })
+        ));
+        let mut conflicting_path = chat.clone();
+        conflicting_path.segment_id = CONFLICT_ID.to_owned();
+        assert!(matches!(
+            store.commit_segment_manifest(&conflicting_path),
+            Err(StoreError::InvalidSegmentManifest(_))
+        ));
+
+        for bad_path in ["/absolute.segment", "../escape.segment", "segments/../x"] {
+            let mut invalid = manifest(INVALID_ID, SegmentFamily::Audit, 400);
+            invalid.relative_path = bad_path.to_owned();
+            assert!(matches!(
+                store.commit_segment_manifest(&invalid),
+                Err(StoreError::InvalidSegmentManifest(_))
+            ));
+        }
+        let mut invalid_digest = manifest(INVALID_ID, SegmentFamily::Audit, 400);
+        invalid_digest.content_sha256 = "A".repeat(64);
+        assert!(matches!(
+            store.commit_segment_manifest(&invalid_digest),
+            Err(StoreError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn deletion_journal_survives_reopen_and_completion_is_atomic_and_idempotent() {
+        const DELETE_ID: &str = "00000000-0000-4000-8000-000000000011";
+        const KEEP_ID: &str = "00000000-0000-4000-8000-000000000012";
+        let (directory, store) = store();
+        let first = manifest(DELETE_ID, SegmentFamily::Debug, 500);
+        let without_intent = manifest(KEEP_ID, SegmentFamily::Chat, 510);
+        store.commit_segment_manifest(&first).unwrap();
+        store.commit_segment_manifest(&without_intent).unwrap();
+        store
+            .mark_segment_deleting_at(&first.segment_id, 600)
+            .unwrap();
+        store
+            .mark_segment_deleting_at(&first.segment_id, 700)
+            .unwrap();
+        assert_eq!(
+            store.pending_segment_deletions().unwrap(),
+            vec![PendingSegmentDeletion {
+                segment_id: first.segment_id.clone(),
+            }]
+        );
+        assert_eq!(
+            store.segment_manifest(&first.segment_id).unwrap(),
+            Some(first.clone())
+        );
+        drop(store);
+
+        let reopened = CoreStore::open(directory.path()).unwrap();
+        assert_eq!(
+            SegmentCatalog::list_pending_deletions(&reopened).unwrap(),
+            vec![PendingSegmentDeletion {
+                segment_id: first.segment_id.clone(),
+            }]
+        );
+        assert!(matches!(
+            reopened.complete_segment_deletion(&without_intent.segment_id),
+            Err(StoreError::InvalidTransition { .. })
+        ));
+        SegmentCatalog::finish_delete(&reopened, &first.segment_id).unwrap();
+        SegmentCatalog::finish_delete(&reopened, &first.segment_id).unwrap();
+        assert_eq!(reopened.segment_manifest(&first.segment_id).unwrap(), None);
+        assert!(reopened.pending_segment_deletions().unwrap().is_empty());
+        assert_eq!(
+            reopened
+                .segment_manifest(&without_intent.segment_id)
+                .unwrap(),
+            Some(without_intent)
+        );
     }
 
     #[test]

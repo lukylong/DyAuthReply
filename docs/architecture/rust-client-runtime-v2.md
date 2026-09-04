@@ -207,8 +207,23 @@ Rust 只实现纯 `prepare -> canned signer outputs -> finalize`，摘要绑定�
 `--verify-protocol` 在访问数据目录或监听端口前离线校验两份语料并退出；Health API v3 分别报告
 wire parity、HTTP-plan parity 和聚合结果，只有两者都通过才 ready。
 
+Storage 阶段已把 `core.sqlite3` 升为 schema v2。旧 schema v1 会先用 SQLite Online Backup
+生成按数据库 ID 固定命名的已校验快照；失败重试会校验并刷新同一路径，再保留原 ID 和全部正确性
+行完成迁移；旧快照会一直保留到新快照通过校验并完成平台安全的可恢复替换。Chat/Audit/Debug 使用独立的有界
+二进制滚动分段；v2 frame 同时保护长度、长度反码、正文 SHA-256 和尾部提交标记，启动只截断
+未提交的 active 尾，并拒绝把已提交长度损坏当成残尾。
+启动还会收编 rename 后尚未写 manifest 的 sealed 文件、续完删除 journal，并对 manifest/file 长度
+和 SHA-256 做 fail-closed 校验。内置流式 Zstandard codec 有解压输出上限，关闭新压缩后仍能读取
+旧 `.segment.zst`。默认
+Chat 30 天、Audit 30 天、Debug 3 天，同时受独立字节预算约束；这些只是待压测校准的初值。
+high/critical 水位会暂停后台工作并按 `debug -> chat -> audit` 有界回收，清理后重新采样磁盘，并以
+持久化滞回状态保持压力直到 low watermark；执行器会再次强制 family minimum。critical 只抑制
+可丢弃正文，正确性库仍可提交 receipt/outbox。Health API v4 暴露启动时的存储压力与恢复/清理计数。
+
 协议模式仍固定为 `shadow-disabled`。当前实现不会连接抖音、不会读取 Cookie 或现有客户端
 数据库、不会执行 A-Bogus/ECDSA/HMAC/ECDH/ree-key 算法、不会抢占账号租约、不会发送消息，
 也不会绑定现有生产端口。当前 HTTP plan 只验证签名输入和 canned 输出的组装，不覆盖真实 signer、
 证书网络获取、TLS/HTTP2 wire 行为、inbox 或 WebSocket；这些必须通过后续独立语料及集成门禁，
-不能由本阶段的离线测试推断为已完成。
+不能由本阶段的离线测试推断为已完成。当前 schema 仍未完成旧 Python 会话摘要、冷却/日限额、
+命令 ACK 和全量统计的业务迁移；这些必须在 Scheduler/API migration 子阶段补齐，不能因为滚动
+文件已经实现就删除旧数据库或 Python sender。

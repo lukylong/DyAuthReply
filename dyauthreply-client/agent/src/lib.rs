@@ -9,7 +9,8 @@ pub mod health;
 pub mod identity;
 pub mod protocol;
 pub mod state;
+pub mod storage;
 pub mod store;
 
-pub const CORE_SCHEMA_VERSION: u32 = 1;
+pub const CORE_SCHEMA_VERSION: u32 = 2;
 pub const PROTOCOL_MODE: &str = "shadow-disabled";

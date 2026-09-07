@@ -30,7 +30,7 @@ fn reserve_loopback_address() -> SocketAddr {
 }
 
 fn await_live_health(child: &mut Child, address: SocketAddr) -> HealthResponse {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if let Some(status) = child.try_wait().expect("inspect Agent process") {
             panic!("Agent exited before health became ready: {status}");

@@ -33,6 +33,7 @@ pub struct SendCredentials {
     pub ticket: String,
     pub ts_sign: String,
     pub fingerprint: String,
+    pub dtrait_header: String,
     pub ecdh_key: Option<[u8; 32]>,
 }
 
@@ -377,8 +378,14 @@ async fn signed_plan(
 ) -> Result<super::http_plan::RequestPlan, LiveSendError> {
     let body =
         encode_send_message_request(&operation.request).map_err(|_| LiveSendError::Payload)?;
-    let headers = headers_for_user_agent(&operation.request.user_agent);
     let credentials = &operation.credentials;
+    let mut headers = headers_for_user_agent(&operation.request.user_agent);
+    if !credentials.dtrait_header.is_empty() {
+        headers.push(OrderedHeader::new(
+            "x-tt-session-dtrait",
+            &credentials.dtrait_header,
+        ));
+    }
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| LiveSendError::Signing)?
@@ -510,6 +517,7 @@ mod tests {
                 ticket: "synthetic-ticket".to_owned(),
                 ts_sign: "synthetic-ts".to_owned(),
                 fingerprint: "verify_synthetic".to_owned(),
+                dtrait_header: String::new(),
                 ecdh_key: None,
             },
         };
@@ -689,6 +697,18 @@ mod tests {
         assert_eq!(value("user-agent"), user_agent);
         assert_eq!(value("sec-ch-ua-platform"), "\"macOS\"");
         assert!(value("sec-ch-ua").contains("v=\"152\""));
+    }
+
+    #[tokio::test]
+    async fn live_send_carries_path_bound_device_trait_header() {
+        let (_dir, _store, mut operation, _control) = setup();
+        operation.credentials.dtrait_header = "d0_captured_device_trait".to_owned();
+        let plan = signed_plan(&NativeSigner::new(1).unwrap(), &operation)
+            .await
+            .unwrap();
+        assert!(plan.headers().iter().any(|header| {
+            header.name == "x-tt-session-dtrait" && header.value == "d0_captured_device_trait"
+        }));
     }
     #[tokio::test]
     async fn automatic_transport_rejects_unguarded_batch_without_http() {

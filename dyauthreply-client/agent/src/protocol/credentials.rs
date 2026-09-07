@@ -103,7 +103,19 @@ fn stable_verify_fp(account: &str, session: &str, key: &str) -> String {
     format!("verify_{stamp}_{body}")
 }
 
-fn web_identity(cookies: &BTreeMap<String, String>, account: &str, key: &str) -> (String, String) {
+fn header_cookie(raw: &str, name: &str) -> Option<String> {
+    raw.split(';')
+        .filter_map(|part| part.trim().split_once('='))
+        .rfind(|(cookie, value)| *cookie == name && !value.is_empty())
+        .map(|(_, value)| value.to_owned())
+}
+
+fn web_identity(
+    cookies: &BTreeMap<String, String>,
+    headers: &BTreeMap<String, String>,
+    account: &str,
+    key: &str,
+) -> (String, String) {
     let session = cookies
         .get("sessionid")
         .or_else(|| cookies.get("sessionid_ss"))
@@ -116,8 +128,35 @@ fn web_identity(cookies: &BTreeMap<String, String>, account: &str, key: &str) ->
     let fingerprint = cookies
         .get("s_v_web_id")
         .cloned()
+        .or_else(|| {
+            ["www.douyin.com", "creator.douyin.com", "imapi.douyin.com"]
+                .into_iter()
+                .find_map(|host| {
+                    headers
+                        .get(host)
+                        .and_then(|raw| header_cookie(raw, "s_v_web_id"))
+                })
+        })
         .unwrap_or_else(|| stable_verify_fp(account, session, key));
     (token, fingerprint)
+}
+
+fn bind_fingerprint_cookie(
+    cookies: &mut BTreeMap<String, String>,
+    headers: &mut BTreeMap<String, String>,
+    fingerprint: &str,
+) {
+    cookies
+        .entry("s_v_web_id".to_owned())
+        .or_insert_with(|| fingerprint.to_owned());
+    for host in ["www.douyin.com", "imapi.douyin.com"] {
+        if let Some(raw) = headers.get_mut(host) {
+            if header_cookie(raw, "s_v_web_id").is_none() {
+                raw.push_str("; s_v_web_id=");
+                raw.push_str(fingerprint);
+            }
+        }
+    }
 }
 
 fn string(value: &Value, field: &str) -> String {
@@ -427,7 +466,13 @@ impl AccountCredentials {
         let ticket = &state["_bd_ticket"];
         let dtrait = &state["_dtrait"];
         let private_key = string(ticket, "private_key");
-        let (token, web_fingerprint) = web_identity(&cookies, account_id.as_str(), &private_key);
+        let (token, web_fingerprint) =
+            web_identity(&cookies, &headers, account_id.as_str(), &private_key);
+        // verifyFp/fp and the Cookie must describe the same browser identity.
+        // Chromium keeps this host-scoped and quick-auth can observe it first
+        // on creator.douyin.com, so bind that captured value into the www/imapi
+        // request snapshots instead of signing a query with a cookie-absent ID.
+        bind_fingerprint_cookie(&mut cookies, &mut headers, &web_fingerprint);
         let result = Self {
             account_id,
             expected_sec_uid: input.expected_sec_uid,
@@ -532,12 +577,14 @@ mod tests {
         assert_eq!(c.cookie("www.douyin.com", "sessionid"), "www");
         assert_eq!(c.cookie("imapi.douyin.com", "sessionid"), "im");
         assert_eq!(c.query_ms_token.len(), 126);
-        assert_eq!(c.cookie_header("www.douyin.com"), "sessionid=www; exact=1");
+        assert!(c
+            .cookie_header("www.douyin.com")
+            .starts_with("sessionid=www; exact=1; s_v_web_id=verify_"));
         assert!(c.web_fingerprint().starts_with("verify_"));
         assert!(!c.has_signing_material());
     }
     #[test]
-    fn missing_web_identity_fallbacks_are_stable_and_preserve_cookie_bytes() {
+    fn missing_web_identity_fallbacks_are_stable_and_bind_query_to_cookie() {
         let bytes=br#"{"account_id":"a","user_agent":"Chrome/151.0","storage_state":{"cookies":[{"name":"sessionid","value":"stable"}],"_cookie_headers":{"www.douyin.com":"sessionid=stable; exact=1"},"_bd_ticket":{"private_key":"1","ticket":"ticket","ts_sign":"ts.2.test","client_cert":"pub.test"}}}"#;
         let first = AccountCredentials::import_json(bytes).unwrap();
         let second = AccountCredentials::import_json(bytes).unwrap();
@@ -546,8 +593,26 @@ mod tests {
         assert_eq!(first.web_fingerprint(), second.web_fingerprint());
         assert!(first.web_fingerprint().starts_with("verify_"));
         assert_eq!(
-            first.cookie_header("www.douyin.com"),
-            "sessionid=stable; exact=1"
+            first.cookie("www.douyin.com", "s_v_web_id"),
+            first.web_fingerprint()
+        );
+        assert!(first
+            .cookie_header("www.douyin.com")
+            .starts_with("sessionid=stable; exact=1; s_v_web_id=verify_"));
+    }
+
+    #[test]
+    fn creator_captured_fingerprint_is_reused_for_www_and_imapi() {
+        let bytes=br#"{"account_id":"a","user_agent":"Chrome/152.0","storage_state":{"cookies":[{"name":"sessionid","value":"stable"}],"_cookie_headers":{"www.douyin.com":"sessionid=stable","imapi.douyin.com":"sessionid=stable","creator.douyin.com":"sessionid=stable; s_v_web_id=verify_creator_capture"},"_bd_ticket":{}}}"#;
+        let credentials = AccountCredentials::import_json(bytes).unwrap();
+        assert_eq!(credentials.web_fingerprint(), "verify_creator_capture");
+        assert_eq!(
+            credentials.cookie("www.douyin.com", "s_v_web_id"),
+            "verify_creator_capture"
+        );
+        assert_eq!(
+            credentials.cookie("imapi.douyin.com", "s_v_web_id"),
+            "verify_creator_capture"
         );
     }
 

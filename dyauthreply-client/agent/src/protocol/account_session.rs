@@ -3,7 +3,9 @@
 use super::{
     credentials::AccountCredentials,
     dtrait::DtraitSession,
-    http_plan::{percent_encode_rfc3986, OrderedHeader, TicketGuardMode, TicketGuardSigningInput},
+    http_plan::{
+        percent_encode_rfc3986, OrderedHeader, TicketGuardMode, TicketGuardSigningInput, SEND_PATH,
+    },
     inbox::{decode_get_by_user, encode_get_by_user, InboxPage},
     live_http::{HttpResult, ProtocolHttpClient, SessionEndpoint},
     native_signer::{derive_ecdh_key, ree_public_key, ticket_client_data, NativeSigner},
@@ -101,6 +103,30 @@ impl NativeAccountSession {
                 step: "send_credentials",
             });
         }
+        let dtrait_header = if self.credentials.dtrait_blob.is_empty() {
+            if self.credentials.dtrait_path == SEND_PATH {
+                if self.credentials.dtrait_header.is_empty() {
+                    return Err(AccountRequestError::Signing {
+                        step: "send_dtrait",
+                    });
+                }
+                self.credentials.dtrait_header.clone()
+            } else {
+                return Err(AccountRequestError::Signing {
+                    step: "send_dtrait",
+                });
+            }
+        } else {
+            self.dtrait
+                .as_ref()
+                .ok_or(AccountRequestError::Signing {
+                    step: "send_dtrait",
+                })?
+                .header(SEND_PATH, &self.credentials.dtrait_blob, unix_seconds()?)
+                .map_err(|_| AccountRequestError::Signing {
+                    step: "send_dtrait",
+                })?
+        };
         Ok(super::live_sender::SendCredentials {
             account_id: self.credentials.account_id.to_string(),
             canonical_sec_uid: self.credentials.expected_sec_uid.clone(),
@@ -112,6 +138,7 @@ impl NativeAccountSession {
             ticket: self.credentials.ticket.clone(),
             ts_sign: self.credentials.ts_sign.clone(),
             fingerprint,
+            dtrait_header,
             ecdh_key: self.ecdh,
         })
     }

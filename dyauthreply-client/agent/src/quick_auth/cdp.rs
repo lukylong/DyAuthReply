@@ -362,7 +362,11 @@ fn build_candidate(
     let scoped = [&www_header, &creator_header, &imapi_header]
         .iter()
         .all(|value| !value.is_empty());
-    let dtrait = !dtrait_blob.is_empty() || !captured.dtrait_header.is_empty();
+    // A whole dtrait header is encrypted for one path and timestamp. Accepting
+    // a QR/check header as send-ready caused message/send to be rejected as
+    // risk-controlled. Require the captured trait blob so native requests can
+    // rebuild the header for their current path.
+    let dtrait = !dtrait_blob.is_empty();
     let identity = !sec_uid.is_empty() && !nickname.is_empty();
     let completeness = Completeness::new([
         true,
@@ -548,6 +552,30 @@ mod tests {
         assert!(candidate.bundle.starts_with("DYCRED1."));
         drop(client);
         task.await.unwrap();
+    }
+
+    #[test]
+    fn unrelated_static_dtrait_header_is_not_send_ready() {
+        let storage = json!({"cookies":[
+            {"name":"sessionid","value":"session-one","domain":".douyin.com"},
+            {"name":"bd_ticket_guard_server_data","value":"server","domain":".douyin.com"}
+        ]});
+        let scoped = json!({"cookies":[{"name":"sessionid","value":"session-one"}]});
+        let page = json!({
+            "keys":"{\"ec_privateKey\":\"private\"}",
+            "ua":"Chrome/152.0",
+            "account":{"sec_uid":"scope","nickname":"name"}
+        });
+        let captured = NetworkCapture {
+            server_data: "server".to_owned(),
+            dtrait_header: "d0_qr_only".to_owned(),
+            dtrait_path: "/passport/web/check_qrconnect/".to_owned(),
+            request_urls: HashMap::new(),
+        };
+        let result =
+            build_candidate(&storage, &scoped, &scoped, &scoped, &page, &captured).unwrap();
+        assert!(!result.completeness.ready());
+        assert!(result.candidate.is_none());
     }
 
     #[test]

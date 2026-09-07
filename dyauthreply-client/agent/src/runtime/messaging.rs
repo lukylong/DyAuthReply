@@ -20,6 +20,7 @@ use crate::{
     store::{CoreStore, OutboundBatch, OutboundSegmentDraft, SegmentStatus, SegmentTransition},
 };
 use anyhow::{Context, Result};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -1550,6 +1551,13 @@ impl ManualService {
             u64::try_from(grant.token.fence_epoch)? == work.lease_epoch,
             "ownership changed before send"
         );
+        let mut rng = rand::thread_rng();
+        let sequence_id = rng.gen_range(10_000..=11_000);
+        let stime = format!(
+            "{}.{:05}",
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
+            rng.gen_range(0..100_000_u32)
+        );
         let operation = SendOperation {
             lease: grant.token,
             lease_deadline: grant.deadline,
@@ -1565,11 +1573,8 @@ impl ManualService {
                 text: String::new(),
                 user_agent: session.credentials.user_agent.clone(),
                 client_msg_id: String::new(),
-                sequence_id: 10001,
-                stime: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)?
-                    .as_millis()
-                    .to_string(),
+                sequence_id,
+                stime,
                 message_type: 7,
                 identity_security_token: identity.token,
                 identity_security_device_id: identity.device_id,

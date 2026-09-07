@@ -244,12 +244,19 @@ fn append_map_entry(
 
 pub(super) fn common_headers(user_agent: &str) -> BTreeMap<String, String> {
     let browser_version = user_agent.replacen("Mozilla/", "", 1);
+    let browser_platform = if user_agent.contains("Macintosh") {
+        "MacIntel"
+    } else if user_agent.contains("Linux") && !user_agent.contains("Android") {
+        "Linux x86_64"
+    } else {
+        "Win32"
+    };
     BTreeMap::from([
         ("app_name".to_owned(), DEVICE_PLATFORM.to_owned()),
         ("browser_language".to_owned(), "zh-CN".to_owned()),
         ("browser_name".to_owned(), "Mozilla".to_owned()),
         ("browser_online".to_owned(), "true".to_owned()),
-        ("browser_platform".to_owned(), "Win32".to_owned()),
+        ("browser_platform".to_owned(), browser_platform.to_owned()),
         ("browser_version".to_owned(), browser_version),
         ("cookie_enabled".to_owned(), "true".to_owned()),
         ("deviceId".to_owned(), "0".to_owned()),
@@ -508,5 +515,19 @@ mod tests {
         let first = encode_send_message_request(&input).expect("input must encode");
         let second = encode_send_message_request(&input).expect("input must encode");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn protobuf_browser_platform_matches_imported_user_agent() {
+        let headers =
+            common_headers("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/152.0.0.0");
+        assert_eq!(
+            headers.get("browser_platform").map(String::as_str),
+            Some("MacIntel")
+        );
+        assert_eq!(
+            headers.get("browser_name").map(String::as_str),
+            Some("Mozilla")
+        );
     }
 }

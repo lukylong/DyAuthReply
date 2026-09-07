@@ -79,7 +79,7 @@ fn private_key(value: &str) -> Result<SecretKey, SigningError> {
     }
     let padded = format!("{value:0>64}");
     let mut bytes = [0_u8; 32];
-    for (i, pair) in padded.as_bytes().chunks_exact(2).enumerate() {
+    for (i, pair) in padded.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let pair = std::str::from_utf8(pair).map_err(|_| SigningError::InvalidPrivateKey)?;
         bytes[i] = u8::from_str_radix(pair, 16).map_err(|_| SigningError::InvalidPrivateKey)?;
     }

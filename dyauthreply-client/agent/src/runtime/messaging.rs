@@ -606,7 +606,7 @@ impl ManualService {
         count: u8,
     ) -> Result<crate::protocol::WorksPage> {
         const CACHE_TTL: Duration = Duration::from_secs(60);
-        const STALE_TTL: Duration = Duration::from_secs(10 * 60);
+        const STALE_TTL: Duration = Duration::from_secs(600);
         let slot = self.inner.accounts.get(id).context("account not loaded")?;
         let key = format!("{cursor}:{count}");
         if let Some(page) = {

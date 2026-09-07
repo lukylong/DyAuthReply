@@ -197,8 +197,7 @@ fn valid_evidence(item: &SentReceiptEvidence, own: &str, now: i64) -> bool {
         && item
             .platform_message_id
             .parse::<u64>()
-            .ok()
-            .is_some_and(|id| id != 0)
+            .is_ok_and(|id| id != 0)
 }
 
 fn is_fresh_current_fence(

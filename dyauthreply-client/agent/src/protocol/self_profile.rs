@@ -239,7 +239,7 @@ impl NativeAccountSession {
             .get("user_uid")
             .or_else(|| payload.get("uid"))
             .and_then(identifier)
-            .filter(|s| s.parse::<u64>().ok().is_some_and(|n| n > 0))
+            .filter(|s| s.parse::<u64>().is_ok_and(|n| n > 0))
             .ok_or(AccountRequestError::Decode { step: STEP })?;
         if let Some(profile) = if self.credentials.expected_sec_uid.is_empty() {
             None

@@ -158,9 +158,7 @@ pub fn plan_cleanup_with_previous(
                     break;
                 }
                 let age_ms = now_ms.saturating_sub(manifest.sealed_at_ms);
-                let expired = u64::try_from(age_ms)
-                    .map(|age| age >= policy.retention_age_ms)
-                    .unwrap_or(false);
+                let expired = u64::try_from(age_ms).is_ok_and(|age| age >= policy.retention_age_ms);
                 if expired {
                     if deletions.len() == limit {
                         deletion_limit_reached = true;
@@ -248,9 +246,7 @@ pub fn plan_cleanup_with_previous(
                     break;
                 }
                 let age_ms = now_ms.saturating_sub(manifest.sealed_at_ms);
-                let expired = u64::try_from(age_ms)
-                    .map(|age| age >= policy.retention_age_ms)
-                    .unwrap_or(false);
+                let expired = u64::try_from(age_ms).is_ok_and(|age| age >= policy.retention_age_ms);
                 if expired {
                     if deletions.len() == limit {
                         deletion_limit_reached = true;

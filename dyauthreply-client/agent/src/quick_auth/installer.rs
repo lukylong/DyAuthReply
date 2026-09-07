@@ -201,7 +201,7 @@ async fn download(raw: &str, output: &Path, progress: Progress) -> Result<String
     let response = wreq::Client::builder()
         .redirect(wreq::redirect::Policy::none())
         .retry(wreq::retry::Policy::never())
-        .timeout(std::time::Duration::from_secs(10 * 60))
+        .timeout(std::time::Duration::from_secs(600))
         .build()?
         .get(raw)
         .send()

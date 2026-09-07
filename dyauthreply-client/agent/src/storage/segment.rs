@@ -663,7 +663,7 @@ impl SegmentStore {
                 )));
             }
         }
-        active_files.sort_by(|left, right| left.1.family.cmp(&right.1.family));
+        active_files.sort_by_key(|item| item.1.family);
         sealed_files.sort_by(|left, right| left.1.segment_id.cmp(&right.1.segment_id));
 
         let mut seen_manifest_ids = HashSet::new();

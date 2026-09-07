@@ -292,7 +292,7 @@ impl AccountCredentials {
         let cookie = string(value, "cookie");
         let cookie_changed = !cookie.is_empty()
             && base.is_some_and(|old| {
-                Self::from_state(old.clone()).ok().is_some_and(|c| {
+                Self::from_state(old.clone()).is_ok_and(|c| {
                     let previous = c.cookie("www.douyin.com", "sessionid");
                     cookie
                         .split(';')

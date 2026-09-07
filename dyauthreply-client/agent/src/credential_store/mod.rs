@@ -114,9 +114,7 @@ fn legacy_key(root: &Path) -> Result<Key> {
 }
 fn validate_id(id: &str) -> Result<()> {
     anyhow::ensure!(
-        uuid::Uuid::parse_str(id)
-            .ok()
-            .is_some_and(|v| v.to_string() == id),
+        uuid::Uuid::parse_str(id).is_ok_and(|v| v.to_string() == id),
         "invalid credential account ID"
     );
     Ok(())

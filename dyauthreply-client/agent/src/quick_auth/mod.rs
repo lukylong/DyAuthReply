@@ -22,7 +22,7 @@ use std::{
 };
 use tokio::sync::{watch, Mutex};
 
-const SESSION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const SESSION_TIMEOUT: Duration = Duration::from_secs(1_800);
 const START_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -146,12 +146,10 @@ impl Broker {
     #[must_use]
     pub fn component_status(&self) -> ComponentView {
         let mut view = component::status(&self.root);
-        let (state, message) = self
-            .install
-            .phase
-            .lock()
-            .map(|phase| (phase.state, phase.message.clone()))
-            .unwrap_or(("failed", "快捷登录组件状态异常".into()));
+        let (state, message) = self.install.phase.lock().map_or(
+            ("failed", "快捷登录组件状态异常".into()),
+            |phase| (phase.state, phase.message.clone()),
+        );
         let downloaded = self.install.downloaded.load(Ordering::Relaxed);
         let total = self.install.total.load(Ordering::Relaxed);
         if state == "installing" {

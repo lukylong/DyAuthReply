@@ -378,7 +378,9 @@ fn decode_hex(case: &str, value: &str) -> Result<Vec<u8>, FixtureError> {
     }
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .enumerate()
         .map(|(index, pair)| {
             let high = hex_nibble(pair[0]);

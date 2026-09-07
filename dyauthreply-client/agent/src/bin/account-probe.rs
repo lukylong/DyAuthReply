@@ -17,7 +17,7 @@ async fn main() -> anyhow::Result<()> {
     );
     let mut expected_message_id = None;
     let mut cursor = None;
-    for option in args[3..].chunks_exact(2) {
+    for option in args[3..].as_chunks::<2>().0 {
         match option[0].as_str() {
             "--expect-message-id" if expected_message_id.is_none() => {
                 expected_message_id = Some(option[1].parse::<u64>()?);

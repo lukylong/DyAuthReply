@@ -23,7 +23,7 @@ const versions = new Map([
   ['desktop package', json('dyauthreply-client/desktop/package.json').version],
   ['Tauri config', tauri.version],
   ['desktop Cargo', match('dyauthreply-client/desktop/src-tauri/Cargo.toml', /^version\s*=\s*"([^"]+)"/m, 'package version')],
-  ['desktop Cargo.lock', match('dyauthreply-client/desktop/src-tauri/Cargo.lock', /name = "dyauthreply"\nversion = "([^"]+)"/, 'lock version')],
+  ['desktop Cargo.lock', match('dyauthreply-client/desktop/src-tauri/Cargo.lock', /name = "dyauthreply"\r?\nversion = "([^"]+)"/, 'lock version')],
   ['server default', match('backend-django/application/settings.py', /DOWNLOAD_LATEST_VERSION\s*=.*?or\s*'([^']+)'/, 'download version')],
 ]);
 const unique = new Set(versions.values());

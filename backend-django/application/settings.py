@@ -553,6 +553,6 @@ DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower()
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
     '快捷登录完成并通过身份、租约与接收链路校验后显示账号正常，不再误显示为待检测\n'
-    '补齐作品接口要求的 Rust 原生 x-secsdk-web-signature URL 签名，并对瞬时 HTTP 403 进行一次有界重试\n'
+    '补齐作品接口要求的 Rust 原生 x-secsdk-web-signature URL 签名，并对瞬时 HTTP 403 最多进行两次有界退避重试\n'
     '发送能力仍按真实平台回执独立判定，登录失效、发送封控与仅接收状态保持明确展示',
 )

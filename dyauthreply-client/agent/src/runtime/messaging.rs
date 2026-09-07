@@ -245,6 +245,8 @@ fn retry_transient_works_error(error: &AccountRequestError) -> bool {
     )
 }
 
+const WORKS_MAX_ATTEMPTS: usize = 3;
+
 struct Inner {
     capacity: Arc<crate::capacity::Capacity>,
     runtime_marker: String,
@@ -639,16 +641,24 @@ impl ManualService {
         } {
             return Ok(page);
         }
-        let mut session = self.profile_session(id)?;
-        let first = session.works(cursor, count).await;
-        let result = match first {
-            Err(error) if retry_transient_works_error(&error) => {
-                tracing::warn!(account_id = id, %error, "transient works request rejected; retrying once");
-                tokio::time::sleep(Duration::from_millis(350)).await;
-                let mut retry_session = self.profile_session(id)?;
-                retry_session.works(cursor, count).await
+        let mut attempt = 0usize;
+        let result = loop {
+            attempt += 1;
+            let mut session = self.profile_session(id)?;
+            let result = session.works(cursor, count).await;
+            if result.as_ref().is_err_and(retry_transient_works_error)
+                && attempt < WORKS_MAX_ATTEMPTS
+            {
+                tracing::warn!(
+                    account_id = id,
+                    retry_attempt = attempt,
+                    "transient works request rejected; retrying"
+                );
+                let delay = if attempt == 1 { 350 } else { 900 };
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                continue;
             }
-            result => result,
+            break result;
         };
         match result {
             Ok(page) => {
@@ -2124,6 +2134,7 @@ mod tests {
 
     #[test]
     fn works_retry_is_limited_to_transient_platform_rejection() {
+        assert_eq!(WORKS_MAX_ATTEMPTS, 3);
         assert!(retry_transient_works_error(&AccountRequestError::Http {
             step: "self_works",
             status: 403,

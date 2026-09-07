@@ -546,13 +546,13 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.26'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.27'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '客户端运行时已完整迁移为 Rust 原生引擎，不再打包 Python 或 Node 运行环境\n'
-    '修复快捷登录授权后的会话重载与组件状态竞态，提升授权成功率\n'
-    '修复消息风险状态误锁定，并完成协议、续签和安装包发布链路核验',
+    '修复正式客户端沿用旧版 127.0.0.1:8000 开发授权地址导致的激活与续签失败\n'
+    '旧本地授权配置将迁移到生产授权服务并保留设备身份，已有远程私有授权域名不变\n'
+    '客户端仍为 Rust 原生运行时，并保持快捷登录、消息协议与自动更新链路',
 )

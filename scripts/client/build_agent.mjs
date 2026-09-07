@@ -6,18 +6,6 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 const root=join(dirname(fileURLToPath(import.meta.url)),'../..');
-if(process.argv.includes('--prepare-nsis-hook')){
-  const target=process.env.DY_AGENT_BUILD_TARGET||'';
-  if(target.includes('windows')){
-    const arch=target.startsWith('x86_64-')?'x64':target.startsWith('i686-')?'x86':target.startsWith('aarch64-')?'arm64':'';
-    if(!arch)throw new Error('Unsupported Windows bundle architecture');
-    const staging=join(root,'dyauthreply-client/desktop/src-tauri/target',target,'release','nsis',arch);
-    mkdirSync(staging,{recursive:true});
-    copyFileSync(join(root,'dyauthreply-client/desktop/src-tauri/retire-client.ps1'),join(staging,'retire-client.ps1'));
-    console.log(`NSIS_RETIRE_HOOK_PREPARED=${join(staging,'retire-client.ps1')}`);
-  }
-  process.exit(0);
-}
 const arg=(name,fallback)=>{const i=process.argv.indexOf(name);return i<0?fallback:process.argv[i+1];};
 const profile=arg('--profile',process.env.DY_AGENT_BUILD_PROFILE||'release');
 if(!['debug','release'].includes(profile)) throw new Error('Expected debug or release profile');

@@ -72,10 +72,11 @@ fn await_clean_exit(child: &mut Child) -> std::process::ExitStatus {
 
 #[test]
 fn serve_reports_live_runtime_and_sigterm_releases_the_listener() {
-    let data_dir = tempfile::tempdir().expect("isolated Agent data directory");
+    let data_root = tempfile::tempdir().expect("isolated Agent data directory");
+    let data_dir = data_root.path().join("agent-v2");
     let address = reserve_loopback_address();
     let child = Command::new(env!("CARGO_BIN_EXE_dy-agent"))
-        .env("DY_AGENT_DATA_DIR", data_dir.path())
+        .env("DY_AGENT_DATA_DIR", &data_dir)
         .env("DY_AGENT_BIND", address.to_string())
         .env("RUST_LOG", "off")
         .stdout(Stdio::null())
@@ -85,7 +86,14 @@ fn serve_reports_live_runtime_and_sigterm_releases_the_listener() {
     let mut child = ChildGuard(child);
 
     let health = await_live_health(&mut child.0, address);
-    assert_eq!(health.protocol_mode, "shadow-disabled");
+    let expected_protocol_mode = if option_env!("CLIENT_LICENSE_SERVER_URL").is_some()
+        && option_env!("LICENSE_LEASE_PUBLIC_KEY_B64").is_some()
+    {
+        "native-registry"
+    } else {
+        "shadow-disabled"
+    };
+    assert_eq!(health.protocol_mode, expected_protocol_mode);
     assert_eq!(health.lifecycle, LifecycleState::Running);
     assert_eq!(health.runtime.phase, RuntimeHealthPhase::Running);
     assert_eq!(health.runtime.central_timer_tasks, 1);

@@ -824,6 +824,7 @@ impl CoreStore {
             }
             validate_or_migrate_existing_database(&mut connection, data_dir)?
         };
+        protocol_state::migrate_browser_identity_v2(&connection)?;
         if let Some(marker_database_id) = marker_database_id {
             if marker_database_id != database_id {
                 return Err(StoreError::DatabaseIdentityMismatch {

@@ -1,7 +1,7 @@
 {
   "name": "dyauthreply-client",
   "private": true,
-  "version": "0.1.29",
+  "version": "0.1.30",
   "description": "DyAuthReply 桌面客户端（免 Docker）",
   "scripts": {
     "launcher": "cargo run --locked --manifest-path agent/Cargo.toml --bin dy-agent",

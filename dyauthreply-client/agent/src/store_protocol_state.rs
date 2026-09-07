@@ -3,6 +3,7 @@ use super::{
     params, validate_required_tables, Connection, LeaseToken, OptionalExtension, StoreError,
 };
 use crate::state::SendCapability;
+const BROWSER_IDENTITY_V2_META_KEY: &str = "browser_identity_binding";
 #[derive(Clone, Copy)]
 pub struct SendObservation<'a> {
     pub canonical_sec_uid: &'a str,
@@ -30,6 +31,21 @@ pub(super) fn validate_schema(c: &Connection) -> Result<(), StoreError> {
             ],
         )],
     )
+}
+
+pub(super) fn migrate_browser_identity_v2(c: &Connection) -> Result<(), StoreError> {
+    c.execute_batch(&format!(
+        "BEGIN IMMEDIATE;
+         INSERT OR IGNORE INTO meta(key,value) VALUES('{BROWSER_IDENTITY_V2_META_KEY}','pending');
+         UPDATE account_protocol_state
+         SET capability='unknown',observed_at_ms=0
+         WHERE capability='risk_controlled'
+           AND (SELECT value FROM meta WHERE key='{BROWSER_IDENTITY_V2_META_KEY}')='pending';
+         UPDATE meta SET value='2'
+         WHERE key='{BROWSER_IDENTITY_V2_META_KEY}' AND value='pending';
+         COMMIT;"
+    ))?;
+    Ok(())
 }
 fn validate(canonical: &str, digest: &str) -> Result<(), StoreError> {
     if canonical.is_empty()
@@ -185,6 +201,61 @@ mod tests {
         assert_eq!(
             restore(&c, &lease, "different-account", &a, 400_000).unwrap(),
             SendCapability::Unknown
+        );
+    }
+
+    #[test]
+    fn browser_identity_v2_migration_clears_legacy_risk_exactly_once() {
+        let (_dir, store, lease) = fixture();
+        let digest = "a".repeat(64);
+        let c = store.lock_connection().unwrap();
+        c.execute(
+            "DELETE FROM meta WHERE key=?1",
+            [BROWSER_IDENTITY_V2_META_KEY],
+        )
+        .unwrap();
+        restore(&c, &lease, "self", &digest, 1000).unwrap();
+        record(
+            &c,
+            &lease,
+            SendObservation {
+                canonical_sec_uid: "self",
+                credential_digest: &digest,
+                capability: SendCapability::RiskControlled,
+            },
+            1000,
+        )
+        .unwrap();
+        migrate_browser_identity_v2(&c).unwrap();
+        assert_eq!(
+            c.query_row(
+                "SELECT capability,observed_at_ms FROM account_protocol_state",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            )
+            .unwrap(),
+            ("unknown".into(), 0)
+        );
+        record(
+            &c,
+            &lease,
+            SendObservation {
+                canonical_sec_uid: "self",
+                credential_digest: &digest,
+                capability: SendCapability::RiskControlled,
+            },
+            2000,
+        )
+        .unwrap();
+        migrate_browser_identity_v2(&c).unwrap();
+        assert_eq!(
+            c.query_row(
+                "SELECT capability,observed_at_ms FROM account_protocol_state",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            )
+            .unwrap(),
+            ("risk_controlled".into(), 2000)
         );
     }
     #[test]

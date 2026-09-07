@@ -7,6 +7,7 @@
     "beforeDevCommand": "node ../../scripts/client/build_agent.mjs --profile debug && npm run dev --prefix ../client-ui",
     "devUrl": "http://localhost:5173/",
     "beforeBuildCommand": "node ../../scripts/client/build_agent.mjs && npm run build --prefix ../client-ui",
+    "beforeBundleCommand": "node ../../scripts/client/build_agent.mjs --prepare-nsis-hook",
     "frontendDist": "../../client-ui/dist"
   },
   "app": {

@@ -181,6 +181,14 @@ export interface DouyinAccount {
   status: number;
   credential_state?: string;
   last_probe_error?: string | null;
+  identity_verified?: boolean;
+  runtime_label?: string;
+  runtime_state?: {
+    inbound?: string;
+    lifecycle?: string;
+    ownership?: string;
+    send?: string;
+  };
   auto_reply_enabled?: boolean;
   runtime_auto_reply_enabled?: boolean;
   reply_today?: number;

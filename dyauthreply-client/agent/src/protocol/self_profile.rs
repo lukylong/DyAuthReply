@@ -5,13 +5,14 @@ use crate::protocol::{
     http_plan::{percent_encode_rfc3986, OrderedHeader},
     live_http::SessionEndpoint,
 };
+use md5::{Digest, Md5};
 use rand::Rng;
 use serde::Serialize;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
     sync::OnceLock,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 #[derive(Clone, Serialize)]
 pub struct VerifiedSelf {
@@ -46,6 +47,79 @@ pub struct WorksPage {
     pub max_cursor: String,
     pub has_more: bool,
 }
+
+const WEB_SIGN_CONST: &str = "A96D855A08C0A9707F8BEF0D9A527E4E";
+
+fn decode_query_component(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut offset = 0;
+    while offset < bytes.len() {
+        match bytes[offset] {
+            b'+' => {
+                decoded.push(b' ');
+                offset += 1;
+            }
+            b'%' if offset + 2 < bytes.len() => {
+                let pair = std::str::from_utf8(&bytes[offset + 1..offset + 3]).ok()?;
+                decoded.push(u8::from_str_radix(pair, 16).ok()?);
+                offset += 3;
+            }
+            b'%' => return None,
+            byte => {
+                decoded.push(byte);
+                offset += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn encode_js_component(value: &str) -> String {
+    use std::fmt::Write;
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_.!~*'()".contains(byte) {
+            encoded.push(char::from(*byte));
+        } else {
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+fn secsdk_web_sign_query(query: &str, timestamp: u64, fallback_uifid: &str) -> Option<String> {
+    let mut canonical = Vec::new();
+    let mut has_uifid = false;
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let key = decode_query_component(key)?;
+        if matches!(key.as_str(), "timestamp" | "x-secsdk-web-signature") {
+            continue;
+        }
+        let value = decode_query_component(value)?;
+        has_uifid |= key == "uifid";
+        canonical.push(format!(
+            "{}={}",
+            encode_js_component(&key),
+            encode_js_component(&value)
+        ));
+    }
+    if !has_uifid && !fallback_uifid.is_empty() {
+        canonical.push(format!("uifid={}", encode_js_component(fallback_uifid)));
+    }
+    canonical.push(format!("timestamp={timestamp}"));
+    let signed_query = canonical.join("&");
+    let signed_uifid = canonical
+        .iter()
+        .find_map(|pair| pair.strip_prefix("uifid="))
+        .and_then(decode_query_component)
+        .unwrap_or_else(|| fallback_uifid.to_owned());
+    let plain = format!("{signed_uifid}_{timestamp}_{WEB_SIGN_CONST}_{signed_query}");
+    let signature = format!("{:x}", Md5::digest(plain.as_bytes()));
+    Some(format!("{signed_query}&x-secsdk-web-signature={signature}"))
+}
+
 impl NativeAccountSession {
     /// Returns the current verified profile. Force bypasses only the five-minute
     /// in-memory profile cache; authenticated identity checks still apply.
@@ -116,7 +190,7 @@ impl NativeAccountSession {
         ));
         let uifid = self.credentials.cookie("www.douyin.com", "UIFID");
         if !uifid.is_empty() {
-            params.push(("uifid", uifid));
+            params.push(("uifid", uifid.clone()));
         }
         params.push(("msToken", self.credentials.query_ms_token.clone()));
         let query = params
@@ -127,6 +201,12 @@ impl NativeAccountSession {
         let query = self.signed_query(query, STEP).await?;
         let verify = percent_encode_rfc3986(self.credentials.web_fingerprint());
         let query = format!("{query}&verifyFp={verify}&fp={verify}");
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| AccountRequestError::Decode { step: STEP })?
+            .as_secs();
+        let query = secsdk_web_sign_query(&query, timestamp, &uifid)
+            .ok_or(AccountRequestError::Decode { step: STEP })?;
         let mut headers = self.headers("www.douyin.com");
         headers.extend([
             OrderedHeader::new(
@@ -765,6 +845,27 @@ impl Fingerprint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protected_works_query_matches_python_secsdk_reference() {
+        let query = "aid=6383&uifid=UF%2B1&a_bogus=AB&verifyFp=FP&fp=FP";
+        assert_eq!(
+            secsdk_web_sign_query(query, 1_700_000_000, "UF+1").unwrap(),
+            "aid=6383&uifid=UF%2B1&a_bogus=AB&verifyFp=FP&fp=FP\
+             &timestamp=1700000000\
+             &x-secsdk-web-signature=77996339d7adaef2cea23a9dcf2f2c0c"
+        );
+    }
+
+    #[test]
+    fn protected_query_replaces_old_signature_and_adds_missing_uifid() {
+        let signed =
+            secsdk_web_sign_query("aid=6383&timestamp=1&x-secsdk-web-signature=old", 2, "UF+1")
+                .unwrap();
+        assert!(signed.starts_with("aid=6383&uifid=UF%2B1&timestamp=2&"));
+        assert_eq!(signed.matches("x-secsdk-web-signature=").count(), 1);
+    }
+
     #[test]
     fn uid_and_sec_uid_must_belong_to_same_authenticated_user_object() {
         let html = r#"<script>self.__next_f.push([1,"1:{\"user\":{\"uid\":\"123\",\"secUid\":\"self\",\"nickname\":\"name\"},\"other\":{\"uid\":\"456\",\"secUid\":\"peer\"}}"])</script>"#;

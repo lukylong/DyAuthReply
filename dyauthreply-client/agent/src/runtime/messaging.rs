@@ -234,6 +234,17 @@ struct AccountSlot {
     works_cache: Mutex<BTreeMap<String, (Instant, crate::protocol::WorksPage)>>,
     http: ProtocolHttpClient,
 }
+
+fn retry_transient_works_error(error: &AccountRequestError) -> bool {
+    matches!(
+        error,
+        AccountRequestError::Http {
+            step: "self_works",
+            status: 403
+        }
+    )
+}
+
 struct Inner {
     capacity: Arc<crate::capacity::Capacity>,
     runtime_marker: String,
@@ -629,7 +640,17 @@ impl ManualService {
             return Ok(page);
         }
         let mut session = self.profile_session(id)?;
-        match session.works(cursor, count).await {
+        let first = session.works(cursor, count).await;
+        let result = match first {
+            Err(error) if retry_transient_works_error(&error) => {
+                tracing::warn!(account_id = id, %error, "transient works request rejected; retrying once");
+                tokio::time::sleep(Duration::from_millis(350)).await;
+                let mut retry_session = self.profile_session(id)?;
+                retry_session.works(cursor, count).await
+            }
+            result => result,
+        };
+        match result {
             Ok(page) => {
                 let mut cache = slot.works_cache.lock().await;
                 if cache.len() >= 8 && !cache.contains_key(&key) {
@@ -2100,6 +2121,22 @@ fn open_business(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn works_retry_is_limited_to_transient_platform_rejection() {
+        assert!(retry_transient_works_error(&AccountRequestError::Http {
+            step: "self_works",
+            status: 403,
+        }));
+        assert!(!retry_transient_works_error(&AccountRequestError::Http {
+            step: "self_works",
+            status: 401,
+        }));
+        assert!(!retry_transient_works_error(&AccountRequestError::Http {
+            step: "self_query",
+            status: 403,
+        }));
+    }
     #[test]
     fn browser_short_ids_remain_exact_strings_and_payloads_are_bounded() {
         let mut request = ManualRequest {

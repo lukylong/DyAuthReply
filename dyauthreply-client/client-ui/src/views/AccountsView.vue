@@ -312,7 +312,19 @@ function accountStatusLabel(acc: DouyinAccount) {
     return isSendRestricted(acc) ? '发送封控（仅接收）' : '仅接收（发送凭证不完整）';
   }
   if (acc.credential_state === 'invalid' || acc.status === 2) return '登录失效';
+  if (isAccountHealthy(acc)) {
+    return acc.credential_state === 'sendable'
+      ? '账号正常，可接收和发送消息'
+      : '账号正常，登录身份和接收链路已验证';
+  }
   return statusLabel(acc.status);
+}
+
+function isAccountHealthy(acc: DouyinAccount) {
+  return acc.status === 1
+    && acc.identity_verified === true
+    && acc.credential_state !== 'invalid'
+    && acc.credential_state !== 'receive_only';
 }
 
 function isSendRestricted(acc: DouyinAccount) {
@@ -322,12 +334,13 @@ function isSendRestricted(acc: DouyinAccount) {
 }
 
 function accountCredentialLabel(acc: DouyinAccount) {
-  if (acc.credential_state === 'sendable') return '可发送';
   if (acc.credential_state === 'invalid') return '登录失效';
   if (acc.credential_state === 'receive_only') {
     return isSendRestricted(acc) ? '发送封控（仅接收）' : '仅接收';
   }
-  return '待检测';
+  if (isAccountHealthy(acc)) return '账号正常';
+  if (acc.credential_state === 'sendable') return '可发送';
+  return '检测中';
 }
 
 function openImport(account?: DouyinAccount) {
@@ -541,7 +554,7 @@ onMounted(async () => {
           <span
             class="status-dot"
             :class="{
-              online: acc.status === 1 && acc.credential_state === 'sendable',
+              online: isAccountHealthy(acc),
               risk: acc.credential_state === 'receive_only',
               invalid: acc.credential_state === 'invalid' || acc.status === 2,
             }"
@@ -572,10 +585,11 @@ onMounted(async () => {
         <span
           class="credential-badge"
           :class="{
-            success: acc.credential_state === 'sendable',
+            success: isAccountHealthy(acc) || acc.credential_state === 'sendable',
             warning: acc.credential_state === 'receive_only',
             danger: acc.credential_state === 'invalid',
           }"
+          :title="accountStatusLabel(acc)"
         >
           {{ accountCredentialLabel(acc) }}
         </span>

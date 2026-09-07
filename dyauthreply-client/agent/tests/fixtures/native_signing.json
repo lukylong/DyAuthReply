@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgAAAAAAAAAAAAAAAA\nAAAAAAAAAAAAAAAAAAAAAAAAAAGhRANCAARrF9Hy4SxCR/i85uVjpEDydwN9gS3r\nM6D0oTlF2JjClk/jQuL+Gn+bjufrSnwPnhYrzjNXazFezsu2QGg3v1H1\n-----END PRIVATE KEY-----\n",
+  "peer_public": "pub.BHzyexiNA09+ilI4AwS1GsPAiWnid/IbNaYLSPxHZpl4B3dVENuO0EApPZrGn3Qw27p9reY86YIpngS3nSJ4c9E=",
+  "ree_public": "BGsX0fLhLEJH+Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT+NC4v4af5uO5+tKfA+eFivOM1drMV7Oy7ZAaDe/UfU=",
+  "ecdh_hex": "32c14f38e411dc17e495b9b3f93d55d04251ca23c6090b90c2b3806cd5c100c2",
+  "payload": "ticket=synthetic-ticket&path=/v1/message/send&timestamp=1700000000",
+  "hmac": "MTe798DGbjEl5rS05vPHzHHIzxuIsM5q2KnZ0DqNBkE=",
+  "ecdsa": "MEYCIQCIF0APsg7coLK2SECMFAnl+2yrThcYgbV6eN6WbIO2HwIhAIGR+BLYNO8X5hcYnmwGNAPZql4kRzOS3xhXVwyN3tcP",
+  "ab_query": "msToken=synthetic-only",
+  "ab_body": "",
+  "ab_prelude": "const OriginalDate=Date; globalThis.Date=class extends OriginalDate { constructor(...a){super(...(a.length?a:[1700000000000]));} static now(){return 1700000000000;} }; Math.random=()=>0.123456789; globalThis.performance={now:()=>0};",
+  "ab_expected": "E7mhBm0fDDVp6D6g56KLfY3qV413YpKI0SVkMDheLx37qL39HMYD9exEIBGvXY8ewG/-Ieujy4hbTrOgrQcjMZwf9Skw/2A2mESkKl5Q5xSSs1XyeykgJUhimktRSeo2RkBlrOXBwwpHzYYm09oHmhK4bIOwu3GMuj=="
+}

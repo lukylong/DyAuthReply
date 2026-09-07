@@ -29,8 +29,15 @@ pub fn classify_delivery(
     if http_status == Some(401) {
         return DeliveryClass::LoginExpired;
     }
-    let explicit_risk =
-        HARD_RISK_CODES.contains(&result.biz_status_code) || result.biz_raw_check_code == 2;
+    let acknowledged = result.server_msg_id != 0
+        && !expected_client_msg_id.is_empty()
+        && result.client_msg_id == expected_client_msg_id;
+    // A hard business rejection remains authoritative. raw_check=2 alone is
+    // not: the live Python sender historically accepts a matching platform
+    // acknowledgement for non-hard business results. Require a non-zero
+    // business status and no acknowledgement before latching account risk.
+    let explicit_risk = HARD_RISK_CODES.contains(&result.biz_status_code)
+        || (result.biz_raw_check_code == 2 && result.biz_status_code != 0 && !acknowledged);
     if http_status == Some(403) {
         return if explicit_risk {
             DeliveryClass::RiskControlled
@@ -141,6 +148,40 @@ mod tests {
         assert_eq!(
             classify_delivery(Some(403), &response, "client"),
             DeliveryClass::RiskControlled
+        );
+    }
+
+    #[test]
+    fn raw_check_two_does_not_override_a_matching_acknowledgement() {
+        let mut response = complete_response();
+        response.biz_raw_check_code = 2;
+        assert_eq!(
+            classify_delivery(Some(200), &response, "client"),
+            DeliveryClass::Delivered
+        );
+
+        response.biz_status_code = 8513;
+        assert_eq!(
+            classify_delivery(Some(200), &response, "client"),
+            DeliveryClass::DeliveredSoft
+        );
+    }
+
+    #[test]
+    fn raw_check_two_requires_rejection_without_acknowledgement() {
+        let mut response = complete_response();
+        response.server_msg_id = 0;
+        response.biz_status_code = 8513;
+        response.biz_raw_check_code = 2;
+        assert_eq!(
+            classify_delivery(Some(200), &response, "client"),
+            DeliveryClass::RiskControlled
+        );
+
+        response.biz_status_code = 0;
+        assert_eq!(
+            classify_delivery(Some(200), &response, "client"),
+            DeliveryClass::Uncertain
         );
     }
 

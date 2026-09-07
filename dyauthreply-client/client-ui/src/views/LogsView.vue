@@ -1,5 +1,17 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import {
+  AlertTriangle,
+  FileText,
+  RefreshCw,
+  ChevronRight,
+  X,
+  CheckCircle2,
+  CircleAlert,
+  Clock,
+  Filter,
+} from "lucide-vue-next";
+import { useClientRealtime } from "../composables/useClientRealtime";
 import {
   getReplyLogStat,
   listAccounts,
@@ -8,15 +20,58 @@ import {
   type DouyinAccount,
   type DouyinReplyLog,
   type DouyinReplyLogStat,
-} from '../api/client';
+} from "../api/client";
 
+const selected = ref<DouyinReplyLog | null>(null);
+const detailDialog = ref<HTMLDialogElement | null>(null);
+watch(selected, async (value) => {
+  if (value) {
+    await nextTick();
+    detailDialog.value?.showModal();
+  }
+});
 const loading = ref(true);
-const error = ref('');
+const sourceOptions = [
+  { value: "automatic" as const, label: "自动回复" },
+  { value: "manual" as const, label: "手动发送" },
+  { value: "all" as const, label: "全部" },
+];
+const pendingCount = computed(
+  () =>
+    (stat.value?.pending ?? 0) +
+    (stat.value?.uncertain ?? 0) +
+    (stat.value?.partial ?? 0),
+);
+const skippedCount = computed(
+  () =>
+    (stat.value?.skipped ?? 0) +
+    (stat.value?.cooldown ?? 0) +
+    (stat.value?.quota_exceeded ?? 0) +
+    (stat.value?.silent ?? 0),
+);
+function timeParts(value?: string | null) {
+  const v = (value || "").replace("T", " ");
+  return { day: v.slice(0, 10) || "—", time: v.slice(11, 19) || "—" };
+}
+function closeDetail(event: KeyboardEvent) {
+  if (event.key === "Escape") selected.value = null;
+}
+function resetFilters() {
+  filterAccountId.value = "";
+  filterResult.value = "";
+}
+
+const error = ref("");
 const accounts = ref<DouyinAccount[]>([]);
 const logs = ref<DouyinReplyLog[]>([]);
 const stat = ref<DouyinReplyLogStat | null>(null);
-const filterAccountId = ref('');
-const filterResult = ref('');
+const filterAccountId = ref("");
+const filterResult = ref("");
+const filterMode = ref<"automatic" | "manual" | "all">("automatic");
+const hasGap = ref(false);
+let generation = 0;
+let unsubscribe: (() => void) | undefined;
+let disposed = false;
 const page = ref(1);
 const pageSize = ref(10);
 const total = ref(0);
@@ -26,47 +81,64 @@ async function loadAccounts() {
   accounts.value = await listAccounts();
 }
 
-async function loadStat() {
+async function loadStat(current: number) {
   try {
-    stat.value = await getReplyLogStat(filterAccountId.value || undefined);
+    const value = await getReplyLogStat(
+      filterAccountId.value || undefined,
+      "all",
+      filterMode.value,
+    );
+    if (!disposed && current === generation) stat.value = value;
   } catch {
-    stat.value = null;
+    if (!disposed && current === generation) stat.value = null;
   }
 }
 
 async function loadLogs() {
+  const current = ++generation;
   loading.value = true;
-  error.value = '';
+  error.value = "";
   try {
     const res = await listReplyLogs({
       account_id: filterAccountId.value || undefined,
+      mode: filterMode.value,
       result: filterResult.value || undefined,
       page: page.value,
       pageSize: pageSize.value,
     });
+    if (disposed || current !== generation) return;
+    hasGap.value = res.has_gap === true;
     logs.value = res.items ?? [];
     total.value = res.total ?? logs.value.length;
-    await loadStat();
+    await loadStat(current);
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e);
+    if (disposed || current !== generation) return;
+    error.value =
+      (e instanceof Error ? e.message : String(e)) || "回复记录读取失败";
     logs.value = [];
   } finally {
-    loading.value = false;
+    if (current === generation) loading.value = false;
   }
 }
 
 function resultClass(result: string) {
-  if (result === 'success') return 'ok';
-  if (result === 'failed') return 'bad';
-  return 'muted';
+  if (result === "success") return "ok";
+  if (result === "failed") return "bad";
+  return "muted";
 }
 
-watch([filterAccountId, filterResult, pageSize], () => {
+watch([filterAccountId, filterResult, filterMode, pageSize], () => {
   page.value = 1;
   loadLogs();
 });
 
 onMounted(async () => {
+  document.addEventListener("keydown", closeDetail);
+  unsubscribe = useClientRealtime().subscribe({
+    onReplyLogChanged: () => {
+      if (!disposed) void loadLogs();
+    },
+  });
   try {
     await loadAccounts();
     await loadLogs();
@@ -75,420 +147,703 @@ onMounted(async () => {
     loading.value = false;
   }
 });
+onUnmounted(() => {
+  document.removeEventListener("keydown", closeDetail);
+  disposed = true;
+  ++generation;
+  unsubscribe?.();
+});
 </script>
 
 <template>
   <div class="logs-page">
-    <div class="head">
+    <header class="head">
       <div>
-        <h2>自动回复记录</h2>
-        <p class="sub">查看触发自动回复策略的私信请求审计，监控投递的成功率及过滤详情。</p>
+        <p class="eyebrow">运营记录</p>
+        <h1>发送与回复记录</h1>
+        <p class="sub">追踪每次发送的结果，快速定位未回复的原因。</p>
       </div>
-    </div>
-
-    <!-- Stats Grid cards -->
-    <section v-if="stat" class="stats-panel-grid">
-      <div class="stat-glass-card glass-panel">
-        <span class="num">{{ stat.total }}</span>
-        <span class="lbl">触发总量</span>
+      <button class="btn-glass" @click="loadLogs" :disabled="loading">
+        <RefreshCw :size="15" />刷新记录
+      </button>
+    </header>
+    <section class="summary-strip" aria-label="回复统计">
+      <div>
+        <span><FileText :size="15" />触发总量</span
+        ><b>{{ stat?.total ?? "—" }}</b>
       </div>
-      <div class="stat-glass-card glass-panel ok">
-        <span class="num">{{ stat.success }}</span>
-        <span class="lbl">发送成功</span>
+      <div class="ok">
+        <span><CheckCircle2 :size="15" />发送成功</span
+        ><b>{{ stat?.success ?? "—" }}</b>
       </div>
-      <div class="stat-glass-card glass-panel bad">
-        <span class="num">{{ stat.failed }}</span>
-        <span class="lbl">发送失败</span>
+      <div class="bad">
+        <span><CircleAlert :size="15" />发送失败</span
+        ><b>{{ stat?.failed ?? "—" }}</b>
       </div>
-      <div class="stat-glass-card glass-panel muted">
-        <span class="num">{{ stat.skipped }}</span>
-        <span class="lbl">风控/跳过</span>
+      <div>
+        <span><Filter :size="15" />规则跳过</span
+        ><b>{{ stat ? skippedCount : "—" }}</b>
+      </div>
+      <div>
+        <span><Clock :size="15" />待处理 / 部分送达</span
+        ><b>{{ stat ? pendingCount : "—" }}</b>
       </div>
     </section>
-
-    <!-- Toolbar controls -->
-    <div class="toolbar glass-panel">
-      <div class="filters-row">
-        <label class="control-label">
-          <span>所属账号</span>
-          <select class="select-glass" v-model="filterAccountId">
-            <option value="">全部抖音号</option>
-            <option v-for="acc in accounts" :key="acc.id" :value="acc.id">{{ acc.nickname }}</option>
-          </select>
-        </label>
-        
-        <label class="control-label">
-          <span>回复状态</span>
-          <select class="select-glass" v-model="filterResult">
-            <option value="">全部记录</option>
+    <section class="record-panel">
+      <div class="filter-top">
+        <div class="source-tabs" aria-label="记录来源">
+          <button
+            v-for="source in sourceOptions"
+            :key="source.value"
+            :aria-pressed="filterMode === source.value"
+            :class="{ active: filterMode === source.value }"
+            @click="filterMode = source.value"
+          >
+            {{ source.label }}
+          </button>
+        </div>
+        <span class="record-count">{{ total }} 条记录</span>
+      </div>
+      <div class="filters">
+        <Filter :size="16" class="filter-icon" /><label
+          ><span class="sr-only">所属账号</span
+          ><select v-model="filterAccountId">
+            <option value="">全部账号</option>
+            <option v-for="acc in accounts" :key="acc.id" :value="acc.id">
+              {{ acc.nickname }}
+            </option>
+          </select></label
+        >
+        <label
+          ><span class="sr-only">回复状态</span
+          ><select v-model="filterResult">
+            <option value="">全部状态</option>
             <option value="success">发送成功</option>
             <option value="failed">发送失败</option>
+            <option value="pending">等待发送</option>
+            <option value="uncertain">结果待核验</option>
+            <option value="partial">部分送达</option>
             <option value="skipped">过滤跳过</option>
-            <option value="cooldown">频发防刷冷却</option>
-            <option value="quota_exceeded">超出日额度限额</option>
-            <option value="silent">运营静默时段</option>
-          </select>
-        </label>
-
-        <label class="control-label">
-          <span>每页</span>
-          <select class="select-glass" v-model.number="pageSize">
-            <option v-for="n in PAGE_SIZE_OPTIONS" :key="n" :value="n">{{ n }} 条</option>
-          </select>
-        </label>
+            <option value="cooldown">冷却跳过</option>
+            <option value="quota_exceeded">超出日额度</option>
+            <option value="silent">静默时段</option>
+          </select></label
+        >
+        <button
+          v-if="filterAccountId || filterResult"
+          class="text-button"
+          @click="resetFilters"
+        >
+          清除筛选
+        </button>
+        <span class="retention"
+          >保留最近 30 天<span v-if="hasGap"> · 旧记录已轮转</span></span
+        >
       </div>
-      <span class="toolbar-hint">当前条件下共 {{ total }} 条记录</span>
-    </div>
-
-    <div v-if="loading" class="loading-state glass-panel">
-      <div class="dot-spinner"></div>
-      <p>正在同步回复记录，请稍候...</p>
-    </div>
-    
-    <div v-else-if="error" class="card error glass-panel">
-      <span class="icon">⚠️</span>
-      <div class="err-text">
-        <h4>获取日志失败</h4>
+      <div v-if="error" class="empty error" role="alert">
+        <AlertTriangle :size="26" /><b>记录读取失败</b>
         <p>{{ error }}</p>
+        <button class="btn-glass" @click="loadLogs">重新加载</button>
       </div>
-    </div>
-    
-    <div v-else-if="logs.length === 0" class="empty-state glass-panel">
-      <div class="empty-icon">📝</div>
-      <h3>暂无符合要求的触发记录</h3>
-      <p>这里将记录每次关键词匹配或自动回复事件的触发时间与详细执行结果。</p>
-    </div>
-
-    <!-- Table List -->
-    <section v-else class="table-container glass-panel">
-      <div class="table-responsive">
-        <table class="logs-table">
+      <div v-else-if="loading && !logs.length" class="empty">
+        <RefreshCw :size="24" />
+        <p>正在加载记录…</p>
+      </div>
+      <div v-else-if="!logs.length" class="empty">
+        <FileText :size="30" /><b>暂无符合条件的记录</b>
+        <p>试试切换记录来源，或清除筛选条件。</p>
+      </div>
+      <div v-else class="table-scroll" :aria-busy="loading">
+        <table>
+          <colgroup>
+            <col class="col-time" />
+            <col class="col-person" />
+            <col class="col-result" />
+            <col />
+            <col class="col-action" />
+          </colgroup>
           <thead>
             <tr>
               <th>触发时间</th>
-              <th>账号</th>
-              <th>客户</th>
-              <th>匹配结果</th>
-              <th>回复详情 / 跳过解释</th>
+              <th>发送账号 / 联系人</th>
+              <th>发送结果</th>
+              <th>回复内容与原因</th>
+              <th><span class="sr-only">详情</span></th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="log in logs" :key="log.id">
-              <td class="time">{{ log.sys_create_datetime || '—' }}</td>
-              <td class="account-name">{{ log.account_nickname || '—' }}</td>
-              <td class="peer-name">{{ log.peer_nickname || '—' }}</td>
-              <td>
-                <span class="badge" :class="resultClass(log.result)">
-                  {{ log.result_display || resultLabel(log.result) }}
-                </span>
+            <tr
+              v-for="log in logs"
+              :key="log.id"
+              :class="{ selected: selected?.id === log.id }"
+            >
+              <td class="time">
+                <b>{{ timeParts(log.sys_create_datetime).time }}</b
+                ><small>{{ timeParts(log.sys_create_datetime).day }}</small>
               </td>
-              <td class="detail-cell">
-                <div v-if="log.reply_text" class="reply-msg">{{ log.reply_text }}</div>
-                <div v-if="log.error_message" class="error-msg">{{ log.error_message }}</div>
-                <div v-if="log.trigger_message_content" class="trigger-msg">
-                  <span class="tag">触发词</span>{{ log.trigger_message_content }}
-                </div>
+              <td class="person">
+                <b :title="log.account_nickname || ''">{{
+                  log.account_nickname || "未知账号"
+                }}</b
+                ><small :title="log.peer_nickname || ''"
+                  >发给 {{ log.peer_nickname || "未知联系人" }}</small
+                >
+              </td>
+              <td>
+                <span class="result-badge" :class="resultClass(log.result)"
+                  ><i />{{
+                    log.result_display || resultLabel(log.result)
+                  }}</span
+                >
+              </td>
+              <td class="content">
+                <b :class="{ 'error-text': !!log.error_message }">{{
+                  log.error_message ||
+                  log.reply_text ||
+                  log.result_display ||
+                  resultLabel(log.result)
+                }}</b
+                ><small v-if="log.trigger_message_content"
+                  >收到：{{ log.trigger_message_content }}</small
+                ><small v-else
+                  >{{ log.mode === "manual" ? "手动发送" : "自动回复"
+                  }}<span v-if="log.batch_id">
+                    · 尝试 {{ log.attempt_count }} 次</span
+                  ></small
+                >
+              </td>
+              <td>
+                <button
+                  class="row-open"
+                  @click="selected = log"
+                  :aria-label="
+                    '查看记录详情 ' + timeParts(log.sys_create_datetime).time
+                  "
+                >
+                  <ChevronRight :size="18" />
+                </button>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
+      <footer class="pagination">
+        <label
+          >每页
+          <select v-model.number="pageSize" aria-label="每页条数">
+            <option v-for="n in PAGE_SIZE_OPTIONS" :key="n" :value="n">
+              {{ n }} 条
+            </option>
+          </select></label
+        ><span
+          >第 {{ page }} /
+          {{ Math.max(1, Math.ceil(total / pageSize)) }} 页</span
+        >
+        <div>
+          <button
+            class="btn-glass"
+            :disabled="loading || page <= 1"
+            @click="
+              page--;
+              loadLogs();
+            "
+          >
+            上一页</button
+          ><button
+            class="btn-glass"
+            :disabled="loading || page * pageSize >= total"
+            @click="
+              page++;
+              loadLogs();
+            "
+          >
+            下一页
+          </button>
+        </div>
+      </footer>
     </section>
-
-    <!-- Pagination -->
-    <div v-if="total > pageSize" class="pager">
-      <button type="button" class="btn-glass" :disabled="page <= 1" @click="page--; loadLogs()">
-        ← 上一页
-      </button>
-      <span class="pager-lbl">第 {{ page }} / {{ Math.max(1, Math.ceil(total / pageSize)) }} 页</span>
-      <button
-        type="button"
-        class="btn-glass"
-        :disabled="page * pageSize >= total"
-        @click="page++; loadLogs()"
-      >
-        下一页 →
-      </button>
-    </div>
+    <p class="footnote">
+      “结果待核验”不等于发送失败，请勿重复发送。最多保留 10 万条记录。
+    </p>
+    <dialog
+      v-if="selected"
+      ref="detailDialog"
+      class="detail-overlay"
+      aria-labelledby="detail-title"
+      @cancel="selected = null"
+      @click.self="selected = null"
+    >
+      <section class="detail-panel">
+        <header>
+          <div>
+            <p class="eyebrow">发送详情</p>
+            <h2 id="detail-title">
+              {{ selected.mode === "manual" ? "手动发送" : "自动回复" }}
+            </h2>
+          </div>
+          <button
+            class="row-open"
+            aria-label="关闭记录详情"
+            @click="selected = null"
+          >
+            <X :size="20" />
+          </button>
+        </header>
+        <span class="result-badge" :class="resultClass(selected.result)"
+          ><i />{{
+            selected.result_display || resultLabel(selected.result)
+          }}</span
+        >
+        <dl>
+          <div>
+            <dt>发送账号</dt>
+            <dd>{{ selected.account_nickname || "—" }}</dd>
+          </div>
+          <div>
+            <dt>联系人</dt>
+            <dd>{{ selected.peer_nickname || "—" }}</dd>
+          </div>
+          <div>
+            <dt>触发时间</dt>
+            <dd>{{ selected.sys_create_datetime }}</dd>
+          </div>
+          <div>
+            <dt>发送尝试</dt>
+            <dd>{{ selected.attempt_count ?? 0 }} 次</dd>
+          </div>
+        </dl>
+        <div v-if="selected.trigger_message_content" class="message-section">
+          <h3>收到的消息</h3>
+          <p>{{ selected.trigger_message_content }}</p>
+        </div>
+        <div v-if="selected.reply_text" class="message-section">
+          <h3>回复内容</h3>
+          <p>{{ selected.reply_text }}</p>
+        </div>
+        <div
+          v-if="selected.error_message"
+          class="message-section error-section"
+        >
+          <h3>未完成原因</h3>
+          <p>{{ selected.error_message }}</p>
+        </div>
+        <p class="footnote">发送结果以平台回执和接收核验为准。</p>
+      </section>
+    </dialog>
   </div>
 </template>
-
 <style scoped>
 .logs-page {
+  display: grid;
+  gap: 20px;
+}
+.head {
   display: flex;
-  flex-direction: column;
-  gap: 24px;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
 }
-
-.head h2 {
-  margin: 0 0 6px;
-  font-size: 1.6rem;
-  font-weight: 800;
+.eyebrow {
+  font-size: 12px;
+  color: var(--text-muted);
+  letter-spacing: 0.08em;
+  margin: 0 0 8px;
 }
-
-.sub {
+h1 {
   margin: 0;
-  color: var(--text-secondary);
-  font-size: 0.9rem;
+  font-size: 26px;
+  letter-spacing: -0.7px;
 }
-
-.loading-state, .empty-state {
-  display: flex;
-  flex-direction: column;
+.sub {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 7px 0 0;
+}
+.btn-glass {
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 60px 40px;
-  text-align: center;
-  gap: 16px;
+  gap: 6px;
+  white-space: nowrap;
 }
-
-.dot-spinner {
-  width: 32px;
-  height: 32px;
-  border: 2px solid rgba(255, 255, 255, 0.08);
-  border-radius: 50%;
-  border-top-color: var(--accent-crimson);
-  animation: spin 1s infinite linear;
-}
-
-.empty-icon {
-  font-size: 3rem;
-  opacity: 0.8;
-}
-
-.empty-state h3 {
-  margin: 0;
-  font-size: 1.15rem;
-  color: var(--text-primary);
-}
-
-.empty-state p {
-  margin: 4px 0 0;
-  color: var(--text-secondary);
-  font-size: 0.88rem;
-  max-width: 380px;
-}
-
-.card.error {
-  display: flex;
-  align-items: flex-start;
-  gap: 16px;
-  padding: 16px 20px;
-  border-color: rgba(239, 68, 68, 0.25);
-  background: rgba(239, 68, 68, 0.05);
-}
-
-.card.error .icon {
-  font-size: 1.5rem;
-}
-
-.err-text h4 {
-  margin: 0 0 4px;
-  color: #fca5a5;
-}
-
-.err-text p {
-  margin: 0;
-  font-size: 0.88rem;
-  color: var(--text-secondary);
-}
-
-/* Statistics Grid */
-.stats-panel-grid {
+.summary-strip {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
+  border-radius: 14px;
+  padding: 18px 0;
 }
-
-.stat-glass-card {
-  text-align: center;
-  padding: 18px 14px;
+.summary-strip > div {
+  padding: 0 16px;
+  border-right: 1px solid var(--border-subtle);
+}
+.summary-strip > div:last-child {
+  border: 0;
+}
+.summary-strip span {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--text-secondary);
 }
-
-.stat-glass-card .num {
-  font-size: 1.6rem;
-  font-weight: 700;
-  color: var(--text-primary);
+.summary-strip b {
+  display: block;
+  font-size: 26px;
+  margin-top: 8px;
+  font-variant-numeric: tabular-nums;
 }
-
-.stat-glass-card .lbl {
-  font-size: 0.78rem;
-  color: var(--text-muted);
-  font-weight: 600;
+.ok {
+  color: var(--success);
 }
-
-.stat-glass-card.ok .num {
-  color: #4ade80;
-  text-shadow: 0 0 10px rgba(74, 222, 128, 0.2);
+.bad {
+  color: var(--danger);
 }
-
-.stat-glass-card.bad .num {
-  color: #f87171;
-  text-shadow: 0 0 10px rgba(248, 113, 113, 0.2);
+.record-panel {
+  min-width: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  overflow: hidden;
 }
-
-.stat-glass-card.muted .num {
-  color: #cbd5e1;
-}
-
-/* Toolbar Controls */
-.toolbar {
-  padding: 14px 20px;
+.filter-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-subtle);
 }
-
-.filters-row {
+.source-tabs {
   display: flex;
-  gap: 16px;
-  flex-wrap: wrap;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 8px;
+  background: var(--bg-app);
 }
-
-.control-label {
+.source-tabs button {
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  padding: 8px 13px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.source-tabs button.active {
+  background: var(--bg-card);
+  color: var(--brand-primary);
+  box-shadow: 0 1px 3px var(--border-subtle);
+}
+.record-count,
+.retention {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.filters {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: 0.85rem;
-  color: var(--text-secondary);
+  padding: 14px 18px;
+  flex-wrap: wrap;
 }
-
-
-.toolbar-hint {
-  font-size: 0.8rem;
+.filters select {
+  max-width: 210px;
+}
+.filter-icon {
   color: var(--text-muted);
 }
-
-/* Responsive Glass Table */
-.table-container {
-  overflow: hidden;
-  border: 1px solid var(--glass-border);
-  background: var(--glass-bg);
+select {
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  padding: 8px 28px 8px 10px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: 12px;
 }
-
-.table-responsive {
-  width: 100%;
-  overflow-x: auto;
+.retention {
+  margin-left: auto;
 }
-
-.logs-table {
+.text-button {
+  border: 0;
+  background: transparent;
+  color: var(--brand-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+.table-scroll {
+  overflow: auto;
+}
+table {
   width: 100%;
+  min-width: 690px;
   border-collapse: collapse;
-  font-size: 0.85rem;
+  table-layout: fixed;
   text-align: left;
 }
-
-.logs-table th {
-  padding: 14px 18px;
-  font-weight: 600;
+.col-time {
+  width: 125px;
+}
+.col-person {
+  width: 170px;
+}
+.col-result {
+  width: 128px;
+}
+.col-action {
+  width: 48px;
+}
+th {
+  padding: 12px 18px;
+  background: var(--bg-app);
+  font-size: 11px;
   color: var(--text-secondary);
-  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
-  background: rgba(0, 0, 0, 0.02);
-}
-
-.logs-table td {
-  padding: 14px 18px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.03);
-  vertical-align: top;
-  color: var(--text-secondary);
-}
-
-.logs-table tr:hover td {
-  background: rgba(255, 255, 255, 0.25);
-}
-
-.logs-table .time {
+  font-weight: 500;
   white-space: nowrap;
-  color: var(--text-muted);
+}
+td {
+  padding: 16px 18px;
+  border-top: 1px solid var(--border-subtle);
+  vertical-align: middle;
+  font-size: 13px;
+}
+tbody tr:hover,
+tbody tr.selected {
+  background: var(--brand-primary-soft);
+}
+td b,
+td small {
+  display: block;
+}
+td b {
   font-weight: 500;
 }
-
-.account-name, .peer-name {
-  font-weight: 600;
-  color: var(--text-primary);
+.time {
+  font-variant-numeric: tabular-nums;
 }
-
-.badge {
-  font-size: 0.72rem;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 99px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+.time b {
+  font-size: 13px;
+}
+.time small {
+  font-size: 11px;
   color: var(--text-muted);
-  display: inline-block;
+  margin-top: 5px;
 }
-
-.badge.ok {
-  background: rgba(34, 197, 94, 0.1);
-  border-color: rgba(34, 197, 94, 0.2);
-  color: #4ade80;
+.person b,
+.person small,
+.content b,
+.content small {
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
 }
-
-.badge.bad {
-  background: rgba(239, 68, 68, 0.1);
-  border-color: rgba(239, 68, 68, 0.2);
-  color: #f87171;
-}
-
-.detail-cell {
-  line-height: 1.5;
-}
-
-.reply-msg {
-  color: var(--text-primary);
-  font-weight: 500;
-}
-
-.error-msg {
-  color: #f87171;
-  font-size: 0.8rem;
-  background: rgba(239, 68, 68, 0.05);
-  padding: 4px 8px;
-  border-radius: 6px;
-  margin-top: 4px;
-  display: inline-block;
-  border: 1px solid rgba(239, 68, 68, 0.1);
-}
-
-.trigger-msg {
-  font-size: 0.78rem;
+.person small,
+.content small {
   color: var(--text-muted);
+  font-size: 12px;
   margin-top: 6px;
-  display: flex;
+}
+.content .error-text {
+  color: var(--danger);
+}
+.result-badge {
+  display: inline-flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
+  word-break: keep-all;
+  border-radius: 6px;
+  font-size: 11px;
+  padding: 5px 7px;
+  background: var(--bg-app);
+  color: var(--text-secondary);
 }
-
-.trigger-msg .tag {
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  padding: 1px 4px;
-  border-radius: 3px;
-  font-size: 0.7rem;
+.result-badge i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
 }
-
-/* Pagination panel */
-.pager {
+.result-badge.ok {
+  background: var(--success-soft);
+  color: var(--success);
+}
+.result-badge.bad {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.row-open {
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  padding: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.row-open:hover {
+  background: var(--border-subtle);
+}
+.pagination {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.pagination > div {
+  display: flex;
+  gap: 8px;
+}
+.pagination select {
+  margin-left: 5px;
+}
+.pagination button {
+  padding: 7px 12px;
+  font-size: 12px;
+}
+.footnote {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.7;
+  margin: 0;
+}
+.empty {
+  display: grid;
+  justify-items: center;
+  text-align: center;
+  padding: 55px 20px;
+  gap: 12px;
+  color: var(--text-muted);
+}
+.empty p {
+  margin: 0;
+  font-size: 13px;
+}
+.empty b {
+  color: var(--text-secondary);
+}
+.error {
+  color: var(--danger);
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+.detail-overlay {
+  margin: 0 0 0 auto;
+  padding: 0;
+  border: 0;
+  max-height: none;
+  max-width: none;
+  width: min(440px, 100vw);
+  height: 100%;
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, var(--text-primary) 25%, transparent);
+  z-index: 50;
+  display: flex;
+  justify-content: flex-end;
+}
+.detail-overlay::backdrop {
+  background: color-mix(in srgb, var(--text-primary) 25%, transparent);
+}
+.detail-panel {
+  width: min(440px, 100vw);
+  height: 100%;
+  box-sizing: border-box;
+  overflow: auto;
+  padding: 28px;
+  background: var(--bg-card);
+  box-shadow: -8px 0 30px var(--border-subtle);
+}
+.detail-panel header {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 16px;
-  margin-top: 8px;
+  justify-content: space-between;
+  margin-bottom: 24px;
 }
-
-.pager-lbl {
-  font-size: 0.85rem;
+.detail-panel h2 {
+  font-size: 21px;
+  margin: 0;
+}
+.detail-panel dl {
+  margin: 24px 0;
+}
+.detail-panel dl > div {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  padding: 11px 0;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+dt {
+  color: var(--text-muted);
+}
+dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.message-section {
+  margin-bottom: 22px;
+}
+.message-section h3 {
+  font-size: 12px;
   color: var(--text-secondary);
-  font-weight: 500;
 }
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
+.message-section p {
+  font-size: 13px;
+  line-height: 1.8;
+  background: var(--bg-app);
+  padding: 14px;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.error-section p {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+button:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--brand-primary);
+  outline-offset: 2px;
+}
+@media (max-width: 700px) {
+  .summary-strip {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 18px;
+  }
+  .summary-strip > div:nth-child(2) {
+    border: 0;
+  }
+  .head {
+    align-items: flex-start;
+  }
+  .head h1 {
+    font-size: 22px;
+  }
+  .retention {
+    width: 100%;
+    margin-left: 0;
+  }
+  .pagination {
+    flex-wrap: wrap;
+  }
+  .filters select {
+    max-width: 165px;
+  }
+  .head > .btn-glass {
+    font-size: 12px;
+    padding: 8px;
+  }
 }
 </style>

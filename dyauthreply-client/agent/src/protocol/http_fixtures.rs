@@ -25,9 +25,9 @@ const EXPECTED_REFERENCE_REPOSITORY: &str = "https://github.com/lukylong/DouYin_
 const EXPECTED_REFERENCE_REVISION: &str = "9afaf79580b1ee84e8954ff906ff26869d5b7f1f";
 const EXPECTED_WIRE_CORPUS_PATH: &str = "douyin_pc_im_v1.json";
 const EXPECTED_WIRE_CORPUS_SHA256: &str =
-    "043e92fc54582c16b9baab50f6c106776489f443ccb71f2862647b17200fa234";
+    "8d6981882d56347a6d149a8bcd6ade080a8548d2956edf0c93c7b1a58bcb5b21";
 const EXPECTED_HTTP_PLAN_CORPUS_SHA256: &str =
-    "88f00c3c7014fae64edae44065916d70eff2ed8b82054602f73e2a14c7862d47";
+    "eae62985a43235238bc2397fecb5570ce1df42eed2b5322948877a45b4f4ed35";
 const EXPECTED_DIGEST_PREFIX_HEX: &str = "44595f485454505f504c414e5f563100";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -369,7 +369,7 @@ fn validate_metadata(
         "wire_corpus.request_cases",
     )?;
     metadata(
-        corpus.wire_corpus.response_cases == 31
+        corpus.wire_corpus.response_cases == 34
             && corpus.wire_corpus.response_cases == wire_response_cases,
         "wire_corpus.response_cases",
     )?;
@@ -940,7 +940,7 @@ mod tests {
     #[test]
     fn embedded_http_plan_corpus_verifies_all_cases() {
         let report =
-            verify_embedded_http_plan_corpus(&wire_bodies(), EXPECTED_WIRE_CORPUS_SHA256, 2, 31)
+            verify_embedded_http_plan_corpus(&wire_bodies(), EXPECTED_WIRE_CORPUS_SHA256, 2, 34)
                 .expect("HTTP RequestPlan corpus must verify");
         assert_eq!(report.schema_version, 1);
         assert_eq!(report.corpus_id, EXPECTED_CORPUS_ID);
@@ -958,7 +958,7 @@ mod tests {
                 &wire_bodies(),
                 "0000000000000000000000000000000000000000000000000000000000000000",
                 2,
-                31,
+                34,
             ),
             Err(HttpFixtureError::InvalidMetadata(_))
         ));
@@ -974,7 +974,7 @@ mod tests {
                 &wire_bodies(),
                 EXPECTED_WIRE_CORPUS_SHA256,
                 2,
-                31,
+                34,
             ),
             Err(HttpFixtureError::InvalidMetadata(_)
                 | HttpFixtureError::Mismatch { .. }

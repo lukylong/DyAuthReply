@@ -57,3 +57,7 @@ dyauthreply-client/launcher/build/
 *.ntvs*
 *.njsproj
 *.sln
+
+# Native desktop build outputs
+/dyauthreply-client/desktop/src-tauri/binaries/dy-agent-*
+/dyauthreply-client/desktop/src-tauri/binaries/native-manifest.json

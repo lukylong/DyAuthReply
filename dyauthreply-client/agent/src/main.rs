@@ -7,9 +7,17 @@ use std::{
 use anyhow::{bail, Context, Result};
 use dy_agent::{
     config::AgentConfig,
-    health::{router, HealthResponse, StorageHealthResponse, StorageStartupSnapshot},
+    health::{
+        live_router, HealthHandle, HealthResponse, StorageHealthResponse, StorageStartupSnapshot,
+    },
     identity,
     protocol::fixtures::verify_embedded_corpus,
+    runtime::hosted::{HostedController, HostedSettings},
+    runtime::supervisor::RuntimeHandle,
+    runtime::{
+        executor::ExecutionConfig,
+        messaging::{ManualService, MessagingSettings},
+    },
     storage::{
         retention::{plan_cleanup_with_previous, DiskSnapshot},
         SegmentCatalog, SegmentStore, ZstdCodec,
@@ -180,26 +188,332 @@ fn parse_command() -> Result<Command> {
 
 async fn serve(
     config: AgentConfig,
-    health: HealthResponse,
-    _store: Arc<CoreStore>,
-    _segment_store: SegmentStore,
+    mut health: HealthResponse,
+    store: Arc<CoreStore>,
+    segment_store: SegmentStore,
 ) -> Result<()> {
+    // Exclude an installed legacy launcher before reading its SQLite/.env state.
+    // Rust selection is published only after migration/onboarding succeeds.
+    let engine_transition = begin_engine_transition()?;
+    let (ipc, ipc_stop) = desktop_ipc(&config, &health)?;
+    let (hosted_settings, messaging_settings, license) =
+        onboarding_modes(&config.data_dir, &mut health)?;
+    let _engine_gate = engine_transition
+        .map(|transition| transition.activate(&config.data_dir))
+        .transpose()?;
     let listener = TcpListener::bind(config.bind_addr)
         .await
         .with_context(|| format!("cannot bind Agent health server to {}", config.bind_addr))?;
+    let health = HealthHandle::new(health);
+    let runtime = RuntimeHandle::start(
+        config.runtime.clone(),
+        health.snapshot().instance_id.to_string(),
+        store.clone(),
+        segment_store,
+        config.storage.clone(),
+        health.clone(),
+    )
+    .context("cannot start bounded account runtime")?;
+    let messaging = match start_messaging(
+        messaging_settings,
+        hosted_settings.as_ref(),
+        runtime.clone(),
+        store.clone(),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            runtime.drain().await?;
+            return Err(error);
+        }
+    };
+    let health_snapshot = health.snapshot();
+    let hosted = if let Some(settings) = hosted_settings {
+        match HostedController::start(
+            settings,
+            health_snapshot.instance_id,
+            health_snapshot.boot_id,
+            runtime.clone(),
+            store,
+        )
+        .await
+        {
+            Ok(controller) => Some(controller),
+            Err(error) => {
+                runtime.drain().await?;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
+    if let (Some((service, _)), Some(hosted)) = (&messaging, &hosted) {
+        service.bind_controller(hosted.clone()).await?;
+    }
+    let renewal = license
+        .as_ref()
+        .map(|manager| manager.start(runtime.subscribe_control_ticks()));
+    log_ready(&config, &health_snapshot);
+
+    let ui_updates = messaging
+        .as_ref()
+        .map(|(service, _)| service.start_ui_updates());
+    let frontier_for_shutdown = messaging.as_ref().map(|(service, _)| service.clone());
+    let frontier_for_cleanup = frontier_for_shutdown.clone();
+    let runtime_for_shutdown = runtime.clone();
+    let hosted_for_shutdown = hosted.clone();
+    ipc.watch_parent();
+    let router = business_router(health, license, messaging, &config.data_dir).merge(ipc.router());
+    let server_result = axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_live_runtime(
+            runtime_for_shutdown,
+            hosted_for_shutdown,
+            frontier_for_shutdown,
+            ipc_stop,
+        ))
+        .await
+        .context("Agent health server failed");
+    if let Some(task) = ui_updates {
+        task.abort();
+        let _ = task.await;
+    }
+    if let Some(task) = renewal {
+        task.stop().await?;
+    }
+    if let Some(service) = frontier_for_cleanup {
+        service.stop_frontier().await?;
+    }
+    if let Some(controller) = hosted {
+        if let Err(error) = controller.shutdown().await {
+            tracing::error!(%error, "hosted ownership controller cleanup failed");
+        }
+    }
+    // Also drain if the listener fails before the signal future completes.
+    // Preserve the installation lock and store owners while a timed-out
+    // cleanup is still finishing. Never exit the async main scope and release
+    // ownership while a blocking writer can still touch the database.
+    while let Err(error) = runtime.drain().await {
+        tracing::error!(%error, "runtime remains draining; retaining installation lock");
+    }
+    server_result
+}
+
+type StartupModes = (
+    Option<HostedSettings>,
+    Option<MessagingSettings>,
+    Option<Arc<dy_agent::license::NativeLicense>>,
+);
+fn begin_engine_transition() -> Result<Option<dy_agent::engine_gate::EngineTransition>> {
+    env::var_os("CLIENT_DATA_DIR")
+        .map(|_| {
+            dy_agent::engine_gate::EngineTransition::acquire(
+                &dy_agent::engine_gate::client_root_from_env()?,
+            )
+        })
+        .transpose()
+}
+
+fn onboarding_modes(root: &std::path::Path, health: &mut HealthResponse) -> Result<StartupModes> {
+    let license = load_native_license(root)?;
+    let (legacy_hosted, settings) = if license.is_some() {
+        let settings = native_config_path("DY_AGENT_MESSAGING_CONFIG", root, "messaging.json")
+            .map(|path| dy_agent::runtime::messaging::read_private(std::path::Path::new(&path)))
+            .transpose()?;
+        (None, settings)
+    } else {
+        load_modes(health, root)?
+    };
+    let (hosted, settings) =
+        dy_agent::onboarding::bootstrap(root, license.as_ref(), legacy_hosted, settings)?;
+    if settings.is_some() {
+        health.protocol_mode = "native-registry".into();
+    }
+    Ok((hosted, settings, license))
+}
+
+fn desktop_ipc(
+    config: &AgentConfig,
+    health: &HealthResponse,
+) -> Result<(
+    dy_agent::desktop_ipc::DesktopIpc,
+    tokio::sync::watch::Receiver<bool>,
+)> {
+    let token = dy_agent::desktop_ipc::provision(&config.data_dir)?;
+    dy_agent::desktop_ipc::DesktopIpc::new(
+        token,
+        health.instance_id,
+        health.boot_id,
+        config.bind_addr,
+    )
+}
+
+fn business_router(
+    health: HealthHandle,
+    license: Option<Arc<dy_agent::license::NativeLicense>>,
+    messaging: Option<(Arc<ManualService>, String)>,
+    data_dir: &std::path::Path,
+) -> axum::Router {
+    let mut router = live_router(health.clone());
+    if let Some(manager) = license.as_ref() {
+        router = router.merge(dy_agent::license::api::router(manager.clone()));
+    }
+    if let Some((service, token)) = messaging {
+        router = router.merge(dy_agent::capacity::router(
+            service.capacity(),
+            service.clone(),
+            token.clone(),
+        ));
+        if let Some(manager) = license.as_ref() {
+            let importer = Arc::new(dy_agent::onboarding::Importer::new(
+                service.clone(),
+                manager.clone(),
+            ));
+            router = router.merge(dy_agent::onboarding::router(&importer, token.clone()));
+            router = router.merge(dy_agent::quick_auth::api::router(
+                dy_agent::quick_auth::Broker::new(data_dir.to_path_buf(), importer),
+                token.clone(),
+            ));
+        }
+        router = router.merge(dy_agent::audit::api::router(service.clone(), token.clone()));
+        let log_dir = data_dir.parent().unwrap_or(data_dir).join("logs");
+        router = router.merge(dy_agent::admin::router(
+            service.clone(),
+            health,
+            token.clone(),
+            log_dir,
+        ));
+        router = router.merge(dy_agent::business::api::router(
+            service.clone(),
+            license,
+            token.clone(),
+        ));
+        router = router.merge(dy_agent::workbench::api::router(
+            service.clone(),
+            service.workbench(),
+            token.clone(),
+        ));
+        router = router.merge(dy_agent::runtime::messaging::api::router(service, token));
+    }
+    router
+}
+
+fn log_ready(config: &AgentConfig, health_snapshot: &HealthResponse) {
     info!(
         address = %config.bind_addr,
         data_dir = %config.data_dir.display(),
-        protocol_mode = %health.protocol_mode,
-        protocol_parity_verified = health.protocol_parity_verified,
-        protocol_parity_all_verified = health.protocol_parity_all_verified,
+        protocol_mode = %health_snapshot.protocol_mode,
+        protocol_parity_verified = health_snapshot.protocol_parity_verified,
+        protocol_parity_all_verified = health_snapshot.protocol_parity_all_verified,
+        central_timer_tasks = health_snapshot.runtime.central_timer_tasks,
         "dy-agent runtime is ready"
     );
+}
 
-    axum::serve(listener, router(health))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("Agent health server failed")
+fn native_config_path(
+    name: &str,
+    data_dir: &std::path::Path,
+    file: &str,
+) -> Option<std::ffi::OsString> {
+    env::var_os(name).or_else(|| {
+        let path = data_dir.join(file);
+        path.is_file().then(|| path.into_os_string())
+    })
+}
+
+fn load_native_license(
+    data_dir: &std::path::Path,
+) -> Result<Option<Arc<dy_agent::license::NativeLicense>>> {
+    let license = native_config_path("DY_AGENT_LICENSE_CONFIG", data_dir, "native-license.json")
+        .map(|path| -> Result<_> {
+            let config = dy_agent::runtime::messaging::read_private(std::path::Path::new(&path))?;
+            dy_agent::license::NativeLicense::new(config)
+        })
+        .transpose()?;
+    Ok(license)
+}
+
+async fn shutdown_live_runtime(
+    runtime_for_shutdown: RuntimeHandle,
+    hosted_for_shutdown: Option<Arc<HostedController>>,
+    frontier_for_shutdown: Option<Arc<ManualService>>,
+    mut ipc_stop: tokio::sync::watch::Receiver<bool>,
+) {
+    tokio::select! {() = shutdown_signal()=>{},() = async {while !*ipc_stop.borrow_and_update(){if ipc_stop.changed().await.is_err(){break;}}}=>{}}
+    if let Some(service) = frontier_for_shutdown {
+        service.stop_notifications();
+        if let Err(error) = service.stop_frontier().await {
+            tracing::error!(%error,"Frontier shutdown failed");
+        }
+    }
+    if let Some(controller) = hosted_for_shutdown {
+        if let Err(error) = controller.shutdown().await {
+            tracing::error!(%error, "hosted ownership controller stopped with error");
+        }
+    }
+    if let Err(error) = runtime_for_shutdown.drain().await {
+        tracing::error!(%error, "bounded account runtime drain failed");
+    }
+}
+
+fn load_modes(
+    health: &mut HealthResponse,
+    data_dir: &std::path::Path,
+) -> Result<(Option<HostedSettings>, Option<MessagingSettings>)> {
+    let hosted_settings = native_config_path("DY_AGENT_HOSTED_CONFIG", data_dir, "hosted.json")
+        .map(|path| HostedSettings::load(std::path::Path::new(&path)))
+        .transpose()?;
+    let messaging_settings: Option<MessagingSettings> =
+        native_config_path("DY_AGENT_MESSAGING_CONFIG", data_dir, "messaging.json")
+            .map(|path| dy_agent::runtime::messaging::read_private(std::path::Path::new(&path)))
+            .transpose()?;
+    if messaging_settings.is_some() {
+        anyhow::ensure!(
+            hosted_settings.is_some(),
+            "native messaging requires hosted ownership"
+        );
+        let automatic = messaging_settings
+            .as_ref()
+            .is_some_and(|s| s.automation.iter().any(|p| p.enabled));
+        health.protocol_mode = if automatic {
+            "native-auto-ws"
+        } else {
+            "native-manual-ws"
+        }
+        .into();
+        health.protocol_execution.account_worker = if automatic {
+            "native_auto_ws"
+        } else {
+            "native_manual_ws"
+        }
+        .into();
+    }
+    Ok((hosted_settings, messaging_settings))
+}
+
+async fn start_messaging(
+    settings: Option<MessagingSettings>,
+    hosted: Option<&HostedSettings>,
+    runtime: RuntimeHandle,
+    store: Arc<CoreStore>,
+) -> Result<Option<(Arc<ManualService>, String)>> {
+    let messaging = if let Some(settings) = settings {
+        let service = ManualService::load(&settings, hosted, runtime.clone(), store.clone())?;
+        runtime
+            .install_executor(
+                service.clone(),
+                ExecutionConfig {
+                    max_in_flight: 8,
+                    timeout: std::time::Duration::from_secs(40),
+                },
+            )
+            .await?;
+        service.register_accounts().await?;
+        Some((service, settings.api_token))
+    } else {
+        None
+    };
+    Ok(messaging)
 }
 
 async fn shutdown_signal() {

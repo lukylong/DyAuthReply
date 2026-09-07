@@ -426,7 +426,7 @@ mod tests {
         assert_eq!(report.corpus_id, EXPECTED_CORPUS_ID);
         assert_eq!(report.reference_revision, EXPECTED_REFERENCE_REVISION);
         assert_eq!(report.request_cases, 2);
-        assert_eq!(report.response_cases, 31);
+        assert_eq!(report.response_cases, 34);
         assert_eq!(report.corpus_sha256.len(), 64);
         assert_eq!(report.request_plan_corpus_id, "douyin-pc-im-http-plan-v1");
         assert_eq!(

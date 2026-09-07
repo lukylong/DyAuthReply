@@ -220,10 +220,56 @@ high/critical 水位会暂停后台工作并按 `debug -> chat -> audit` 有界�
 持久化滞回状态保持压力直到 low watermark；执行器会再次强制 family minimum。critical 只抑制
 可丢弃正文，正确性库仍可提交 receipt/outbox。Health API v4 暴露启动时的存储压力与恢复/清理计数。
 
-协议模式仍固定为 `shadow-disabled`。当前实现不会连接抖音、不会读取 Cookie 或现有客户端
-数据库、不会执行 A-Bogus/ECDSA/HMAC/ECDH/ree-key 算法、不会抢占账号租约、不会发送消息，
+Scheduler 阶段已接入 serve 生命周期：一个 CentralTimer 统一安排账号 reconcile、pending recovery、
+keepalive、聚合 heartbeat、Health 刷新和运行期存储清理；同 key 重排使用 generation，睡眠恢复只
+合并触发一次。每个账号使用轻量 Tokio Actor 和有界数据 mailbox，stop/lease/credential 控制通过
+独立 latest-value channel 绕过满队列。中央 FairQueue 具有全局/账号/class 三层硬上限，按账号
+round-robin，并用 `16:4:1` 加权与 manual burst 上限防止热点账号或高优先级长期饿死其他任务。
+
+Transport/signer 分别使用账号级 Closed/Open/HalfOpen 熔断；只有 transient dependency failure
+触发指数退避，认证失效和平台发送风控仍写入正交账号状态。全局 fixed-point token bucket 把重连
+限制为 4/s、burst 8。Signer 使用固定少量账号粘性 lanes，任务只携带 durable ID、plan digest、
+actor/credential generation 和 fence epoch。安装级 heartbeat 只保留每账号最新非敏感状态，默认
+30 秒聚合 delta、5 分钟 full repair，支持有界确定性分片与 ACK 后按 revision 清 dirty。
+
+Health API v5 读取实时快照而非启动常量，报告 actor/timer、队列、高水位/拒绝/公平延迟、signer、
+breaker/reconnect、heartbeat、存储清理和 drain。`runtime-sim` 与集成测试冻结 10/100/300 账号、
+热点账号、300 突发、断线风暴、sleep/resume、300 账号单 heartbeat batch 等无网络门禁。serve 的
+执行边界仍是 no-network shadow，收到 SIGTERM 后关闭 ingress/timer，drain 已接收任务并观察所有
+Actor/driver；不会因此取得任何真实账号所有权。
+
+调度阶段的默认 worker 仍固定为 `shadow-disabled`，不连接抖音、不读取 Cookie 或现有客户端
+数据库、不抢占账号租约、不发送消息；下述原生执行模块另行显式调用，
 也不会绑定现有生产端口。当前 HTTP plan 只验证签名输入和 canned 输出的组装，不覆盖真实 signer、
 证书网络获取、TLS/HTTP2 wire 行为、inbox 或 WebSocket；这些必须通过后续独立语料及集成门禁，
-不能由本阶段的离线测试推断为已完成。当前 schema 仍未完成旧 Python 会话摘要、冷却/日限额、
+不能由本阶段的离线和仿真测试推断为已完成。当前 schema 仍未完成旧 Python 会话摘要、冷却/日限额、
 命令 ACK 和全量统计的业务迁移；这些必须在 Scheduler/API migration 子阶段补齐，不能因为滚动
 文件已经实现就删除旧数据库或 Python sender。
+
+### Scheduler 收尾契约（2026-09-05）
+
+- mailbox 同步请求返回中央队列真实 ACK；拿到队列锁后再次校验状态，拒绝已失效的任务。
+  关闭时已出 mailbox 但尚未入中央队列的任务也计入 unresolved，而不是假记为 dispatched。
+- signer 同时校验工作用途权限和三代 fence；内部 incarnation 使用不复用的 Arc 身份，
+  删除再导入同一账号后，旧 in-flight permit 仍失效。dependency permit 使用 RAII 和独立
+  breaker 身份，取消会释放容量，旧账号实例的完成结果不更新新实例。
+- 删除账号先成功投递 timer 控制命令再修改 registry；通道满时保持账号，支持原操作重试。
+- `drain()` 调用在配置期限内返回成功或超时错误。超时不等于已停止：协调任务仍保有
+  所有权，等待未完成的 registry 操作及不可中断的同步磁盘 I/O，Health 保持 Draining；
+  实际全部收尾后才置 Stopped。客户端进程在此期间保留安装目录锁，避免新旧写入竞争。
+  内核 I/O 永久挂起不属于“所有任务已结束”的成功结果；进程级强制终止属于第 10 步监督器门禁。
+- Health 存活字段在快照写锁内读取；局部缓存更新保留未采样的队列与熔断计数。
+- 这一步只完成本地调度和状态聚合生成，远端 heartbeat 发送/ACK、真实协议执行及账号迁移
+  仍分别属于后续步骤。仿真的 p95 是虚拟调度时间，不是抖音端到端延迟或承载上限。
+
+### 原生执行模块接线进度（2026-09-05）
+
+`native_signer` 已执行 RustCrypto ticket guard，以及二进制内嵌 QuickJS 的参考 A-Bogus。
+无 Python/Node 运行时子进程；A-Bogus 算法本身仍为参考 JS，不能描述为全原生 Rust 算法。
+`live_http` 使用 wreq/BoringSSL 做真实 HTTP/2 请求；公开 robots.txt 探测返回 HTTP 200，
+但不代表账号鉴权成功。`LiveSender` 的真实签名→一次 HTTP→回执分类→outbox 提交已接通，
+使用本地 socket peer 验证；它仍不是默认账号 worker 的 executor。
+签名/HTTP 资源从进程 owner 注入，不在每账号构造器中另建池。发送前复核最新 watch 状态、
+凭证代次和持久化 lease，再原子领取 StartAttempt，故障进入 Uncertain，禁止自动盲重发。
+仍待远端 lease/命令配置同步、凭证完整导入/刷新、会话上下文、inbox/WebSocket、UI/规则
+以及真实账号 canary；默认 worker 和客户端版本保持原状。

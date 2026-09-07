@@ -2,7 +2,7 @@
 import { onMounted, ref, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import { AlertTriangle, CheckCircle2 } from 'lucide-vue-next';
-import { getHealth } from '../api/client';
+import { getHealth, restartNativeService } from '../api/client';
 import { APP_VERSION, useHiddenAdminEntry } from '../composables/useHiddenAdminEntry';
 
 const router = useRouter();
@@ -67,12 +67,13 @@ async function startConnectionLoop() {
   // 超时失败
   status.value = 'failed';
   errorMessage.value =
-    '服务启动超时。请确认未重复打开多个 D助手 窗口，并查看日志：%APPDATA%\\DyAuthReply\\logs\\launcher.log（Windows）或 ~/Library/Application Support/DyAuthReply/logs/launcher.log（macOS）';
+    '服务启动超时。请确认没有其他版本正在运行，然后重新连接。';
 }
 
 async function retry() {
   retryCount.value = 0;
   errorMessage.value = '';
+  try { await restartNativeService(); } catch (e) { errorMessage.value = String(e); return; }
   await startConnectionLoop();
 }
 

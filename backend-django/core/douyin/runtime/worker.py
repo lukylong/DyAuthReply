@@ -1000,6 +1000,14 @@ class DouyinWorker:
 
     # ---------------- 主入口 ----------------
     async def run(self) -> None:
+        from core.client.engine_gate import acquire_worker_engine
+
+        # Acquire before any account scan, command consumption or platform I/O;
+        # retain exclusion until every account task has finished its cleanup.
+        with acquire_worker_engine():
+            await self._run_owned()
+
+    async def _run_owned(self) -> None:
         from core.douyin.runtime.sharding import describe as _shard_desc
         from core.douyin.runtime.account_status import reconcile_send_restrictions
 
@@ -1011,16 +1019,21 @@ class DouyinWorker:
         await _log_event(None, 'worker_started', 'info', 'Worker 启动',
                          f"worker_id={self.worker_id} {_shard_desc()}", self.worker_id)
 
+        loops = [asyncio.create_task(run()) for run in (
+            self._loop_refresh_accounts, self._loop_heartbeat, self._loop_redis_commands,
+            self._loop_db_commands, self._loop_renew_leases, self._loop_credential_probe,
+        )]
         try:
-            await asyncio.gather(
-                self._loop_refresh_accounts(),
-                self._loop_heartbeat(),
-                self._loop_redis_commands(),
-                self._loop_db_commands(),
-                self._loop_renew_leases(),
-                self._loop_credential_probe(),
-            )
+            await asyncio.gather(*loops)
         finally:
+            # gather propagates one failure without cancelling siblings. Join
+            # them before releasing the cross-engine lock or another engine
+            # could start while an old command consumer still sends messages.
+            self._stop.set()
+            for task in loops:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*loops, return_exceptions=True)
             logger.info("[worker] 进入关停流程")
             for aid in list(self._tasks.keys()):
                 await self._stop_account(aid)

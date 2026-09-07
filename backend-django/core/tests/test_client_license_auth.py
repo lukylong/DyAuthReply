@@ -34,6 +34,63 @@ from core.client.license_auth import (
 
 
 class ClientLicenseAuthTests(TestCase):
+    def test_license_operation_lock_excludes_a_second_process(self):
+        import subprocess
+        import sys
+        import time
+        code = '''
+import os,sys,time
+from pathlib import Path
+os.environ.setdefault('DJANGO_SETTINGS_MODULE','application.settings')
+import django; django.setup()
+from core.client.license_auth import _license_operation_lock
+root=Path(sys.argv[1]); name=sys.argv[2]
+(root/('attempt-'+name)).touch()
+with _license_operation_lock():
+    (root/('inside-'+name)).touch()
+    if name=='a':
+        while not (root/'release').exists(): time.sleep(0.01)
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env = dict(os.environ, CLIENT_DATA_DIR=directory, ZQ_ENV='client',
+                       PYTHONPATH=str(Path(__file__).resolve().parents[2]))
+            children = []
+            def wait_file(name):
+                end = time.monotonic() + 10
+                while not (root / name).exists() and time.monotonic() < end:
+                    time.sleep(0.02)
+                self.assertTrue((root / name).exists(), name)
+            try:
+                children.append(subprocess.Popen([sys.executable, '-c', code, directory, 'a'], env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+                wait_file('inside-a')
+                children.append(subprocess.Popen([sys.executable, '-c', code, directory, 'b'], env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+                wait_file('attempt-b')
+                time.sleep(0.2)
+                self.assertFalse((root / 'inside-b').exists())
+            finally:
+                (root / 'release').touch()
+                for child in children:
+                    _, error = child.communicate(timeout=15)
+                    self.assertEqual(child.returncode, 0, error.decode())
+            self.assertTrue((root / 'inside-b').exists())
+
+    def test_rotating_state_publish_is_private_atomic_and_removes_temporary_file(self):
+        from core.client.license_auth import _safe_json_dump
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / '.license-state.json'
+            path.write_text('{}')
+            if os.name == 'posix':
+                path.chmod(0o644)
+            _safe_json_dump(path, {'activation_token': 'synthetic-new-token'})
+            self.assertEqual(json.loads(path.read_text())['activation_token'], 'synthetic-new-token')
+            self.assertEqual(list(Path(directory).iterdir()), [path])
+            if os.name == 'posix':
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory(prefix='dyauthreply-license-auth-')
         self.state_path = Path(self.temp_dir.name) / '.license-state.json'

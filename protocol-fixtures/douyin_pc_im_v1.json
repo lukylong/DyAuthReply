@@ -93,6 +93,69 @@
       }
     },
     {
+      "id": "delivered_raw_check_2_with_ack",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b3238a2063508969aef3a2208636c69656e742d3132247b227374617475735f636f6465223a302c227261775f636865636b5f636f6465223a327d",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456790,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 2,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": true,
+        "classification": "delivered"
+      }
+    },
+    {
+      "id": "delivered_soft_8513_raw_check_2_with_ack",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b323ba2063808979aef3a2208636c69656e742d3132277b227374617475735f636f6465223a383531332c227261775f636865636b5f636f6465223a327d",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 123456791,
+        "client_msg_id": "client-1",
+        "biz_status_code": 8513,
+        "biz_status_text": "",
+        "biz_raw_check_code": 2,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": true,
+        "classification": "delivered_soft"
+      }
+    },
+    {
+      "id": "uncertain_raw_check_2_without_business_rejection",
+      "http_status": 200,
+      "expected_client_msg_id": "client-1",
+      "body_hex": "0864109d4e180022024f4b3235a2063208002208636c69656e742d3132247b227374617475735f636f6465223a302c227261775f636865636b5f636f6465223a327d",
+      "expected": {
+        "status_code": 0,
+        "status_msg": "OK",
+        "server_msg_id": 0,
+        "client_msg_id": "client-1",
+        "biz_status_code": 0,
+        "biz_status_text": "",
+        "biz_raw_check_code": 2,
+        "outer_status_present": true,
+        "has_response_body": true,
+        "has_inner_response": true,
+        "business_payload_present": true,
+        "business_payload_valid": true,
+        "classification": "uncertain"
+      }
+    },
+    {
       "id": "risk_8610_raw_check_2",
       "http_status": 200,
       "expected_client_msg_id": "client-1",

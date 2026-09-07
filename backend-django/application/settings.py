@@ -499,6 +499,7 @@ DOWNLOAD_RELEASE_PAGE = os.environ.get(
 DOWNLOAD_MACOS_FILE = os.environ.get('DOWNLOAD_MACOS_FILE', 'DAssistant-macos-aarch64.dmg')
 DOWNLOAD_WINDOWS_FILE = os.environ.get('DOWNLOAD_WINDOWS_FILE', 'DAssistant-windows-x64-setup.exe')
 DOWNLOAD_EXTENSION_FILE = os.environ.get('DOWNLOAD_EXTENSION_FILE', 'douyin-cred-extractor.zip')
+DOWNLOAD_EXTENSION_VERSION = os.environ.get('DOWNLOAD_EXTENSION_VERSION') or '2.2.0'
 
 # 自建服务器托管（国内直连，规避 GitHub 慢）：
 # 设置 DOWNLOAD_PUBLIC_BASE_URL（如 https://pro.zhenyangtang.com.cn）后，下载链接走
@@ -545,7 +546,7 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.25'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.26'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）

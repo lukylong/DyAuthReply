@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "D助手",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "identifier": "com.dyauthreply.client",
   "build": {
-    "beforeDevCommand": "npm run dev --prefix ../client-ui",
-    "devUrl": "http://localhost:5173/app/",
-    "beforeBuildCommand": "npm run build --prefix ../client-ui",
+    "beforeDevCommand": "node ../../scripts/client/build_agent.mjs --profile debug && npm run dev --prefix ../client-ui",
+    "devUrl": "http://localhost:5173/",
+    "beforeBuildCommand": "node ../../scripts/client/build_agent.mjs && npm run build --prefix ../client-ui",
     "frontendDist": "../../client-ui/dist"
   },
   "app": {
@@ -22,7 +22,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http: https: data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:18765 ws://127.0.0.1:18765 https:; media-src 'self' http: https: blob:; object-src 'none'; frame-src 'none'"
     }
   },
   "plugins": {
@@ -41,7 +41,11 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg", "nsis"],
+    "targets": [
+      "app",
+      "dmg",
+      "nsis"
+    ],
     "createUpdaterArtifacts": true,
     "windows": {
       "nsis": {
@@ -56,7 +60,10 @@
       "icons/icon.ico"
     ],
     "externalBin": [
-      "binaries/launcher"
+      "binaries/dy-agent"
+    ],
+    "resources": [
+      "binaries/native-manifest.json"
     ]
   }
 }

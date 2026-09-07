@@ -1,181 +1,49 @@
-#[cfg(debug_assertions)]
-use std::path::PathBuf;
-use std::io::{Read, Write};
-use std::sync::Mutex;
-use std::thread;
-use std::time::{Duration, Instant};
-
-use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
+mod native_commands;
+mod native_host;
+mod native_ws;
+use native_commands::*;
+use native_host::NativeHost;
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
 use tauri::ipc::Channel;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri_plugin_shell::ShellExt;
-use tauri_plugin_shell::process::CommandChild;
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 use tauri_plugin_updater::UpdaterExt;
 
-struct BackendChild(Mutex<Option<CommandChild>>);
-
-const API_PORT: u16 = 8765;
-
-fn api_is_ready(port: u16) -> bool {
-    use std::io::{Read, Write};
-
-    let host = "127.0.0.1";
-    if let Ok(mut stream) = std::net::TcpStream::connect((host, port)) {
-        let req = format!(
-            "GET /api/client/v1/health HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
-        );
-        if stream.write_all(req.as_bytes()).is_ok() {
-            let mut buf = [0u8; 512];
-            if stream.read(&mut buf).is_ok() {
-                let text = String::from_utf8_lossy(&buf);
-                return text.contains("200") && text.contains("\"ok\"");
-            }
-        }
-    }
-    false
-}
-
-fn wait_for_api(port: u16) {
-    let host = "127.0.0.1";
-    for _ in 0..120 {
-        if api_is_ready(port) {
-            println!("[dyauthreply] API ready on {host}:{port}");
-            return;
-        }
-        thread::sleep(Duration::from_millis(500));
-    }
-    eprintln!("[dyauthreply] API health check timeout ({host}:{port})");
-}
-
-#[cfg(debug_assertions)]
-fn dev_launcher_script() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../launcher/launcher.py")
-}
-
-fn request_backend_shutdown(port: u16) {
-    let host = "127.0.0.1";
-    let Ok(mut stream) = std::net::TcpStream::connect((host, port)) else {
-        return;
-    };
-    let req = format!(
-        "POST /api/client/v1/lifecycle/shutdown HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
-    );
-    let _ = stream.write_all(req.as_bytes());
-    let _ = stream.flush();
-    let mut buf = [0u8; 256];
-    let _ = stream.read(&mut buf);
-    thread::sleep(Duration::from_millis(600));
-}
-
-fn shutdown_backend(app: &AppHandle) {
-    request_backend_shutdown(API_PORT);
-
-    if let Some(state) = app.try_state::<BackendChild>() {
-        if let Ok(mut guard) = state.0.lock() {
-            if let Some(child) = guard.take() {
-                let _ = child.kill();
-            }
-        }
-    }
-}
-
-fn spawn_backend(shell: &tauri_plugin_shell::Shell<tauri::Wry>) -> Option<CommandChild> {
-    #[cfg(debug_assertions)]
-    {
-        if api_is_ready(API_PORT) {
-            println!("[dyauthreply] dev: reusing existing API on 127.0.0.1:{API_PORT}");
-            return None;
-        }
-        let script = dev_launcher_script();
-        if script.is_file() {
-            println!("[dyauthreply] dev: starting python launcher {}", script.display());
-            match shell
-                .command("python3")
-                .args([script.to_string_lossy().to_string()])
-                .spawn()
-            {
-                Ok((mut rx, child)) => {
-                    tauri::async_runtime::spawn(async move {
-                        use tauri_plugin_shell::process::CommandEvent;
-                        while let Some(event) = rx.recv().await {
-                            match event {
-                                CommandEvent::Stdout(line_bytes) => {
-                                    let line = String::from_utf8_lossy(&line_bytes);
-                                    print!("[launcher stdout] {}", line);
-                                }
-                                CommandEvent::Stderr(line_bytes) => {
-                                    let line = String::from_utf8_lossy(&line_bytes);
-                                    eprint!("[launcher stderr] {}", line);
-                                }
-                                CommandEvent::Terminated(payload) => {
-                                    println!("[launcher terminated] status: {:?}", payload.code);
-                                }
-                                _ => {}
-                            }
-                        }
-                    });
-                    return Some(child);
-                }
-                Err(err) => eprintln!("[dyauthreply] dev: failed to spawn python launcher: {err}"),
-            }
-        } else {
-            eprintln!(
-                "[dyauthreply] dev: launcher script not found at {}",
-                script.display()
-            );
-        }
-    }
-
-    match shell.sidecar("launcher") {
-        Ok(cmd) => match cmd.spawn() {
-            Ok((mut rx, child)) => {
-                println!("[dyauthreply] backend sidecar launcher started");
-                tauri::async_runtime::spawn(async move {
-                    use tauri_plugin_shell::process::CommandEvent;
-                    while let Some(event) = rx.recv().await {
-                        match event {
-                            CommandEvent::Stdout(line_bytes) => {
-                                let line = String::from_utf8_lossy(&line_bytes);
-                                print!("[sidecar stdout] {}", line);
-                            }
-                            CommandEvent::Stderr(line_bytes) => {
-                                let line = String::from_utf8_lossy(&line_bytes);
-                                eprint!("[sidecar stderr] {}", line);
-                            }
-                            CommandEvent::Terminated(payload) => {
-                                println!("[sidecar terminated] status: {:?}", payload.code);
-                            }
-                            _ => {}
-                        }
-                    }
-                });
-                Some(child)
-            }
-            Err(err) => {
-                eprintln!("[dyauthreply] failed to spawn sidecar: {err}");
-                None
-            }
-        },
-        Err(err) => {
-            eprintln!("[dyauthreply] failed to find sidecar: {err}");
-            None
-        }
-    }
-}
-
 #[tauri::command]
-fn backend_status() -> String {
-    "running".to_string()
-}
-
-/// 更新安装前调用：强制整进程退出（含托盘隐藏态）。
-/// 先通知后端 sidecar 释放 8765/lock 并 kill，再 app.exit(0)，
-/// 确保 updater 覆盖安装前旧进程已完全退出（修复 Windows 进程残留）。
-#[tauri::command]
-fn force_quit_for_update(app: AppHandle) {
-    shutdown_backend(&app);
+async fn force_quit_for_update(app: AppHandle) -> Result<(), String> {
+    let host = app.state::<Arc<NativeHost>>().inner().clone();
+    host.stop_owned(true).await?;
+    host.exit_ready.store(true, Ordering::Release);
     app.exit(0);
+    Ok(())
+}
+fn request_exit(app: AppHandle) {
+    let host = app.state::<Arc<NativeHost>>().inner().clone();
+    if host.quit_pending.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        match host.stop_owned(false).await {
+            Ok(()) => {
+                host.exit_ready.store(true, Ordering::Release);
+                app.exit(0);
+            }
+            Err(error) => {
+                host.quit_pending.store(false, Ordering::Release);
+                let _ = app.emit("native-exit-error", error);
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                }
+            }
+        }
+    });
 }
 
 // ==================== 应用内自动更新（多镜像竞速 + tauri-plugin-updater）====================
@@ -229,10 +97,7 @@ async fn build_sorted_endpoints(mirrors: Vec<String>) -> Vec<(String, url::Url)>
         .timeout(Duration::from_secs(4))
         .build();
 
-    let candidates: Vec<String> = mirrors
-        .iter()
-        .map(|m| manifest_url_for_mirror(m))
-        .collect();
+    let candidates: Vec<String> = mirrors.iter().map(|m| manifest_url_for_mirror(m)).collect();
 
     let mut futs = Vec::new();
     for url in candidates {
@@ -277,9 +142,56 @@ struct UpdateCheckResult {
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase", tag = "event")]
 enum UpdateProgress {
-    Started { content_length: Option<u64> },
-    Progress { downloaded: u64, content_length: Option<u64> },
+    Started {
+        content_length: Option<u64>,
+    },
+    Progress {
+        downloaded: u64,
+        content_length: Option<u64>,
+    },
     Finished,
+}
+
+const MAX_UPDATE_BYTES: usize = 512 * 1024 * 1024;
+
+#[derive(Default)]
+struct UpdateCoordinator {
+    active: AtomicBool,
+}
+
+struct UpdatePermit<'a> {
+    active: &'a AtomicBool,
+}
+
+impl Drop for UpdatePermit<'_> {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+    }
+}
+
+impl UpdateCoordinator {
+    fn acquire(&self) -> Result<UpdatePermit<'_>, String> {
+        self.active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "已有更新任务正在运行".to_string())?;
+        Ok(UpdatePermit {
+            active: &self.active,
+        })
+    }
+}
+
+fn validate_update_size(bytes: usize) -> Result<(), String> {
+    if bytes == 0 || bytes > MAX_UPDATE_BYTES {
+        return Err("更新包大小无效".into());
+    }
+    Ok(())
+}
+
+fn install_failure(error: String, restored: Result<(), String>) -> String {
+    match restored {
+        Ok(()) => format!("更新安装失败，原服务已恢复：{error}"),
+        Err(restart) => format!("更新安装失败且原服务恢复失败：{error}；{restart}"),
+    }
 }
 
 /// 检查更新：镜像竞速排序后用动态 endpoints 调 updater.check()，返回是否有新版及版本/说明。
@@ -323,13 +235,15 @@ async fn check_app_update_mirrors(
 }
 
 /// 下载并安装更新：镜像竞速 -> check -> downloadAndInstall（带进度），
-/// 下载完成、安装前先释放后端 sidecar（8765/lock），再覆盖安装，最后重启。
+/// 下载完成、安装前先释放后端 sidecar（18765/lock），再覆盖安装，最后重启。
 #[tauri::command]
 async fn download_and_install_update(
     app: AppHandle,
+    coordinator: tauri::State<'_, UpdateCoordinator>,
     mirrors: Vec<String>,
     on_event: Channel<UpdateProgress>,
 ) -> Result<(), String> {
+    let _permit = coordinator.acquire()?;
     let endpoints = build_sorted_endpoints(mirrors).await;
     if endpoints.is_empty() {
         return Err("没有可用的更新端点".into());
@@ -349,14 +263,12 @@ async fn download_and_install_update(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "当前已是最新版本".to_string())?;
 
-    let app_for_finish = app.clone();
     let ev_chunk = on_event.clone();
-    let ev_finish = on_event.clone();
     let mut downloaded: u64 = 0;
     let mut started_sent = false;
 
-    update
-        .download_and_install(
+    let bytes = update
+        .download(
             move |chunk_len: usize, content_len: Option<u64>| {
                 if !started_sent {
                     started_sent = true;
@@ -370,17 +282,20 @@ async fn download_and_install_update(
                     content_length: content_len,
                 });
             },
-            move || {
-                // 下载完成、覆盖安装前：先优雅释放后端 sidecar（关闭 8765 / 释放 launcher.lock），
-                // 与 NSIS preInstall killMode 形成双保险，杜绝 Windows 进程残留。
-                shutdown_backend(&app_for_finish);
-                let _ = ev_finish.send(UpdateProgress::Finished);
-            },
+            || {},
         )
         .await
         .map_err(|e| e.to_string())?;
+    validate_update_size(bytes.len())?;
 
-    // 安装完成后重启（macOS 需手动；Windows NSIS 多由安装器 /R 处理，single-instance 防重复拉起）。
+    // Stop and verify our child BEFORE invoking install; a timeout aborts the update.
+    let host = app.state::<Arc<NativeHost>>().inner().clone();
+    host.stop_owned(true).await?;
+    if let Err(error) = update.install(bytes) {
+        return Err(install_failure(error.to_string(), host.restart().await));
+    }
+    let _ = on_event.send(UpdateProgress::Finished);
+    host.exit_ready.store(true, Ordering::Release);
     app.restart()
 }
 
@@ -390,7 +305,7 @@ pub fn run() {
     let mut builder = tauri::Builder::default();
 
     // 单实例守卫（仅桌面）：再次启动时唤回已运行的窗口，避免第二个进程
-    // 重复拉起后端导致 8765 端口占用 (WSAEADDRINUSE / Errno 10048)。
+    // 重复拉起后端导致 18765 端口占用 (WSAEADDRINUSE / Errno 10048)。
     // 必须在其它插件之前注册。
     #[cfg(desktop)]
     {
@@ -410,49 +325,45 @@ pub fn run() {
 
     let app = builder
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![]),
         ))
-        .on_window_event(|window, event| match event {
-            // 点 × 仅隐藏到托盘，不退出；真正退出走托盘菜单 / Cmd+Q / ExitRequested
-            WindowEvent::CloseRequested { api, .. } => {
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
             }
-            _ => {}
         })
         .setup(move |app| {
+            app.manage(UpdateCoordinator::default());
             // Setup Tray Menu
             let quit_i = MenuItemBuilder::with_id("quit", "退出").build(app)?;
             let show_i = MenuItemBuilder::with_id("show", "显示主窗口").build(app)?;
 
-            let menu = MenuBuilder::new(app)
-                .items(&[&show_i, &quit_i])
-                .build()?;
+            let menu = MenuBuilder::new(app).items(&[&show_i, &quit_i]).build()?;
 
             let icon_bytes = include_bytes!("../icons/32x32.png");
-            let tray_icon = tauri::image::Image::from_bytes(icon_bytes)
-                .unwrap_or_else(|_| app.default_window_icon().cloned().expect("failed to load window icon"));
+            let tray_icon = tauri::image::Image::from_bytes(icon_bytes).unwrap_or_else(|_| {
+                app.default_window_icon()
+                    .cloned()
+                    .expect("failed to load window icon")
+            });
 
             let _tray = TrayIconBuilder::new()
                 .icon(tray_icon)
                 .menu(&menu)
-                .on_menu_event(|app, event| {
-                    match event.id().as_ref() {
-                        "quit" => {
-                            shutdown_backend(app);
-                            app.exit(0);
-                        }
-                        "show" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
-                        }
-                        _ => {}
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "quit" => {
+                        app.exit(0);
                     }
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
@@ -470,16 +381,26 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Spawn Backend (dev: python launcher.py；release: PyInstaller sidecar)
-            let shell = app.shell();
-            let child = spawn_backend(&shell);
-            app.manage(BackendChild(Mutex::new(child)));
-
-            thread::spawn(|| wait_for_api(API_PORT));
+            let host = Arc::new(NativeHost::new(
+                native_host::data_root()?,
+                native_host::executable()?,
+            )?);
+            app.manage(host.clone());
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = host.start().await {
+                    eprintln!("[native] {error}");
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             backend_status,
+            native_request,
+            native_restart,
+            native_reload_configuration,
+            native_ws_connect,
+            native_ws_send,
+            native_ws_close,
             force_quit_for_update,
             check_app_update_mirrors,
             download_and_install_update
@@ -487,22 +408,57 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|app_handle, event| {
-        match event {
-            RunEvent::ExitRequested { .. } => {
-                shutdown_backend(app_handle);
+    app.run(|app_handle, event| match event {
+        RunEvent::ExitRequested { api, .. } => {
+            if !app_handle
+                .state::<Arc<NativeHost>>()
+                .exit_ready
+                .load(Ordering::Acquire)
+            {
+                api.prevent_exit();
+                request_exit(app_handle.clone());
             }
-            RunEvent::Exit => {
-                shutdown_backend(app_handle);
-            }
-            #[cfg(target_os = "macos")]
-            RunEvent::Reopen { .. } => {
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-            }
-            _ => {}
         }
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => {
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }
+        _ => {}
     });
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+
+    #[test]
+    fn update_coordinator_is_single_flight_and_releases_on_drop() {
+        let coordinator = UpdateCoordinator::default();
+        let first = coordinator.acquire().expect("first update owns gate");
+        assert!(coordinator.acquire().is_err());
+        drop(first);
+        assert!(coordinator.acquire().is_ok());
+    }
+
+    #[test]
+    fn update_payload_requires_nonempty_bounded_bytes() {
+        assert!(validate_update_size(0).is_err());
+        assert!(validate_update_size(1).is_ok());
+        assert!(validate_update_size(MAX_UPDATE_BYTES + 1).is_err());
+    }
+
+    #[test]
+    fn install_failure_reports_whether_the_old_service_was_restored() {
+        assert_eq!(
+            install_failure("broken package".into(), Ok(())),
+            "更新安装失败，原服务已恢复：broken package"
+        );
+        assert_eq!(
+            install_failure("broken package".into(), Err("restart failed".into())),
+            "更新安装失败且原服务恢复失败：broken package；restart failed"
+        );
+    }
 }

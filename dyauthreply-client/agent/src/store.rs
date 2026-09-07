@@ -1,3 +1,6 @@
+#[path = "store_audit.rs"]
+mod audit_feed;
+pub use audit_feed::{AuditChanges, DecisionAudit};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
@@ -30,6 +33,17 @@ const DATABASE_ID_META_KEY: &str = "database_id";
 const BACKUP_DIRECTORY_NAME: &str = "backups";
 const SCHEMA_V1: u32 = 1;
 const SCHEMA_V2: u32 = 2;
+const SCHEMA_V3: u32 = 3;
+const SCHEMA_V4: u32 = 4;
+#[path = "store_protocol_state.rs"]
+mod protocol_state;
+pub use protocol_state::SendObservation;
+#[path = "store_send_receipts.rs"]
+mod send_receipts;
+pub use send_receipts::{ReceiptReconciliation, SentReceiptEvidence};
+#[path = "store_guards.rs"]
+mod guards;
+pub use guards::GuardPolicy;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const LEASE_TRANSFER_UNCERTAIN_REASON: &str =
     "lease epoch changed while the previous send outcome was unresolved";
@@ -291,6 +305,11 @@ const REQUIRED_TABLES_V2: &[(&str, &[&str])] = &[
 
 #[derive(Debug, Error)]
 pub enum StoreError {
+    #[error("automatic reply guard blocked: {reason}")]
+    ReplyGuardBlocked {
+        reason: &'static str,
+        retry_at_ms: Option<i64>,
+    },
     #[error("cannot access the core store: {0}")]
     Io(#[from] std::io::Error),
     #[error("core store SQLite error: {0}")]
@@ -502,6 +521,41 @@ pub struct InboundReceiptDraft {
     pub payload_hash: String,
 }
 
+#[derive(Clone, Copy)]
+pub struct InboundPageDraft<'a> {
+    pub stream: &'a str,
+    pub stream_generation: i64,
+    pub checkpoint: i64,
+    pub receipts: &'a [InboundReceiptDraft],
+}
+
+#[derive(Clone, Copy)]
+pub struct InboundLimits {
+    pub pending_records: u32,
+    pub pending_bytes: u64,
+}
+
+/// The expected immutable receipt version used when applying a rule decision.
+#[derive(Clone, Copy)]
+pub struct InboundReceiptKey<'a> {
+    pub stream: &'a str,
+    pub generation: i64,
+    pub event_id: &'a str,
+    pub payload_hash: &'a str,
+}
+#[derive(Clone, Copy)]
+pub struct InboundReplyPlan<'a> {
+    pub response_id: &'a str,
+    pub segments: &'a [OutboundSegmentDraft],
+    pub pending_batch_limit: u32,
+}
+pub struct InboundConsumeOutcome {
+    pub applied: bool,
+    pub batch: Option<OutboundBatch>,
+}
+const LIVE_BASELINE_STREAM: &str = "douyin-im-live-start";
+const DECISION_STREAM: &str = "douyin-im-decision";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InboundStatus {
     Pending,
@@ -658,6 +712,8 @@ impl BatchStatus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SegmentTransition {
     StartAttempt,
+    StartAutomaticAttempt,
+    CancelPrepared { reason: String },
     Confirm { platform_message_id: String },
     MarkRetryable { reason: String },
     Reject { error: String },
@@ -667,10 +723,10 @@ pub enum SegmentTransition {
 impl SegmentTransition {
     const fn target_status(&self) -> SegmentStatus {
         match self {
-            Self::StartAttempt => SegmentStatus::Sending,
+            Self::StartAttempt | Self::StartAutomaticAttempt => SegmentStatus::Sending,
             Self::Confirm { .. } => SegmentStatus::Confirmed,
             Self::MarkRetryable { .. } => SegmentStatus::Retryable,
-            Self::Reject { .. } => SegmentStatus::Rejected,
+            Self::Reject { .. } | Self::CancelPrepared { .. } => SegmentStatus::Rejected,
             Self::MarkUncertain { .. } => SegmentStatus::Uncertain,
         }
     }
@@ -825,6 +881,13 @@ impl CoreStore {
         load_pre_migration_backup(&connection)
     }
 
+    /// # Errors
+    /// Returns unavailable/corrupt migration metadata.
+    pub fn guard_migration_backup(&self) -> Result<Option<PreMigrationBackup>, StoreError> {
+        let connection = self.lock_connection()?;
+        load_migration_backup(&connection, SCHEMA_V2, SCHEMA_V3)
+    }
+
     /// Installs a lease already verified by the remote control plane.
     ///
     /// The caller must authenticate and validate the remote lease before calling
@@ -854,6 +917,19 @@ impl CoreStore {
             lease_until_ms,
             OperationTime::System,
         )
+    }
+
+    /// Delivery times from durable confirmations, never the time a UI polls the command.
+    /// # Errors
+    /// Returns database read errors.
+    pub fn outbound_delivery_times(
+        &self,
+        batch_id: &str,
+    ) -> Result<std::collections::BTreeMap<String, i64>, StoreError> {
+        let db = self.lock_connection()?;
+        let mut query=db.prepare("SELECT id,updated_at_ms FROM outbound_segments WHERE batch_id=?1 AND status='confirmed'")?;
+        let rows = query.query_map([batch_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     #[cfg(test)]
@@ -951,6 +1027,28 @@ impl CoreStore {
         Ok(())
     }
 
+    /// Idempotently retires exactly this local owner/epoch, including after its
+    /// wall-clock deadline. This only removes rights; it never revokes a newer
+    /// owner and a retired epoch cannot be installed again.
+    /// # Errors
+    /// Rejects invalid token identities or database failures.
+    pub fn invalidate_account_lease(&self, token: &LeaseToken) -> Result<bool, StoreError> {
+        validate_lease_token(token)?;
+        let connection = self.lock_connection()?;
+        let changed = connection.execute(
+            "UPDATE account_leases SET status = 'released'
+             WHERE account_id = ?1 AND owner_instance_id = ?2 AND owner_boot_id = ?3
+               AND fence_epoch = ?4 AND status = 'active'",
+            params![
+                token.account_id,
+                token.owner_instance_id,
+                token.owner_boot_id,
+                token.fence_epoch
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
     /// Atomically spools one inbound page and commits its cursor.
     ///
     /// Every receipt stores its complete payload as `Pending`; callers process
@@ -1012,6 +1110,48 @@ impl CoreStore {
         receipts: &[InboundReceiptDraft],
         operation_time: OperationTime,
     ) -> Result<InboundPageResult, StoreError> {
+        self.record_inbound_page_limited(
+            lease_token,
+            InboundPageDraft {
+                stream,
+                stream_generation,
+                checkpoint,
+                receipts,
+            },
+            operation_time,
+            None,
+        )
+    }
+
+    /// Atomically enforces the account spool budget before committing its cursor.
+    /// # Errors
+    /// Returns normal receipt/fence errors or backlog-capacity exhaustion. An
+    /// over-budget page rolls back all receipts and leaves the cursor unchanged.
+    pub fn record_bounded_inbound_page(
+        &self,
+        lease: &LeaseToken,
+        page: InboundPageDraft<'_>,
+        limits: InboundLimits,
+    ) -> Result<InboundPageResult, StoreError> {
+        if limits.pending_records == 0 || limits.pending_bytes == 0 {
+            return Err(StoreError::InvalidInput("inbound limits must be positive"));
+        }
+        self.record_inbound_page_limited(lease, page, OperationTime::System, Some(limits))
+    }
+
+    fn record_inbound_page_limited(
+        &self,
+        lease_token: &LeaseToken,
+        draft: InboundPageDraft<'_>,
+        operation_time: OperationTime,
+        limits: Option<InboundLimits>,
+    ) -> Result<InboundPageResult, StoreError> {
+        let InboundPageDraft {
+            stream,
+            stream_generation,
+            checkpoint,
+            receipts,
+        } = draft;
         validate_inbound_page_input(lease_token, stream, stream_generation, receipts)?;
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1029,6 +1169,14 @@ impl CoreStore {
             select_inbound_checkpoint(&transaction, &lease_token.account_id, stream)?;
         reject_stale_stream_generation(&page, stored_checkpoint.as_ref())?;
         let inserted_count = insert_inbound_page_receipts(&transaction, &page)?;
+        if let Some(limits) = limits {
+            let (count, bytes): (u64, u64) = transaction.query_row(
+                "SELECT count(*), coalesce(sum(length(payload)), 0) FROM inbound_receipts WHERE account_id = ?1 AND status = 'pending'",
+                params![lease_token.account_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            if count > u64::from(limits.pending_records) || bytes > limits.pending_bytes {
+                return Err(StoreError::InvalidInput("inbound pending spool is full"));
+            }
+        }
         commit_inbound_page_checkpoint(&transaction, &page, stored_checkpoint.as_ref())?;
         let durable_checkpoint =
             select_inbound_checkpoint(&transaction, &lease_token.account_id, stream)?.ok_or_else(
@@ -1214,6 +1362,186 @@ impl CoreStore {
         })
     }
 
+    /// Establishes one durable live-start wall-clock watermark per credential
+    /// generation. It is independent of platform pagination cursors and survives restart.
+    /// # Errors
+    /// Rejects invalid/stale generations, ownership and database failures.
+    pub fn ensure_inbound_live_start(
+        &self,
+        lease: &LeaseToken,
+        generation: i64,
+    ) -> Result<i64, StoreError> {
+        if generation <= 0 {
+            return Err(StoreError::InvalidInput("invalid inbound generation"));
+        }
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = OperationTime::System.resolve()?;
+        require_fence(&transaction, lease, now)?;
+        let old = select_inbound_checkpoint(&transaction, &lease.account_id, LIVE_BASELINE_STREAM)?;
+        if let Some(old) = old {
+            if generation < old.stream_generation {
+                return Err(StoreError::InvalidInput("stale inbound generation"));
+            }
+            if generation == old.stream_generation {
+                transaction.commit()?;
+                return Ok(old.checkpoint);
+            }
+        }
+        let cutoff = now
+            .checked_mul(1000)
+            .ok_or(StoreError::InvalidInput("timestamp overflow"))?;
+        transaction.execute("INSERT INTO inbound_checkpoints(account_id,stream,stream_generation,checkpoint,fence_epoch,updated_at_ms)
+            VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(account_id,stream) DO UPDATE SET
+            stream_generation=excluded.stream_generation,checkpoint=excluded.checkpoint,
+            fence_epoch=excluded.fence_epoch,updated_at_ms=excluded.updated_at_ms",
+            params![lease.account_id,LIVE_BASELINE_STREAM,generation,cutoff,lease.fence_epoch,now])?;
+        transaction.commit()?;
+        Ok(cutoff)
+    }
+
+    /// Atomically records the transport-independent decision, creates its reply
+    /// claim/outbox (when requested), and clears the consumed receipt payload.
+    /// The same server ID is decided once across HTTP/WS and credential generations.
+    /// `None` means an explicit terminal no-reply decision, not a deferred message.
+    /// # Errors
+    /// Rejects stale ownership/hash, invalid plans and outbox backpressure. Every
+    /// failure rolls back the decision marker AND receipt acknowledgement.
+    pub fn consume_inbound(
+        &self,
+        lease: &LeaseToken,
+        key: InboundReceiptKey<'_>,
+        reply: Option<InboundReplyPlan<'_>>,
+    ) -> Result<InboundConsumeOutcome, StoreError> {
+        self.consume_inbound_with_guards(lease, key, reply, None, OperationTime::System, None)
+    }
+    /// # Errors
+    /// Journals terminal no-reply audit in the same transaction as its canonical decision.
+    pub fn consume_inbound_audited(
+        &self,
+        lease: &LeaseToken,
+        key: InboundReceiptKey<'_>,
+        audit: DecisionAudit<'_>,
+    ) -> Result<InboundConsumeOutcome, StoreError> {
+        self.consume_inbound_with_guards(lease, key, None, None, OperationTime::System, Some(audit))
+    }
+    /// Atomically applies a reply decision and reserves durable quota/cooldown scopes.
+    /// # Errors
+    /// A blocked guard or any SQL error leaves receipt and outbox unchanged.
+    pub fn consume_inbound_guarded(
+        &self,
+        lease: &LeaseToken,
+        key: InboundReceiptKey<'_>,
+        reply: InboundReplyPlan<'_>,
+        policy: &GuardPolicy,
+    ) -> Result<InboundConsumeOutcome, StoreError> {
+        self.consume_inbound_with_guards(
+            lease,
+            key,
+            Some(reply),
+            Some(policy),
+            OperationTime::System,
+            None,
+        )
+    }
+    fn consume_inbound_with_guards(
+        &self,
+        lease: &LeaseToken,
+        key: InboundReceiptKey<'_>,
+        reply: Option<InboundReplyPlan<'_>>,
+        policy: Option<&GuardPolicy>,
+        operation_time: OperationTime,
+        audit: Option<DecisionAudit<'_>>,
+    ) -> Result<InboundConsumeOutcome, StoreError> {
+        validate_lease_token(lease)?;
+        if key.stream == DECISION_STREAM
+            || key
+                .event_id
+                .parse::<u64>()
+                .ok()
+                .is_none_or(|id| id == 0 || id.to_string() != key.event_id)
+        {
+            return Err(StoreError::InvalidInput("invalid canonical inbound ID"));
+        }
+        if let Some(plan) = reply {
+            if plan.response_id.is_empty()
+                || plan.segments.is_empty()
+                || plan.segments.len() > 32
+                || plan.pending_batch_limit == 0
+                || plan
+                    .segments
+                    .iter()
+                    .any(|s| s.kind.is_empty() || s.payload.is_empty() || s.payload.len() > 16384)
+            {
+                return Err(StoreError::InvalidInput("invalid inbound reply plan"));
+            }
+        }
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = operation_time.resolve()?;
+        require_fence(&transaction, lease, now)?;
+        let receipt = load_inbound_receipt(
+            &transaction,
+            &lease.account_id,
+            key.stream,
+            key.generation,
+            key.event_id,
+        )?;
+        if receipt.payload_hash != key.payload_hash {
+            return Err(StoreError::IdempotencyConflict {
+                entity: "inbound decision",
+                key: key.event_id.to_owned(),
+            });
+        }
+        let trigger = format!("auto:{}", key.event_id);
+        let existing = transaction
+            .query_row(
+                "SELECT id FROM outbound_batches WHERE account_id=?1 AND trigger_id=?2",
+                params![lease.account_id, trigger],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        let mut batch = existing
+            .map(|id| load_batch(&transaction, &id))
+            .transpose()?;
+        let decided=transaction.query_row("SELECT 1 FROM inbound_receipts WHERE account_id=?1 AND stream=?2 AND stream_generation=1 AND event_id=?3",
+            params![lease.account_id,DECISION_STREAM,key.event_id],|_|Ok(())).optional()?.is_some();
+        let applied = !decided && receipt.status == InboundStatus::Pending;
+        if applied {
+            if let Some(audit) = audit {
+                audit_feed::decision(&transaction, lease, receipt.payload.as_deref(), audit, now)?;
+            }
+            if let Some(plan) = reply {
+                if batch.is_none() {
+                    let count:u32=transaction.query_row("SELECT count(*) FROM outbound_batches WHERE account_id=?1 AND status NOT IN ('confirmed','rejected','partial')",
+                        [&lease.account_id],|r|r.get(0))?;
+                    if count >= plan.pending_batch_limit {
+                        return Err(StoreError::InvalidInput("outbound pending spool is full"));
+                    }
+                    batch = Some(prepare_batch_in_transaction(
+                        &transaction,
+                        lease,
+                        &trigger,
+                        plan.response_id,
+                        plan.segments,
+                        now,
+                    )?);
+                }
+            }
+            if let (Some(policy), Some(batch)) = (policy, batch.as_ref()) {
+                guards::reserve(&transaction, batch, policy, now)?;
+            }
+            transaction.execute("INSERT INTO inbound_receipts(account_id,stream,stream_generation,event_id,page_checkpoint,payload,payload_hash,status,
+                fence_epoch,received_at_ms,processed_at_ms,processed_fence_epoch) VALUES(?1,?2,1,?3,0,NULL,?4,'processed',?5,?6,?6,?5)",
+                params![lease.account_id,DECISION_STREAM,key.event_id,key.payload_hash,lease.fence_epoch,now])?;
+        }
+        transaction.execute("UPDATE inbound_receipts SET status='processed',payload=NULL,processed_at_ms=?5,processed_fence_epoch=?6
+            WHERE account_id=?1 AND stream=?2 AND stream_generation=?3 AND event_id=?4 AND status='pending'",
+            params![lease.account_id,key.stream,key.generation,key.event_id,now,lease.fence_epoch])?;
+        transaction.commit()?;
+        Ok(InboundConsumeOutcome { applied, batch })
+    }
+
     /// Claims one trigger and creates its durable outbound plan exactly once.
     ///
     /// `(account_id, trigger_id)` is the persistent reply claim. Repeated calls
@@ -1279,74 +1607,19 @@ impl CoreStore {
             validate_non_empty(&segment.kind, "segment kind must not be empty")?;
             validate_non_empty(&segment.payload, "segment payload must not be empty")?;
         }
-        let account_id = lease_token.account_id.as_str();
-
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let now_ms = operation_time.resolve()?;
         require_fence(&transaction, lease_token, now_ms)?;
 
-        let existing_batch_id = transaction
-            .query_row(
-                "SELECT id FROM outbound_batches
-                 WHERE account_id = ?1 AND trigger_id = ?2",
-                params![account_id, trigger_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-
-        if let Some(batch_id) = existing_batch_id {
-            let batch = load_batch(&transaction, &batch_id)?;
-            if batch.response_id != response_id || !same_segment_plan(&batch.segments, segments) {
-                return Err(StoreError::IdempotencyConflict {
-                    entity: "outbound batch",
-                    key: format!("{account_id}/{trigger_id}"),
-                });
-            }
-            transaction.commit()?;
-            return Ok(batch);
-        }
-
-        let batch_id = Uuid::new_v4().to_string();
-        transaction.execute(
-            "INSERT INTO outbound_batches
-             (id, account_id, trigger_id, response_id, status,
-              created_fence_epoch, last_fence_epoch, created_at_ms, updated_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?7)",
-            params![
-                batch_id,
-                account_id,
-                trigger_id,
-                response_id,
-                BatchStatus::Prepared.as_str(),
-                lease_token.fence_epoch,
-                now_ms
-            ],
+        let batch = prepare_batch_in_transaction(
+            &transaction,
+            lease_token,
+            trigger_id,
+            response_id,
+            segments,
+            now_ms,
         )?;
-
-        for (ordinal, segment) in segments.iter().enumerate() {
-            let ordinal = u32::try_from(ordinal)
-                .map_err(|_| StoreError::InvalidInput("outbound batch has too many segments"))?;
-            transaction.execute(
-                "INSERT INTO outbound_segments
-                 (id, client_message_id, batch_id, ordinal, kind, payload, status,
-                  attempt_count, last_fence_epoch, created_at_ms, updated_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?9)",
-                params![
-                    Uuid::new_v4().to_string(),
-                    Uuid::new_v4().to_string(),
-                    batch_id,
-                    ordinal,
-                    segment.kind,
-                    segment.payload,
-                    SegmentStatus::Prepared.as_str(),
-                    lease_token.fence_epoch,
-                    now_ms
-                ],
-            )?;
-        }
-
-        let batch = load_batch(&transaction, &batch_id)?;
         transaction.commit()?;
         Ok(batch)
     }
@@ -1360,6 +1633,32 @@ impl CoreStore {
     pub fn outbound_batch(&self, batch_id: &str) -> Result<OutboundBatch, StoreError> {
         let connection = self.lock_connection()?;
         load_batch(&connection, batch_id)
+    }
+
+    /// # Errors
+    /// Account removal must not strand an unresolved send; history remains independent.
+    pub fn has_unfinished_account(&self, id: &str) -> Result<bool, StoreError> {
+        Ok(self.lock_connection()?.query_row("SELECT EXISTS(SELECT 1 FROM outbound_batches WHERE account_id=?1 AND status NOT IN ('confirmed','rejected','partial'))",[id],|r|r.get(0))?)
+    }
+    /// Reads the existing durable idempotency claim without creating work.
+    /// # Errors
+    /// Returns validation, database, or corrupt-record errors.
+    pub fn outbound_batch_for_trigger(
+        &self,
+        account_id: &str,
+        trigger_id: &str,
+    ) -> Result<Option<OutboundBatch>, StoreError> {
+        validate_non_empty(account_id, "account_id must not be empty")?;
+        validate_non_empty(trigger_id, "trigger_id must not be empty")?;
+        let connection = self.lock_connection()?;
+        let id: Option<String> = connection
+            .query_row(
+                "SELECT id FROM outbound_batches WHERE account_id = ?1 AND trigger_id = ?2",
+                params![account_id, trigger_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        id.map(|id| load_batch(&connection, &id)).transpose()
     }
 
     /// Applies the centralized segment state machine under an active account
@@ -1380,6 +1679,7 @@ impl CoreStore {
             segment_id,
             transition,
             OperationTime::System,
+            None,
         )
     }
 
@@ -1396,7 +1696,44 @@ impl CoreStore {
             segment_id,
             transition,
             OperationTime::Fixed(now_ms),
+            None,
         )
+    }
+
+    /// Persists verified send evidence in the same transaction as the result.
+    /// # Errors
+    /// A stale binding/fence or storage failure leaves the entire result uncommitted.
+    pub fn transition_segment_observed(
+        &self,
+        lease: &LeaseToken,
+        id: &str,
+        transition: SegmentTransition,
+        observation: SendObservation<'_>,
+    ) -> Result<TransitionOutcome, StoreError> {
+        self.transition_segment_with_time(
+            lease,
+            id,
+            transition,
+            OperationTime::System,
+            Some(observation),
+        )
+    }
+    /// Call only after native authenticated self identity has verified the canonical scope.
+    /// # Errors
+    /// Rejects stale ownership, invalid binding or storage capacity/failure.
+    pub fn restore_send_observation(
+        &self,
+        lease: &LeaseToken,
+        canonical: &str,
+        digest: &str,
+    ) -> Result<crate::state::SendCapability, StoreError> {
+        let mut c = self.lock_connection()?;
+        let t = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = OperationTime::System.resolve()?;
+        require_fence(&t, lease, now)?;
+        let result = protocol_state::restore(&t, lease, canonical, digest, now)?;
+        t.commit()?;
+        Ok(result)
     }
 
     fn transition_segment_with_time(
@@ -1405,6 +1742,7 @@ impl CoreStore {
         segment_id: &str,
         transition: SegmentTransition,
         operation_time: OperationTime,
+        observation: Option<SendObservation<'_>>,
     ) -> Result<TransitionOutcome, StoreError> {
         validate_lease_token(lease_token)?;
         validate_non_empty(segment_id, "segment_id must not be empty")?;
@@ -1448,6 +1786,9 @@ impl CoreStore {
             });
         }
 
+        if matches!(transition, SegmentTransition::StartAutomaticAttempt) {
+            guards::require_reservation(&transaction, &batch_id, account_id)?;
+        }
         let current = SegmentStatus::parse(&raw_status)?;
         let target = transition.target_status();
         if current == target {
@@ -1465,7 +1806,7 @@ impl CoreStore {
             });
         }
 
-        if !valid_segment_transition(current, target) {
+        if !valid_segment_transition(current, target, &transition) {
             return Err(StoreError::InvalidTransition {
                 entity: "outbound segment",
                 from: current.as_str().to_owned(),
@@ -1493,6 +1834,10 @@ impl CoreStore {
                 now_ms
             ],
         )?;
+        guards::settle(&transaction, &batch_id, now_ms)?;
+        if let Some(observation) = observation {
+            protocol_state::record(&transaction, lease_token, observation, now_ms)?;
+        }
         let batch = load_batch(&transaction, &batch_id)?;
         transaction.commit()?;
         Ok(TransitionOutcome {
@@ -1929,9 +2274,9 @@ impl SegmentCatalog for CoreStore {
 }
 
 fn initialize_new_database(connection: &mut Connection) -> Result<Uuid, StoreError> {
-    if CORE_SCHEMA_VERSION != SCHEMA_V2 {
+    if CORE_SCHEMA_VERSION != SCHEMA_V4 {
         return Err(StoreError::SchemaInvariant(format!(
-            "compiled schema version is {CORE_SCHEMA_VERSION}, expected {SCHEMA_V2}"
+            "compiled schema version is {CORE_SCHEMA_VERSION}, expected {SCHEMA_V4}"
         )));
     }
     let database_id = Uuid::new_v4();
@@ -1944,6 +2289,8 @@ fn initialize_new_database(connection: &mut Connection) -> Result<Uuid, StoreErr
     )?;
     transaction.execute_batch(SCHEMA_V1_SQL)?;
     transaction.execute_batch(SCHEMA_V2_SQL)?;
+    guards::create_schema(&transaction)?;
+    protocol_state::create_schema(&transaction)?;
     transaction.execute(
         "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)",
         params![CORE_SCHEMA_VERSION.to_string()],
@@ -1967,9 +2314,9 @@ fn validate_or_migrate_existing_database(
     connection: &mut Connection,
     data_dir: &Path,
 ) -> Result<Uuid, StoreError> {
-    if CORE_SCHEMA_VERSION != SCHEMA_V2 {
+    if CORE_SCHEMA_VERSION != SCHEMA_V4 {
         return Err(StoreError::SchemaInvariant(format!(
-            "compiled schema version is {CORE_SCHEMA_VERSION}, expected {SCHEMA_V2}"
+            "compiled schema version is {CORE_SCHEMA_VERSION}, expected {SCHEMA_V4}"
         )));
     }
     if !table_exists(connection, "meta")? {
@@ -1979,8 +2326,17 @@ fn validate_or_migrate_existing_database(
     }
 
     match read_schema_version(connection)? {
-        SCHEMA_V1 => migrate_v1_to_v2(connection, data_dir),
-        SCHEMA_V2 => validate_existing_database(connection),
+        SCHEMA_V1 => {
+            migrate_v1_to_v2(connection, data_dir)?;
+            migrate_v2_to_v3(connection, data_dir)?;
+            migrate_v3_to_v4(connection, data_dir)
+        }
+        SCHEMA_V2 => {
+            migrate_v2_to_v3(connection, data_dir)?;
+            migrate_v3_to_v4(connection, data_dir)
+        }
+        SCHEMA_V3 => migrate_v3_to_v4(connection, data_dir),
+        SCHEMA_V4 => validate_existing_database(connection),
         found => Err(StoreError::UnsupportedSchema {
             found,
             supported: CORE_SCHEMA_VERSION,
@@ -2002,8 +2358,10 @@ fn validate_existing_database(connection: &Connection) -> Result<Uuid, StoreErro
             supported: CORE_SCHEMA_VERSION,
         });
     }
-    validate_schema_v1(connection, SCHEMA_V2)?;
+    validate_schema_v1(connection, SCHEMA_V4)?;
     validate_schema_v2(connection)?;
+    guards::validate_schema(connection)?;
+    protocol_state::validate_schema(connection)?;
     let integrity = inspect_database_integrity(connection)?;
     if !integrity.is_valid() {
         return Err(StoreError::SchemaInvariant(format!(
@@ -2146,7 +2504,9 @@ fn migrate_v1_to_v2(connection: &mut Connection, data_dir: &Path) -> Result<Uuid
     transaction.pragma_update(None, "user_version", SCHEMA_V2)?;
     transaction.commit()?;
 
-    let durable_database_id = validate_existing_database(connection)?;
+    validate_schema_v1(connection, SCHEMA_V2)?;
+    validate_schema_v2(connection)?;
+    let durable_database_id = read_database_id(connection)?;
     if durable_database_id != database_id {
         return Err(StoreError::SchemaInvariant(
             "database identity changed during schema v1-to-v2 migration".to_owned(),
@@ -2155,17 +2515,89 @@ fn migrate_v1_to_v2(connection: &mut Connection, data_dir: &Path) -> Result<Uuid
     Ok(database_id)
 }
 
+fn migrate_v2_to_v3(connection: &mut Connection, data_dir: &Path) -> Result<Uuid, StoreError> {
+    validate_schema_v1(connection, SCHEMA_V2)?;
+    validate_schema_v2(connection)?;
+    let id = read_database_id(connection)?;
+    let backup = create_fresh_backup(connection, data_dir, id, SCHEMA_V2, SCHEMA_V3)?;
+    let applied = current_time_ms()?.max(backup.created_at_ms);
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    guards::create_schema(&transaction)?;
+    transaction.execute("INSERT INTO schema_migrations(from_version,to_version,database_id,backup_relative_path,backup_bytes,
+        backup_created_at_ms,applied_at_ms,backup_quick_check,backup_foreign_key_violations) VALUES(?1,?2,?3,?4,?5,?6,?7,'ok',0)",
+        params![SCHEMA_V2,SCHEMA_V3,id.to_string(),path_to_portable_string(&backup.relative_path)?,
+            u64_to_sqlite(backup.bytes,"backup too large")?,backup.created_at_ms,applied])?;
+    transaction.execute(
+        "UPDATE meta SET value=?1 WHERE key='schema_version'",
+        [SCHEMA_V3.to_string()],
+    )?;
+    if transaction.changes() != 1 {
+        return Err(StoreError::SchemaInvariant("missing schema version".into()));
+    }
+    transaction.pragma_update(None, "user_version", SCHEMA_V3)?;
+    transaction.commit()?;
+    validate_schema_v1(connection, SCHEMA_V3)?;
+    guards::validate_schema(connection)?;
+    let actual = read_database_id(connection)?;
+    if actual != id {
+        return Err(StoreError::SchemaInvariant(
+            "migration identity changed".into(),
+        ));
+    }
+    Ok(id)
+}
+
+fn migrate_v3_to_v4(connection: &mut Connection, data_dir: &Path) -> Result<Uuid, StoreError> {
+    validate_schema_v1(connection, SCHEMA_V3)?;
+    validate_schema_v2(connection)?;
+    guards::validate_schema(connection)?;
+    let id = read_database_id(connection)?;
+    let backup = create_fresh_backup(connection, data_dir, id, SCHEMA_V3, SCHEMA_V4)?;
+    let applied = current_time_ms()?.max(backup.created_at_ms);
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    protocol_state::create_schema(&transaction)?;
+    transaction.execute("INSERT INTO schema_migrations(from_version,to_version,database_id,backup_relative_path,backup_bytes,
+        backup_created_at_ms,applied_at_ms,backup_quick_check,backup_foreign_key_violations) VALUES(?1,?2,?3,?4,?5,?6,?7,'ok',0)",
+        params![SCHEMA_V3,SCHEMA_V4,id.to_string(),path_to_portable_string(&backup.relative_path)?,
+            u64_to_sqlite(backup.bytes,"backup too large")?,backup.created_at_ms,applied])?;
+    transaction.execute(
+        "UPDATE meta SET value=?1 WHERE key='schema_version'",
+        [SCHEMA_V4.to_string()],
+    )?;
+    if transaction.changes() != 1 {
+        return Err(StoreError::SchemaInvariant("missing schema version".into()));
+    }
+    transaction.pragma_update(None, "user_version", SCHEMA_V4)?;
+    transaction.commit()?;
+    let actual = validate_existing_database(connection)?;
+    if actual != id {
+        return Err(StoreError::SchemaInvariant(
+            "migration identity changed".into(),
+        ));
+    }
+    Ok(id)
+}
+
 fn create_fresh_v1_backup(
     source: &Connection,
     data_dir: &Path,
     database_id: Uuid,
+) -> Result<PreMigrationBackup, StoreError> {
+    create_fresh_backup(source, data_dir, database_id, SCHEMA_V1, SCHEMA_V2)
+}
+fn create_fresh_backup(
+    source: &Connection,
+    data_dir: &Path,
+    database_id: Uuid,
+    from: u32,
+    to: u32,
 ) -> Result<PreMigrationBackup, StoreError> {
     let backup_directory = data_dir.join(BACKUP_DIRECTORY_NAME);
     prepare_private_directory(&backup_directory)?;
     // Persist creation of the backup directory before relying on a file inside
     // it as the migration rollback boundary.
     sync_directory(data_dir)?;
-    let backup_file_name = format!("core-v{SCHEMA_V1}-to-v{SCHEMA_V2}-{database_id}.sqlite3");
+    let backup_file_name = format!("core-v{from}-to-v{to}-{database_id}.sqlite3");
     let relative_path = PathBuf::from(BACKUP_DIRECTORY_NAME).join(&backup_file_name);
     let final_path = data_dir.join(&relative_path);
     let temporary_path = backup_directory.join(format!(".{backup_file_name}.tmp"));
@@ -2178,6 +2610,8 @@ fn create_fresh_v1_backup(
         &relative_path,
         database_id,
         &backup_directory,
+        from,
+        to,
     )?;
 
     if optional_regular_file_exists(&final_path)? {
@@ -2185,7 +2619,7 @@ fn create_fresh_v1_backup(
         // snapshot. Verify it before touching it, then keep it in place until
         // a freshly verified replacement is ready. This preserves a usable
         // rollback point if the new Online Backup or its verification fails.
-        verify_v1_backup(&final_path, relative_path.clone(), database_id)?;
+        verify_backup(&final_path, relative_path.clone(), database_id, from, to)?;
     }
     if optional_regular_file_exists(&temporary_path)? {
         fs::remove_file(&temporary_path)?;
@@ -2207,7 +2641,13 @@ fn create_fresh_v1_backup(
             .read(true)
             .open(&temporary_path)?
             .sync_all()?;
-        verify_v1_backup(&temporary_path, relative_path.clone(), database_id)?;
+        verify_backup(
+            &temporary_path,
+            relative_path.clone(),
+            database_id,
+            from,
+            to,
+        )?;
         publish_verified_backup(
             &temporary_path,
             &final_path,
@@ -2223,7 +2663,7 @@ fn create_fresh_v1_backup(
     }
     backup_result?;
 
-    verify_v1_backup(&final_path, relative_path, database_id)
+    verify_backup(&final_path, relative_path, database_id, from, to)
 }
 
 #[cfg(not(unix))]
@@ -2233,13 +2673,21 @@ fn recover_interrupted_backup_publish(
     relative_path: &Path,
     database_id: Uuid,
     backup_directory: &Path,
+    from: u32,
+    to: u32,
 ) -> Result<(), StoreError> {
     if !optional_regular_file_exists(previous_path)? {
         return Ok(());
     }
-    verify_v1_backup(previous_path, relative_path.to_owned(), database_id)?;
+    verify_backup(
+        previous_path,
+        relative_path.to_owned(),
+        database_id,
+        from,
+        to,
+    )?;
     if optional_regular_file_exists(final_path)? {
-        if verify_v1_backup(final_path, relative_path.to_owned(), database_id).is_ok() {
+        if verify_backup(final_path, relative_path.to_owned(), database_id, from, to).is_ok() {
             fs::remove_file(previous_path)?;
             sync_directory(backup_directory)?;
             return Ok(());
@@ -2248,7 +2696,7 @@ fn recover_interrupted_backup_publish(
     }
     fs::rename(previous_path, final_path)?;
     sync_directory(backup_directory)?;
-    verify_v1_backup(final_path, relative_path.to_owned(), database_id)?;
+    verify_backup(final_path, relative_path.to_owned(), database_id, from, to)?;
     Ok(())
 }
 
@@ -2297,10 +2745,20 @@ fn publish_verified_backup(
     Ok(())
 }
 
+#[cfg(test)]
 fn verify_v1_backup(
+    path: &Path,
+    relative: PathBuf,
+    id: Uuid,
+) -> Result<PreMigrationBackup, StoreError> {
+    verify_backup(path, relative, id, SCHEMA_V1, SCHEMA_V2)
+}
+fn verify_backup(
     backup_path: &Path,
     relative_path: PathBuf,
     expected_database_id: Uuid,
+    from: u32,
+    to: u32,
 ) -> Result<PreMigrationBackup, StoreError> {
     require_regular_file(backup_path)?;
     enforce_private_file_permissions(backup_path)?;
@@ -2315,18 +2773,24 @@ fn verify_v1_backup(
         )));
     }
     let schema_version = read_schema_version(&connection)?;
-    if schema_version != SCHEMA_V1 {
+    if schema_version != from {
         return Err(StoreError::BackupVerification(format!(
-            "{} has schema version {schema_version}, expected {SCHEMA_V1}",
+            "{} has schema version {schema_version}, expected {from}",
             backup_path.display()
         )));
     }
-    validate_schema_v1(&connection, SCHEMA_V1).map_err(|error| {
+    validate_schema_v1(&connection, from).map_err(|error| {
         StoreError::BackupVerification(format!(
-            "{} does not contain the expected schema v1: {error}",
+            "{} does not contain the expected schema {from}: {error}",
             backup_path.display()
         ))
     })?;
+    if from >= SCHEMA_V2 {
+        validate_schema_v2(&connection)?;
+    }
+    if from >= SCHEMA_V3 {
+        guards::validate_schema(&connection)?;
+    }
     let database_id = read_database_id(&connection)?;
     if database_id != expected_database_id {
         return Err(StoreError::BackupVerification(format!(
@@ -2346,8 +2810,8 @@ fn verify_v1_backup(
     }
     let created_at_ms = system_time_to_ms(metadata.modified()?)?;
     Ok(PreMigrationBackup {
-        from_version: SCHEMA_V1,
-        to_version: SCHEMA_V2,
+        from_version: from,
+        to_version: to,
         database_id,
         relative_path,
         bytes,
@@ -2386,6 +2850,13 @@ fn inspect_database_integrity(connection: &Connection) -> Result<DatabaseIntegri
 fn load_pre_migration_backup(
     connection: &Connection,
 ) -> Result<Option<PreMigrationBackup>, StoreError> {
+    load_migration_backup(connection, SCHEMA_V1, SCHEMA_V2)
+}
+fn load_migration_backup(
+    connection: &Connection,
+    from: u32,
+    to: u32,
+) -> Result<Option<PreMigrationBackup>, StoreError> {
     let raw = connection
         .query_row(
             "SELECT from_version, to_version, database_id, backup_relative_path,
@@ -2393,7 +2864,7 @@ fn load_pre_migration_backup(
                     backup_quick_check, backup_foreign_key_violations
              FROM schema_migrations
              WHERE from_version = ?1 AND to_version = ?2",
-            params![SCHEMA_V1, SCHEMA_V2],
+            params![from, to],
             |row| {
                 Ok((
                     row.get::<_, u32>(0)?,
@@ -3446,6 +3917,78 @@ fn load_pending_inbound_receipts(
     Ok(receipts)
 }
 
+fn prepare_batch_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    lease_token: &LeaseToken,
+    trigger_id: &str,
+    response_id: &str,
+    segments: &[OutboundSegmentDraft],
+    now_ms: i64,
+) -> Result<OutboundBatch, StoreError> {
+    let account_id = lease_token.account_id.as_str();
+    let existing_batch_id = transaction
+        .query_row(
+            "SELECT id FROM outbound_batches
+                 WHERE account_id = ?1 AND trigger_id = ?2",
+            params![account_id, trigger_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    if let Some(batch_id) = existing_batch_id {
+        let batch = load_batch(transaction, &batch_id)?;
+        if batch.response_id != response_id || !same_segment_plan(&batch.segments, segments) {
+            return Err(StoreError::IdempotencyConflict {
+                entity: "outbound batch",
+                key: format!("{account_id}/{trigger_id}"),
+            });
+        }
+        return Ok(batch);
+    }
+
+    let batch_id = Uuid::new_v4().to_string();
+    transaction.execute(
+        "INSERT INTO outbound_batches
+             (id, account_id, trigger_id, response_id, status,
+              created_fence_epoch, last_fence_epoch, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?7)",
+        params![
+            batch_id,
+            account_id,
+            trigger_id,
+            response_id,
+            BatchStatus::Prepared.as_str(),
+            lease_token.fence_epoch,
+            now_ms
+        ],
+    )?;
+
+    for (ordinal, segment) in segments.iter().enumerate() {
+        let ordinal = u32::try_from(ordinal)
+            .map_err(|_| StoreError::InvalidInput("outbound batch has too many segments"))?;
+        transaction.execute(
+            "INSERT INTO outbound_segments
+                 (id, client_message_id, batch_id, ordinal, kind, payload, status,
+                  attempt_count, last_fence_epoch, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?9)",
+            params![
+                Uuid::new_v4().to_string(),
+                Uuid::new_v4().to_string(),
+                batch_id,
+                ordinal,
+                segment.kind,
+                segment.payload,
+                SegmentStatus::Prepared.as_str(),
+                lease_token.fence_epoch,
+                now_ms
+            ],
+        )?;
+    }
+
+    let batch = load_batch(transaction, &batch_id)?;
+    Ok(batch)
+}
+
 fn load_batch(connection: &Connection, batch_id: &str) -> Result<OutboundBatch, StoreError> {
     let raw = connection
         .query_row(
@@ -3599,7 +4142,7 @@ fn apply_segment_transition(
 ) -> Result<(), StoreError> {
     let target = transition.target_status();
     match transition {
-        SegmentTransition::StartAttempt => {
+        SegmentTransition::StartAttempt | SegmentTransition::StartAutomaticAttempt => {
             transaction.execute(
                 "UPDATE outbound_segments
                  SET status = ?2, attempt_count = attempt_count + 1,
@@ -3626,7 +4169,8 @@ fn apply_segment_transition(
                 ],
             )?;
         }
-        SegmentTransition::Reject { error: reason }
+        SegmentTransition::CancelPrepared { reason }
+        | SegmentTransition::Reject { error: reason }
         | SegmentTransition::MarkRetryable { reason }
         | SegmentTransition::MarkUncertain { reason } => {
             transaction.execute(
@@ -3682,7 +4226,14 @@ fn derive_batch_status(
     Ok(status)
 }
 
-const fn valid_segment_transition(current: SegmentStatus, target: SegmentStatus) -> bool {
+const fn valid_segment_transition(
+    current: SegmentStatus,
+    target: SegmentStatus,
+    transition: &SegmentTransition,
+) -> bool {
+    if matches!(transition, SegmentTransition::CancelPrepared { .. }) {
+        return matches!(current, SegmentStatus::Prepared | SegmentStatus::Retryable);
+    }
     matches!(
         (current, target),
         (
@@ -3703,11 +4254,12 @@ const fn valid_segment_transition(current: SegmentStatus, target: SegmentStatus)
 
 fn validate_transition_details(transition: &SegmentTransition) -> Result<(), StoreError> {
     match transition {
-        SegmentTransition::StartAttempt => Ok(()),
+        SegmentTransition::StartAttempt | SegmentTransition::StartAutomaticAttempt => Ok(()),
         SegmentTransition::Confirm {
             platform_message_id,
         } => validate_non_empty(platform_message_id, "platform_message_id must not be empty"),
-        SegmentTransition::MarkRetryable { reason } => {
+        SegmentTransition::CancelPrepared { reason }
+        | SegmentTransition::MarkRetryable { reason } => {
             validate_non_empty(reason, "retryable reason must not be empty")
         }
         SegmentTransition::Reject { error } => {
@@ -3726,12 +4278,13 @@ fn validate_repeated_transition(
     stored_error: Option<&str>,
 ) -> Result<(), StoreError> {
     let matches = match transition {
-        SegmentTransition::StartAttempt => true,
+        SegmentTransition::StartAttempt | SegmentTransition::StartAutomaticAttempt => true,
         SegmentTransition::Confirm {
             platform_message_id,
         } => stored_platform_message_id == Some(platform_message_id.as_str()),
         SegmentTransition::Reject { error } => stored_error == Some(error.as_str()),
-        SegmentTransition::MarkRetryable { reason }
+        SegmentTransition::CancelPrepared { reason }
+        | SegmentTransition::MarkRetryable { reason }
         | SegmentTransition::MarkUncertain { reason } => stored_error == Some(reason.as_str()),
     };
     if matches {
@@ -3985,7 +4538,7 @@ mod tests {
         let database_id = create_schema_v1_fixture(directory.path());
 
         let store = CoreStore::open(directory.path()).unwrap();
-        assert_eq!(store.schema_version().unwrap(), SCHEMA_V2);
+        assert_eq!(store.schema_version().unwrap(), CORE_SCHEMA_VERSION);
         let backup = store
             .pre_migration_backup()
             .unwrap()
@@ -4050,7 +4603,13 @@ mod tests {
             .filter_map(Result::ok)
             .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "sqlite3"))
             .count();
-        assert_eq!(backup_files, 1);
+        assert_eq!(backup_files, 3);
+        let guard_backup = reopened.guard_migration_backup().unwrap().unwrap();
+        assert_eq!(
+            (guard_backup.from_version, guard_backup.to_version),
+            (SCHEMA_V2, SCHEMA_V3)
+        );
+        assert_eq!(guard_backup.database_id, database_id);
     }
 
     #[test]
@@ -4497,7 +5056,7 @@ mod tests {
             CoreStore::open(future_version_dir.path()),
             Err(StoreError::UnsupportedSchema {
                 found: 999,
-                supported: SCHEMA_V2,
+                supported: CORE_SCHEMA_VERSION,
             })
         ));
 
@@ -4694,6 +5253,72 @@ mod tests {
             .unwrap();
         assert_eq!(transferred.fence_epoch, 900);
         assert_eq!(transferred.owner_boot_id, "boot-2");
+    }
+
+    #[test]
+    fn invalidation_retires_expired_epoch_idempotently_without_touching_new_owner() {
+        let (_directory, store) = store();
+        let first = lease(&store);
+        // Fixture deadline is long in the past relative to the system clock.
+        assert!(store.invalidate_account_lease(&first.token()).unwrap());
+        assert!(!store.invalidate_account_lease(&first.token()).unwrap());
+        assert!(matches!(
+            store.install_verified_account_lease_at(ACCOUNT, INSTANCE, BOOT, EPOCH, 200, 20_000),
+            Err(StoreError::LeaseReleased { .. })
+        ));
+        let new = store
+            .install_verified_account_lease_at(
+                ACCOUNT,
+                "new-instance",
+                "new-boot",
+                EPOCH + 1,
+                200,
+                20_000,
+            )
+            .unwrap();
+        assert!(!store.invalidate_account_lease(&first.token()).unwrap());
+        assert!(store
+            .pending_inbound_receipts_at(&new.token(), 201, 1)
+            .is_ok());
+    }
+
+    #[test]
+    fn preparation_rejection_preserves_zero_attempts_and_durable_lookup() {
+        let (_directory, store) = store();
+        let token = lease(&store).token();
+        let batch = store
+            .prepare_outbound_batch_at(
+                &token,
+                "manual-preflight",
+                "route",
+                &[OutboundSegmentDraft::text("synthetic")],
+                200,
+            )
+            .unwrap();
+        let rejected = store
+            .transition_segment_at(
+                &token,
+                &batch.segments[0].id,
+                SegmentTransition::CancelPrepared {
+                    reason: "preparation failed before network".into(),
+                },
+                201,
+            )
+            .unwrap();
+        assert_eq!(rejected.batch.segments[0].attempt_count, 0);
+        assert_eq!(rejected.batch.segments[0].status, SegmentStatus::Rejected);
+        assert_eq!(
+            store
+                .outbound_batch_for_trigger(ACCOUNT, "manual-preflight")
+                .unwrap()
+                .unwrap()
+                .id,
+            batch.id
+        );
+        assert!(store
+            .outbound_batch_for_trigger("other-account", "manual-preflight")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -5432,3 +6057,11 @@ mod tests {
         assert_eq!(unfinished[0].id, pending.id);
     }
 }
+
+#[cfg(test)]
+#[path = "store_inbound_claim_tests.rs"]
+mod inbound_claim_tests;
+
+#[cfg(test)]
+#[path = "store_guard_tests.rs"]
+mod guard_tests;

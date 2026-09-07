@@ -24,8 +24,14 @@ from core.license.license_service import (
     get_activation_by_token,
     get_client_ip,
 )
+from core.client_announcement.client_announcement_schema import ClientAnnouncementClientOut
 
 router = Router()
+
+
+@router.post("/native-capabilities", auth=None, summary="原生客户端授权协议能力")
+def native_capabilities(request):
+    return {"renewal_idempotency": 1}
 
 
 @router.get("/app-version", response=AppVersionOut, auth=None, summary="客户端最新版本信息")
@@ -38,7 +44,26 @@ def app_version(request):
         "macos_url": settings.DOWNLOAD_MACOS_URL,
         "windows_url": settings.DOWNLOAD_WINDOWS_URL,
         "release_page": settings.DOWNLOAD_RELEASE_PAGE,
+        "extension_version": settings.DOWNLOAD_EXTENSION_VERSION,
+        "extension_url": settings.DOWNLOAD_EXTENSION_URL,
+        "extension_file": settings.DOWNLOAD_EXTENSION_FILE,
     }
+
+
+@router.get(
+    "/announcements",
+    response=list[ClientAnnouncementClientOut],
+    auth=None,
+    summary="原生客户端最新公告",
+)
+def announcements(request, limit: int = 10):
+    """Expose the bounded public catalog on the same control-plane URL as native licensing."""
+    from ninja.errors import HttpError
+    from core.client_announcement.client_announcement_client_api import get_client_announcements
+
+    if limit < 1 or limit > 50:
+        raise HttpError(400, "公告数量范围无效")
+    return get_client_announcements(request, limit)
 
 
 @router.post("/activate", response=ClientAuthStateOut, auth=None, summary="客户端激活卡密")
@@ -57,7 +82,9 @@ def activate(request, data: ClientAuthActivateIn):
 
 @router.post("/check-in", response=ClientAuthStateOut, auth=None, summary="客户端心跳校验")
 def check_in(request, data: ClientAuthCheckInIn):
-    return check_in_activation(
+    from core.license.renewal_receipt import renew_once
+    return renew_once(
+        request_id=data.request_id,
         activation_id=data.activation_id,
         activation_token=data.activation_token or "",
         refresh_token=data.refresh_token or "",
@@ -179,3 +206,19 @@ def card_cover(
         "cover_file_id": str(file_obj.id),
         "cover_url": build_cover_url(str(file_obj.id)) or "",
     }
+
+
+# One installation-level batch, not one heartbeat request per managed account.
+from core.license.agent_lease_schema import AgentLeaseSyncIn, AgentLeaseSyncOut
+
+
+@router.post('/agent/leases/sync', response=AgentLeaseSyncOut, auth=None, summary='Rust Agent 批量账号租约')
+def agent_lease_sync(request, data: AgentLeaseSyncIn):
+    from core.license.agent_lease_service import sync_account_leases
+    from django.db import OperationalError
+    from ninja.errors import HttpError
+    try:
+        return sync_account_leases(data)
+    except OperationalError:
+        # A database lock/transport error is never a grant. Retry the same sequence.
+        raise HttpError(503, '账号租约服务暂忙，请重试同一请求') from None

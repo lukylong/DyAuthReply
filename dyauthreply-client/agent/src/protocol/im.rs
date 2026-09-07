@@ -148,18 +148,32 @@ pub fn encode_send_message_request(input: &SendRequestInput) -> Result<Vec<u8>, 
     let mut request_body = Vec::new();
     append_bytes_field(&mut request_body, 100, &send_body)?;
 
+    encode_normal_envelope(
+        SEND_MESSAGE_COMMAND,
+        input.sequence_id,
+        &request_body,
+        request_headers(input),
+    )
+}
+
+pub(super) fn encode_normal_envelope(
+    cmd: u64,
+    sequence_id: u64,
+    request_body: &[u8],
+    headers: BTreeMap<String, String>,
+) -> Result<Vec<u8>, ProtocolError> {
     let mut request = Vec::new();
-    append_varint_field(&mut request, 1, SEND_MESSAGE_COMMAND)?;
-    append_varint_field(&mut request, 2, input.sequence_id)?;
+    append_varint_field(&mut request, 1, cmd)?;
+    append_varint_field(&mut request, 2, sequence_id)?;
     append_string_field(&mut request, 3, SDK_VERSION)?;
     append_varint_field(&mut request, 5, 3)?;
     append_string_field(&mut request, 7, BUILD_ID)?;
-    append_bytes_field(&mut request, 8, &request_body)?;
+    append_bytes_field(&mut request, 8, request_body)?;
     append_string_field(&mut request, 9, "0")?;
     append_string_field(&mut request, 11, DEVICE_PLATFORM)?;
     append_string_field(&mut request, 14, VERSION_CODE)?;
 
-    for (key, value) in request_headers(input) {
+    for (key, value) in headers {
         append_map_entry(&mut request, 15, &key, &value)?;
     }
 
@@ -228,9 +242,9 @@ fn append_map_entry(
     append_bytes_field(output, field_number, &entry)
 }
 
-fn request_headers(input: &SendRequestInput) -> BTreeMap<String, String> {
-    let browser_version = input.user_agent.replacen("Mozilla/", "", 1);
-    let mut headers = BTreeMap::from([
+pub(super) fn common_headers(user_agent: &str) -> BTreeMap<String, String> {
+    let browser_version = user_agent.replacen("Mozilla/", "", 1);
+    BTreeMap::from([
         ("app_name".to_owned(), DEVICE_PLATFORM.to_owned()),
         ("browser_language".to_owned(), "zh-CN".to_owned()),
         ("browser_name".to_owned(), "Mozilla".to_owned()),
@@ -250,8 +264,12 @@ fn request_headers(input: &SendRequestInput) -> BTreeMap<String, String> {
         ("session_aid".to_owned(), DEFAULT_SESSION_AID.to_owned()),
         ("session_did".to_owned(), "0".to_owned()),
         ("timezone_name".to_owned(), "Asia/Shanghai".to_owned()),
-        ("user_agent".to_owned(), input.user_agent.clone()),
-    ]);
+        ("user_agent".to_owned(), user_agent.to_owned()),
+    ])
+}
+
+fn request_headers(input: &SendRequestInput) -> BTreeMap<String, String> {
+    let mut headers = common_headers(&input.user_agent);
     headers.insert("identity_security_aid".to_owned(), String::new());
     if !input.identity_security_device_id.is_empty() {
         headers.insert(

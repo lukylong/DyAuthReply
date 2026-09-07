@@ -174,12 +174,38 @@ impl AccountRuntimeState {
             && matches!(self.send, SendCapability::Sendable)
     }
 
-    /// Returns whether a new automatic reply may be started now.
+    /// An explicit operator send may establish the previously unknown platform
+    /// capability. Unknown must not be displayed as Sendable; known restrictions remain blocking.
+    #[must_use]
+    pub const fn can_attempt_manual_send(&self) -> bool {
+        matches!(
+            self.lifecycle,
+            LifecycleState::Running | LifecycleState::PausedAuto
+        ) && matches!(self.ownership, OwnershipState::Owned)
+            && matches!(
+                self.send,
+                SendCapability::Unknown | SendCapability::Sendable
+            )
+    }
+
+    /// Reports positive automatic send capability, not merely eligibility for a guarded attempt.
     #[must_use]
     pub const fn can_auto_reply(&self) -> bool {
         matches!(self.lifecycle, LifecycleState::Running)
             && matches!(self.ownership, OwnershipState::Owned)
             && matches!(self.send, SendCapability::Sendable)
+    }
+
+    /// Allows one guarded, identity-verified automatic attempt without claiming Sendable.
+    /// The service must verify the account and the store must own all guard reservations.
+    #[must_use]
+    pub const fn can_attempt_auto_reply(&self) -> bool {
+        matches!(self.lifecycle, LifecycleState::Running)
+            && matches!(self.ownership, OwnershipState::Owned)
+            && matches!(
+                self.send,
+                SendCapability::Unknown | SendCapability::Sendable
+            )
     }
 
     /// Derives one display value without collapsing the four stored axes.

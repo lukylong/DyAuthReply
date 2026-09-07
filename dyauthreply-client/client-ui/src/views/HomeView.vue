@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { RouterLink } from 'vue-router';
 import {
   Check,
@@ -11,17 +11,24 @@ import {
 import {
   getHealth,
   getReplyLogStat,
+  checkAppUpdate,
   listAccounts,
+  openExternalUrl,
   type DouyinAccount,
 } from '../api/client';
+import { automaticSummary } from '../domain/accountRuntime';
+import { useClientRealtime } from '../composables/useClientRealtime';
 import { useClientLicense } from '../composables/useClientLicense';
+import CapacityPanel from '../components/CapacityPanel.vue';
 
 const loading = ref(true);
 const error = ref('');
 const accounts = ref<DouyinAccount[]>([]);
 const { licenseStatus: license, ensureStatus } = useClientLicense();
 const currentStep = ref(1);
-const wizardRef = ref<HTMLElement | null>(null);
+const extensionDownloading = ref(false);
+const extensionError = ref('');
+const extensionVersion = ref('');
 
 // 今日回复统计：从 /douyin/reply-log/stat/summary?scope=today 拉取，请求失败时保留占位符，
 // 不影响概览页其余区块渲染。
@@ -50,20 +57,22 @@ async function loadTodayStat() {
 const onlineCount = computed(() => accounts.value.filter((a) => a.status === 1).length);
 const offlineCount = computed(() => accounts.value.length - onlineCount.value);
 
-const heroOk = computed(
-  () => accounts.value.length > 0 && (!license.value || license.value.can_use_business),
-);
-
-const heroIcon = computed(() => {
-  if (heroOk.value) return CircleCheck;
-  return accounts.value.length === 0 ? Inbox : TriangleAlert;
-});
-
-const heroTitle = computed(() => {
-  if (heroOk.value) return '自动回复正在运行';
-  if (accounts.value.length === 0) return '尚未托管任何抖音号';
-  return '自动回复已暂停';
-});
+const summary = computed(() => automaticSummary(accounts.value, license.value?.can_use_business === true));
+const heroOk = computed(() => summary.value.running > 0);
+const heroIcon = computed(() => heroOk.value ? CircleCheck : (accounts.value.length === 0 ? Inbox : TriangleAlert));
+const heroTitle = computed(() => summary.value.title);
+let disposeRealtime: (() => void) | undefined;
+let refreshing = false;
+let refreshAgain = false;
+let disposed = false;
+async function refreshAccountState() {
+  if (disposed) return;
+  if (refreshing) { refreshAgain = true; return; }
+  refreshing = true;
+  try { const rows = await listAccounts(); if (!disposed) accounts.value = rows; }
+  catch { /* Keep the last verified snapshot; connection state is displayed separately. */ }
+  finally { refreshing = false; if (refreshAgain) { refreshAgain = false; void refreshAccountState(); } }
+}
 
 async function initDashboard() {
   loading.value = true;
@@ -89,15 +98,27 @@ async function initDashboard() {
   await loadTodayStat();
 }
 
-function goInstallExtension() {
-  // 暂无独立的插件下载/打包产物，先引导到下方“快速接入向导”第 1 步的安装说明。
-  currentStep.value = 1;
-  wizardRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+async function goInstallExtension() {
+  if (extensionDownloading.value) return;
+  extensionDownloading.value = true;
+  extensionError.value = '';
+  try {
+    const release = await checkAppUpdate();
+    if (!release.extension_url) throw new Error('暂未发布可下载的浏览器插件');
+    extensionVersion.value = release.extension_version ? `v${release.extension_version}` : '最新发布';
+    await openExternalUrl(release.extension_url);
+  } catch (e) {
+    extensionError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    extensionDownloading.value = false;
+  }
 }
 
 onMounted(() => {
   initDashboard();
+  disposeRealtime = useClientRealtime().subscribe({ onReplyLogChanged: () => { void refreshAccountState(); void loadTodayStat(); }, onAccountStateChanged: () => { void refreshAccountState(); }, onOpen: () => { void refreshAccountState(); } });
 });
+onUnmounted(() => { disposed = true; disposeRealtime?.(); });
 </script>
 
 <template>
@@ -134,7 +155,7 @@ onMounted(() => {
       <section class="stats-bar glass-panel">
         <div class="stat-item">
           <span class="num">{{ todayReplyDisplay }}</span>
-          <span class="lbl">今日回复</span>
+          <span class="lbl">今日触发</span>
         </div>
         <span class="stat-divider"></span>
         <div class="stat-item">
@@ -159,19 +180,23 @@ onMounted(() => {
       </section>
 
       <!-- 浏览器插件下载入口 -->
+      <CapacityPanel />
       <section class="plugin-row glass-panel">
         <div class="plugin-info">
           <div class="plugin-icon"><Puzzle :size="20" /></div>
           <div class="plugin-text">
             <h5>浏览器插件</h5>
-            <p>用于一键提取抖音登录态，配合第 1 步使用</p>
+            <p>用于一键提取抖音登录态<span v-if="extensionVersion"> · {{ extensionVersion }}</span></p>
+            <p v-if="extensionError" class="plugin-error">{{ extensionError }}</p>
           </div>
         </div>
-        <button type="button" class="btn-glass btn-primary-glass" @click="goInstallExtension">下载安装</button>
+        <button type="button" class="btn-glass btn-primary-glass" :disabled="extensionDownloading" @click="goInstallExtension">
+          {{ extensionDownloading ? '正在获取...' : '下载最新版' }}
+        </button>
       </section>
 
       <!-- 快速接入向导（去卡片化，仅顶部分隔线） -->
-      <section ref="wizardRef" class="stepper-section">
+      <section class="stepper-section">
         <div class="stepper-header">
           <h3>快速接入向导</h3>
           <p>只需简单三步，即可将抖音号托管至本终端，开启自动回复服务</p>
@@ -215,7 +240,7 @@ onMounted(() => {
               <div class="instruction-item">
                 <span class="item-num">1</span>
                 <div class="item-text">
-                  定位到项目根目录下的 <code class="code-path">browser-extension/douyin-cred-extractor</code> 文件夹。
+                  点击上方 <strong>“下载最新版”</strong>，下载 <code class="code-path">douyin-cred-extractor.zip</code> 并解压。
                 </div>
               </div>
               <div class="instruction-item">
@@ -227,7 +252,7 @@ onMounted(() => {
               <div class="instruction-item">
                 <span class="item-num">3</span>
                 <div class="item-text">
-                  点击左上角 <strong>“加载已解压的扩展程序”</strong>，选中上述的扩展文件夹导入。
+                  点击左上角 <strong>“加载已解压的扩展程序”</strong>，选中刚解压的插件文件夹导入。
                 </div>
               </div>
             </div>
@@ -473,6 +498,10 @@ onMounted(() => {
   margin: 4px 0 0;
   font-size: 0.8rem;
   color: var(--text-secondary);
+}
+
+.plugin-text .plugin-error {
+  color: var(--danger);
 }
 
 /* Stepper Section Layout (去卡片化，仅顶部分隔线) */

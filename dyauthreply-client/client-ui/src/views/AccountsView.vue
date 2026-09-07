@@ -1,17 +1,29 @@
 <script setup lang="ts">
 import { onBeforeRouteLeave } from 'vue-router';
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { Ellipsis, Plus, Search, Smartphone, TriangleAlert } from 'lucide-vue-next';
+import { Ellipsis, KeyRound, LoaderCircle, Plus, Search, ShieldCheck, Smartphone, TriangleAlert } from 'lucide-vue-next';
 import AppModal from '../components/AppModal.vue';
 import AccountProfileDrawer from '../components/AccountProfileDrawer.vue';
 import {
   deleteAccount,
+  cancelQuickAuth,
+  confirmQuickAuth,
+  getQuickAuthComponent,
+  getCurrentQuickAuthSession,
+  getQuickAuthSession,
+  installQuickAuthComponent,
+  inTauriRuntime,
   importCredential,
   listAccounts,
   patchAccount,
   quickCreateAccount,
+  restartNativeService,
+  startQuickAuth,
   statusLabel,
   type DouyinAccount,
+  type QuickAuthMode,
+  type QuickAuthComponent,
+  type QuickAuthSession,
 } from '../api/client';
 import { useClientLicense } from '../composables/useClientLicense';
 import { useClientRealtime } from '../composables/useClientRealtime';
@@ -30,6 +42,192 @@ const savingId = ref('');
 const searchQuery = ref('');
 const { start: startRealtime, subscribe: subscribeRealtime } = useClientRealtime();
 let unsubscribeRealtime: (() => void) | null = null;
+const showQuickAuth = ref(false);
+const quickAuth = ref<QuickAuthSession | null>(null);
+const quickAuthError = ref('');
+const quickAuthBusy = ref(false);
+const quickComponent = ref<QuickAuthComponent | null>(null);
+const quickPendingTarget = ref<DouyinAccount | undefined>();
+const quickAuthTarget = ref<DouyinAccount | undefined>();
+let quickAuthRepairTimer: ReturnType<typeof setInterval> | null = null;
+let componentRepairTimer: ReturnType<typeof setInterval> | null = null;
+
+const quickAuthTerminal = computed(() =>
+  ['completed', 'cancelled', 'timed_out', 'browser_exited', 'failed'].includes(quickAuth.value?.state || ''),
+);
+const quickAuthRemainingMinutes = computed(() => {
+  if (!quickAuth.value || quickAuthTerminal.value) return 0;
+  return Math.max(1, Math.ceil((quickAuth.value.expires_at_ms - Date.now()) / 60_000));
+});
+
+function quickAuthMode(account?: DouyinAccount): QuickAuthMode {
+  if (!account) return 'create';
+  return account.credential_state === 'invalid' || account.status === 2 ? 'recover' : 'refresh';
+}
+
+function stopQuickAuthRepair() {
+  if (quickAuthRepairTimer) clearInterval(quickAuthRepairTimer);
+  quickAuthRepairTimer = null;
+}
+
+function startQuickAuthRepair() {
+  stopQuickAuthRepair();
+  quickAuthRepairTimer = setInterval(() => void refreshQuickAuth(), 2000);
+}
+
+function stopComponentRepair() {
+  if (componentRepairTimer) clearInterval(componentRepairTimer);
+  componentRepairTimer = null;
+}
+
+async function beginQuickAuth(account?: DouyinAccount) {
+  quickAuth.value = await startQuickAuth(quickAuthMode(account), account?.id);
+  startQuickAuthRepair();
+}
+
+async function refreshQuickComponent() {
+  try {
+    quickComponent.value = await getQuickAuthComponent();
+    if (quickComponent.value.state === 'ready') {
+      stopComponentRepair();
+      const target = quickPendingTarget.value;
+      quickPendingTarget.value = undefined;
+      await beginQuickAuth(target);
+    } else if (quickComponent.value.state === 'failed') {
+      stopComponentRepair();
+    }
+  } catch (e) {
+    stopComponentRepair();
+    quickAuthError.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function installQuickComponent() {
+  quickAuthBusy.value = true;
+  quickAuthError.value = '';
+  try {
+    quickComponent.value = await installQuickAuthComponent();
+    stopComponentRepair();
+    componentRepairTimer = setInterval(() => void refreshQuickComponent(), 700);
+  } catch (e) {
+    quickAuthError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    quickAuthBusy.value = false;
+  }
+}
+
+async function refreshQuickAuth() {
+  if (quickAuthBusy.value) return;
+  const id = quickAuth.value?.session_id;
+  if (!id) return;
+  try {
+    quickAuth.value = await getQuickAuthSession(id);
+    if (quickAuthTerminal.value) stopQuickAuthRepair();
+  } catch (e) {
+    if (quickAuthBusy.value) return;
+    quickAuthError.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function resumeCurrentQuickAuth() {
+  if (!inTauriRuntime() || quickAuth.value) return;
+  try {
+    const current = await getCurrentQuickAuthSession();
+    if (!current || ['completed', 'cancelled', 'timed_out', 'browser_exited', 'failed'].includes(current.state)) return;
+    quickAuth.value = current;
+    quickComponent.value = current.component;
+    quickAuthTarget.value = current.target_account_id
+      ? accounts.value.find((account) => account.id === current.target_account_id)
+      : undefined;
+    showQuickAuth.value = true;
+    startQuickAuthRepair();
+  } catch {
+    // Native realtime or the next page load repairs a transient attach failure.
+  }
+}
+
+async function openQuickAuth(account?: DouyinAccount) {
+  if (!license.value?.can_use_business) {
+    error.value = `当前授权状态为「${license.value?.state_label || '未激活'}」，无法快捷登录`;
+    return;
+  }
+  quickAuthBusy.value = true;
+  quickAuthError.value = '';
+  quickAuth.value = null;
+  quickAuthTarget.value = account;
+  quickPendingTarget.value = account;
+  showQuickAuth.value = true;
+  try {
+    quickComponent.value = await getQuickAuthComponent();
+    if (quickComponent.value.state === 'ready') {
+      quickPendingTarget.value = undefined;
+      await beginQuickAuth(account);
+    } else if (quickComponent.value.state === 'installing') {
+      stopComponentRepair();
+      componentRepairTimer = setInterval(() => void refreshQuickComponent(), 700);
+    }
+  } catch (e) {
+    quickAuthError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    quickAuthBusy.value = false;
+  }
+}
+
+async function closeQuickAuth() {
+  if (quickAuthBusy.value) return;
+  const session = quickAuth.value;
+  showQuickAuth.value = false;
+  stopQuickAuthRepair();
+  stopComponentRepair();
+  if (session && !quickAuthTerminal.value) {
+    try { await cancelQuickAuth(session.session_id); } catch { /* owned session timeout also cleans up */ }
+  }
+  quickAuth.value = null;
+  quickComponent.value = null;
+  quickPendingTarget.value = undefined;
+  quickAuthTarget.value = undefined;
+  quickAuthError.value = '';
+}
+
+async function retryQuickAuth() {
+  if (quickAuthBusy.value) return;
+  quickAuthBusy.value = true;
+  quickAuthError.value = '';
+  quickAuth.value = null;
+  try {
+    await beginQuickAuth(quickAuthTarget.value);
+  } catch (e) {
+    quickAuthError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    quickAuthBusy.value = false;
+  }
+}
+
+async function approveQuickAuth() {
+  const session = quickAuth.value;
+  if (!session || session.state !== 'awaiting_confirmation') return;
+  quickAuthBusy.value = true;
+  quickAuthError.value = '';
+  stopQuickAuthRepair();
+  let confirmed = false;
+  try {
+    const result = await confirmQuickAuth(session.session_id);
+    quickAuth.value = result.quick_auth;
+    confirmed = true;
+    if (result.runtime_reload_required) await restartNativeService();
+    await load();
+    quickAuthError.value = '';
+    setTimeout(() => void closeQuickAuth(), 900);
+  } catch (e) {
+    quickAuthError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    quickAuthBusy.value = false;
+  }
+  if (!confirmed) {
+    await refreshQuickAuth();
+    if (!quickAuthTerminal.value) startQuickAuthRepair();
+  }
+}
 
 const filteredAccounts = computed(() => {
   const q = searchQuery.value.trim().toLowerCase();
@@ -164,13 +362,14 @@ function onDocumentClick() {
 function onEscapeKey(e: KeyboardEvent) {
   if (e.key !== 'Escape') return;
   if (openMenuId.value) closeMenu();
+  else if (showQuickAuth.value) void closeQuickAuth();
   else if (showDelete.value) closeDelete();
   else if (showProfile.value) closeProfile();
   else if (showImport.value) closeImport();
 }
 
-watch([showImport, showProfile, showDelete], ([imp, prof, del]) => {
-  if (imp || prof || del) {
+watch([showImport, showProfile, showDelete, showQuickAuth], ([imp, prof, del, quick]) => {
+  if (imp || prof || del || quick) {
     document.addEventListener('keydown', onEscapeKey);
   } else {
     document.removeEventListener('keydown', onEscapeKey);
@@ -178,6 +377,7 @@ watch([showImport, showProfile, showDelete], ([imp, prof, del]) => {
 });
 
 onBeforeRouteLeave(() => {
+  void closeQuickAuth();
   closeImport();
   closeProfile();
   closeMenu();
@@ -188,7 +388,12 @@ onMounted(() => {
   document.addEventListener('click', onDocumentClick);
   document.addEventListener('keydown', onEscapeKey);
   unsubscribeRealtime = subscribeRealtime({
+    onReplyLogChanged: () => { void refreshAccounts(); },
     onAccountStateChanged: () => void refreshAccounts(),
+    onQuickAuthChanged: (data) => {
+      if (quickAuth.value && data.session_id === quickAuth.value.session_id) void refreshQuickAuth();
+      else if (!quickAuth.value) void resumeCurrentQuickAuth();
+    },
     // API/Worker 重启后长连接会自动恢复；重连成功时重新取一次快照，避免页面保留旧状态。
     onOpen: () => void refreshAccounts(),
   });
@@ -196,6 +401,8 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  stopQuickAuthRepair();
+  stopComponentRepair();
   document.removeEventListener('click', onDocumentClick);
   document.removeEventListener('keydown', onEscapeKey);
   unsubscribeRealtime?.();
@@ -257,7 +464,10 @@ function avatarInitial(name: string) {
   return t.slice(0, 1).toUpperCase();
 }
 
-onMounted(load);
+onMounted(async () => {
+  await load();
+  await resumeCurrentQuickAuth();
+});
 </script>
 
 <template>
@@ -272,8 +482,11 @@ onMounted(load);
           <Search class="search-icon" :size="16" />
           <input v-model="searchQuery" type="text" class="input-glass search-input" placeholder="搜索昵称" />
         </div>
-        <button type="button" class="btn-glass btn-primary-glass" @click="openImport()">
-          <Plus :size="16" /> 导入抖音号
+        <button type="button" class="btn-glass" @click="openImport()">
+          <Plus :size="16" /> 粘贴导入
+        </button>
+        <button type="button" class="btn-glass btn-primary-glass" @click="openQuickAuth()">
+          <KeyRound :size="16" /> 快捷登录
         </button>
       </div>
     </div>
@@ -301,8 +514,8 @@ onMounted(load);
       <Smartphone class="empty-icon" :size="40" />
       <h3>暂无绑定的抖音号</h3>
       <p>导入您的第一个抖音号来配置私信的自动回复任务</p>
-      <button type="button" class="btn-glass btn-primary-glass mt-16" @click="openImport()">
-        立即导入首个账号
+      <button type="button" class="btn-glass btn-primary-glass mt-16" @click="openQuickAuth()">
+        <KeyRound :size="16" /> 快捷登录首个账号
       </button>
     </div>
 
@@ -346,7 +559,10 @@ onMounted(load);
             </button>
             <div v-if="openMenuId === acc.id" class="menu-dropdown" @click.stop>
               <button type="button" @click="openProfile(acc); closeMenu()">查看主页</button>
-              <button type="button" @click="openImport(acc); closeMenu()">更新凭证</button>
+              <button type="button" @click="openQuickAuth(acc); closeMenu()">
+                {{ acc.credential_state === 'invalid' || acc.status === 2 ? '快捷恢复登录' : '快捷更新登录' }}
+              </button>
+              <button type="button" @click="openImport(acc); closeMenu()">粘贴更新凭证</button>
               <button type="button" class="danger" @click="openDelete(acc); closeMenu()">删除账号</button>
             </div>
           </div>
@@ -375,7 +591,7 @@ onMounted(load);
         <div class="card-divider"></div>
 
         <div class="card-bottom">
-          <span class="reply-count">今日回复 {{ acc.reply_today ?? 0 }} 次</span>
+          <span class="reply-count">今日回复 {{ acc.reply_today ?? '—' }} 次</span>
           <label class="ios-switch sm" @click.stop>
             <input
               type="checkbox"
@@ -389,7 +605,96 @@ onMounted(load);
       </article>
     </section>
 
-    <!-- AppModal for Import -->
+    <AppModal
+      :open="showQuickAuth"
+      :title="quickAuth?.mode === 'create' ? '快捷登录新账号' : '维护账号登录状态'"
+      @close="closeQuickAuth"
+    >
+      <div class="quick-auth-content">
+        <div v-if="!quickAuth && quickComponent?.state !== 'ready'" class="component-install-card">
+          <LoaderCircle v-if="quickComponent?.state === 'installing'" class="quick-spinner" :size="34" />
+          <KeyRound v-else :size="34" />
+          <h3>{{ quickComponent?.state === 'installing' ? '正在安装快捷登录组件' : '需要安装快捷登录组件' }}</h3>
+          <p>{{ quickComponent?.message || '该组件用于打开独立的安全登录窗口。' }}</p>
+          <div v-if="quickComponent?.state === 'installing'" class="install-progress">
+            <span :style="{ width: `${quickComponent.progress_percent || 0}%` }"></span>
+          </div>
+          <p v-if="quickComponent?.state === 'installing'" class="progress-label">
+            {{ quickComponent.progress_percent ?? 0 }}%
+          </p>
+          <button
+            v-else
+            type="button"
+            class="btn-glass btn-primary-glass"
+            :disabled="quickAuthBusy"
+            @click="installQuickComponent"
+          >
+            {{ quickAuthBusy ? '正在准备...' : '安装快捷登录组件' }}
+          </button>
+        </div>
+
+        <div v-if="quickAuth?.account" class="quick-account-card">
+          <div class="avatar quick-avatar">
+            <img v-if="quickAuth.account.avatar" :src="quickAuth.account.avatar" alt="" />
+            <span v-else>{{ avatarInitial(quickAuth.account.nickname) }}</span>
+          </div>
+          <div>
+            <span class="confirm-label"><ShieldCheck :size="15" /> 已完成账号校验</span>
+            <h3>{{ quickAuth.account.nickname }}</h3>
+            <p>抖音号：{{ quickAuth.account.unique_id || '未设置' }}</p>
+          </div>
+        </div>
+        <div v-else-if="quickAuth" class="quick-auth-waiting">
+          <LoaderCircle class="quick-spinner" :size="34" />
+          <h3>{{ quickAuth?.message || (quickAuthBusy ? '正在准备登录窗口' : '等待开始') }}</h3>
+          <p>请在单独打开的浏览器窗口中完成登录，客户端会自动识别账号。</p>
+          <p v-if="!quickAuthTerminal" class="session-time">本次授权窗口剩余约 {{ quickAuthRemainingMinutes }} 分钟</p>
+        </div>
+
+        <div v-if="quickAuth" class="credential-checks">
+          <span :class="{ done: quickAuth.completeness.cookie }">登录状态</span>
+          <span :class="{ done: quickAuth.completeness.scoped_cookies }">账号会话</span>
+          <span :class="{ done: quickAuth.completeness.server_data }">发送认证</span>
+          <span :class="{ done: quickAuth.completeness.private_key }">安全密钥</span>
+          <span :class="{ done: quickAuth.completeness.dtrait }">设备校验</span>
+          <span :class="{ done: quickAuth.completeness.identity }">账号资料</span>
+        </div>
+
+        <p v-if="quickAuthError" class="msg-box error-msg">{{ quickAuthError }}</p>
+        <p v-else-if="quickAuthTerminal && quickAuth?.state !== 'completed'" class="msg-box error-msg">
+          {{ quickAuth?.message }}
+        </p>
+        <p v-else-if="quickAuth?.state === 'completed'" class="msg-box success-msg">
+          {{ quickAuth.message }}
+        </p>
+
+        <div v-if="quickAuth" class="actions">
+          <button type="button" class="btn-glass" :disabled="quickAuthBusy" @click="closeQuickAuth">
+            {{ quickAuth?.state === 'completed' ? '关闭' : '取消登录' }}
+          </button>
+          <button
+            v-if="quickAuthTerminal && quickAuth.state !== 'completed'"
+            type="button"
+            class="btn-glass btn-primary-glass"
+            :disabled="quickAuthBusy"
+            @click="retryQuickAuth"
+          >
+            {{ quickAuthBusy ? '正在重新打开...' : '重新打开登录窗口' }}
+          </button>
+          <button
+            v-else
+            type="button"
+            class="btn-glass btn-primary-glass"
+            :disabled="quickAuthBusy || quickAuth?.state !== 'awaiting_confirmation'"
+            @click="approveQuickAuth"
+          >
+            {{ quickAuthBusy ? '正在导入...' : '确认并导入账号' }}
+          </button>
+        </div>
+      </div>
+    </AppModal>
+
+    <!-- AppModal for manual import fallback -->
     <AppModal
       :open="showImport"
       :title="reimportTarget ? `更新「${reimportTarget.nickname}」的凭证` : '绑定抖音账号'"
@@ -848,6 +1153,141 @@ onMounted(load);
 }
 
 /* Modal Content Panel */
+.quick-auth-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.component-install-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 22px 16px;
+  text-align: center;
+  color: var(--brand-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--brand-primary-soft);
+}
+
+.component-install-card h3,
+.component-install-card p {
+  margin: 0;
+}
+
+.component-install-card h3 {
+  color: var(--text-primary);
+  font-size: 1rem;
+}
+
+.component-install-card p {
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+}
+
+.install-progress {
+  width: min(100%, 360px);
+  height: 8px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: var(--border-subtle);
+}
+
+.install-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--brand-primary);
+  transition: width 0.2s ease;
+}
+
+.component-install-card .progress-label {
+  color: var(--brand-primary);
+  font-weight: 700;
+}
+
+.quick-auth-waiting {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 8px;
+  padding: 18px 12px;
+}
+
+.quick-auth-waiting h3,
+.quick-account-card h3 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 1rem;
+}
+
+.quick-auth-waiting p,
+.quick-account-card p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+}
+
+.quick-auth-waiting .session-time {
+  color: var(--brand-primary);
+  font-weight: 600;
+}
+
+.quick-spinner {
+  color: var(--brand-primary);
+  animation: spin 1s linear infinite;
+}
+
+.quick-account-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--success-soft);
+}
+
+.quick-avatar {
+  width: 54px;
+  height: 54px;
+}
+
+.confirm-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 5px;
+  color: var(--success);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.credential-checks {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.credential-checks span {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  background: var(--bg-app);
+  text-align: center;
+  font-size: 0.74rem;
+}
+
+.credential-checks span.done {
+  color: var(--success);
+  background: var(--success-soft);
+  border-color: var(--success);
+}
+
 .import-modal-content {
   display: flex;
   flex-direction: column;

@@ -1,17 +1,18 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::{Context, Result};
-use directories::ProjectDirs;
 
 use crate::storage::{retention::WatermarkPolicy, SegmentPolicies, SegmentPolicy};
 
 pub const DEFAULT_AGENT_PORT: u16 = 18_765;
+pub const MIN_RUNTIME_DRAIN_TIMEOUT_MS: u64 = 100;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentConfig {
     pub data_dir: PathBuf,
     pub bind_addr: SocketAddr,
     pub storage: StorageConfig,
+    pub runtime: RuntimeConfig,
 }
 
 /// Bounded rolling-storage policy used until the remote control plane supplies
@@ -20,6 +21,92 @@ pub struct AgentConfig {
 pub struct StorageConfig {
     pub segment_policies: SegmentPolicies,
     pub watermarks: WatermarkPolicy,
+}
+
+/// Hard bounds for the process-wide account runtime.
+///
+/// These values deliberately describe one installation, not one account. This
+/// prevents memory, signing, reconnect, and heartbeat load from multiplying by
+/// the hosted-account count without an upper bound.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeConfig {
+    pub account_mailbox_capacity: usize,
+    pub global_queue_capacity: usize,
+    pub per_account_queue_capacity: usize,
+    pub manual_burst: usize,
+    pub signer_lanes: usize,
+    pub signer_queue_capacity: usize,
+    pub reconnect_rate_per_second: u32,
+    pub reconnect_burst: u32,
+    pub heartbeat_interval_ms: u64,
+    pub heartbeat_full_interval_ms: u64,
+    pub heartbeat_max_accounts: usize,
+    pub storage_cleanup_interval_ms: u64,
+    pub drain_timeout_ms: u64,
+}
+
+impl RuntimeConfig {
+    /// Conservative defaults for the deterministic 10/100/300 account gates.
+    #[must_use]
+    pub const fn recommended() -> Self {
+        Self {
+            account_mailbox_capacity: 64,
+            global_queue_capacity: 8_192,
+            per_account_queue_capacity: 128,
+            manual_burst: 8,
+            signer_lanes: 4,
+            signer_queue_capacity: 512,
+            reconnect_rate_per_second: 4,
+            reconnect_burst: 8,
+            heartbeat_interval_ms: 30_000,
+            heartbeat_full_interval_ms: 300_000,
+            heartbeat_max_accounts: 512,
+            storage_cleanup_interval_ms: 60_000,
+            drain_timeout_ms: 10_000,
+        }
+    }
+
+    /// Rejects values that would make the bounded runtime inert or internally
+    /// contradictory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a diagnostic naming the invalid relationship.
+    pub fn validate(&self) -> Result<()> {
+        if self.account_mailbox_capacity == 0
+            || self.global_queue_capacity == 0
+            || self.per_account_queue_capacity == 0
+            || self.manual_burst == 0
+            || self.signer_lanes == 0
+            || self.signer_queue_capacity == 0
+            || self.heartbeat_max_accounts == 0
+        {
+            anyhow::bail!("runtime capacities and manual burst must be positive");
+        }
+        if self.per_account_queue_capacity > self.global_queue_capacity {
+            anyhow::bail!("per-account queue capacity cannot exceed the global capacity");
+        }
+        if self.signer_lanes > self.signer_queue_capacity {
+            anyhow::bail!("signer lane count cannot exceed its queue capacity");
+        }
+        if self.reconnect_rate_per_second == 0 || self.reconnect_burst == 0 {
+            anyhow::bail!("reconnect rate and burst must be positive");
+        }
+        if self.heartbeat_interval_ms == 0
+            || self.heartbeat_full_interval_ms < self.heartbeat_interval_ms
+            || self.storage_cleanup_interval_ms == 0
+        {
+            anyhow::bail!(
+                "runtime intervals must be positive and full heartbeat cannot be shorter than delta heartbeat"
+            );
+        }
+        if self.drain_timeout_ms < MIN_RUNTIME_DRAIN_TIMEOUT_MS {
+            anyhow::bail!(
+                "runtime drain timeout must be at least {MIN_RUNTIME_DRAIN_TIMEOUT_MS} milliseconds"
+            );
+        }
+        Ok(())
+    }
 }
 
 impl StorageConfig {
@@ -92,10 +179,7 @@ impl AgentConfig {
     pub fn from_env() -> Result<Self> {
         let data_dir = match std::env::var_os("DY_AGENT_DATA_DIR") {
             Some(value) => PathBuf::from(value),
-            None => ProjectDirs::from("com", "dyauthreply", "DyAuthReply")
-                .context("cannot resolve the platform data directory")?
-                .data_local_dir()
-                .join("agent-v2"),
+            None => crate::engine_gate::client_root_from_env()?.join("agent-v2"),
         };
 
         let bind_addr: SocketAddr = std::env::var("DY_AGENT_BIND")
@@ -122,10 +206,14 @@ impl AgentConfig {
             anyhow::bail!("the foundation Agent may bind only to loopback");
         }
 
+        let runtime = RuntimeConfig::recommended();
+        runtime.validate()?;
+
         Ok(Self {
             data_dir,
             bind_addr,
             storage: StorageConfig::recommended(),
+            runtime,
         })
     }
 }
@@ -157,6 +245,31 @@ mod tests {
         assert!(audit.max_total_bytes > debug.max_total_bytes);
         assert!(chat.target_segment_bytes <= chat.max_total_bytes);
         assert!(storage.watermarks.max_deletions_per_run > 0);
+    }
+
+    #[test]
+    fn runtime_defaults_are_process_wide_and_bounded() {
+        let runtime = RuntimeConfig::recommended();
+        runtime.validate().expect("recommended runtime config");
+        assert!(runtime.per_account_queue_capacity < runtime.global_queue_capacity);
+        assert!(runtime.signer_lanes < runtime.signer_queue_capacity);
+        assert!(runtime.heartbeat_max_accounts >= 300);
+        assert_eq!(runtime.reconnect_rate_per_second, 4);
+        assert_eq!(runtime.reconnect_burst, 8);
+    }
+
+    #[test]
+    fn invalid_runtime_relationships_are_rejected() {
+        let mut runtime = RuntimeConfig::recommended();
+        runtime.per_account_queue_capacity = runtime.global_queue_capacity + 1;
+        assert!(runtime.validate().is_err());
+
+        let mut runtime = RuntimeConfig::recommended();
+        runtime.heartbeat_full_interval_ms = runtime.heartbeat_interval_ms - 1;
+        assert!(runtime.validate().is_err());
+        let mut runtime = RuntimeConfig::recommended();
+        runtime.drain_timeout_ms = MIN_RUNTIME_DRAIN_TIMEOUT_MS - 1;
+        assert!(runtime.validate().is_err());
     }
 
     #[test]

@@ -616,9 +616,21 @@ def classify_send_message_delivery(
 
     if http_status == 401:
         return DELIVERY_LOGIN_EXPIRED
+    acknowledged = bool(
+        result.server_msg_id > 0
+        and expected_client_msg_id
+        and result.client_msg_id == expected_client_msg_id
+    )
+    # Keep the shared migration classifier aligned with the live Python
+    # sender: raw_check=2 is only account-risk evidence when a non-zero
+    # business result rejected the request without an acknowledgement.
     explicit_risk = (
         result.biz_status_code in _DELIVERY_HARD_BIZ_CODES
-        or result.biz_raw_check_code == 2
+        or (
+            result.biz_raw_check_code == 2
+            and result.biz_status_code != 0
+            and not acknowledged
+        )
     )
     if http_status == 403:
         return DELIVERY_RISK_CONTROLLED if explicit_risk else DELIVERY_LOGIN_EXPIRED

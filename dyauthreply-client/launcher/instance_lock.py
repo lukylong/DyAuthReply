@@ -44,54 +44,40 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _clear_stale_lock(lock_path: Path) -> None:
-    pid = _read_lock_pid(lock_path)
-    if pid is None:
-        return
-    if not _pid_alive(pid):
-        try:
-            lock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+    """Compatibility hook: OS lock release handles crashes; never unlink an inode.
+
+    A stale PID is not evidence that another process does not currently own the
+    same file, especially while upgrading between Python and Rust launchers.
+    """
+    return None
 
 
 def acquire_instance_lock(data_dir: Path) -> object | None:
-    """Return an open lock handle, or None if another instance holds the lock."""
+    """Nonblocking OS ownership. No truncate, PID write or deletion before lock."""
     data_dir.mkdir(parents=True, exist_ok=True)
     lock_path = data_dir / 'launcher.lock'
-    _clear_stale_lock(lock_path)
-
-    if sys.platform == 'win32':
-        import msvcrt
-
-        fp = open(lock_path, 'a+b')
-        try:
-            fp.seek(0)
-            fp.truncate()
-            fp.write(str(os.getpid()).encode('ascii'))
-            fp.flush()
-            fp.seek(0)
-            msvcrt.locking(fp.fileno(), msvcrt.LK_NBLCK, 1)
-        except OSError:
-            fp.close()
-            holder = _read_lock_pid(lock_path)
-            if holder is not None and not _pid_alive(holder):
-                _clear_stale_lock(lock_path)
-                return acquire_instance_lock(data_dir)
-            return None
-        return fp
-
-    import fcntl
-
-    fp = open(lock_path, 'w')
+    if lock_path.is_symlink():
+        raise RuntimeError('launcher lock must not be a symbolic link')
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    fp = os.fdopen(fd, 'r+b')
     try:
-        fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+        fp.seek(0)
+        if sys.platform == 'win32':
+            import msvcrt
+            msvcrt.locking(fp.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
         fp.close()
-        holder = _read_lock_pid(lock_path)
-        if holder is not None and not _pid_alive(holder):
-            _clear_stale_lock(lock_path)
-            return acquire_instance_lock(data_dir)
         return None
-    fp.write(str(os.getpid()))
-    fp.flush()
+    try:
+        fp.seek(0)
+        fp.truncate()
+        fp.write(str(os.getpid()).encode('ascii'))
+        fp.flush()
+        os.fsync(fp.fileno())
+    except BaseException:
+        fp.close()
+        raise
     return fp

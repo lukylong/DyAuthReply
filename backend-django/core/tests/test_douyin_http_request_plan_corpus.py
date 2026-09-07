@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[3]
 CORPUS_PATH = ROOT / "protocol-fixtures" / "douyin_pc_im_http_plan_v1.json"
 WIRE_CORPUS_PATH = ROOT / "protocol-fixtures" / "douyin_pc_im_v1.json"
 WIRE_CORPUS_SHA256 = (
-    "043e92fc54582c16b9baab50f6c106776489f443ccb71f2862647b17200fa234"
+    "8d6981882d56347a6d149a8bcd6ade080a8548d2956edf0c93c7b1a58bcb5b21"
 )
 
 
@@ -153,7 +153,7 @@ class DouyinHttpRequestPlanCorpusTests(unittest.TestCase):
         )
         self.assertEqual(self.corpus["wire_corpus"]["sha256"], WIRE_CORPUS_SHA256)
         self.assertEqual(len(self.wire_corpus["request_cases"]), 2)
-        self.assertEqual(len(self.wire_corpus["response_cases"]), 31)
+        self.assertEqual(len(self.wire_corpus["response_cases"]), 34)
 
     def test_python_prepare_and_finalize_match_every_happy_case(self):
         for case in self.corpus["happy_cases"]:

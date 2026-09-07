@@ -18,9 +18,9 @@
   },
   "wire_corpus": {
     "path": "douyin_pc_im_v1.json",
-    "sha256": "043e92fc54582c16b9baab50f6c106776489f443ccb71f2862647b17200fa234",
+    "sha256": "8d6981882d56347a6d149a8bcd6ade080a8548d2956edf0c93c7b1a58bcb5b21",
     "request_cases": 2,
-    "response_cases": 31
+    "response_cases": 34
   },
   "constants": {
     "method": "POST",

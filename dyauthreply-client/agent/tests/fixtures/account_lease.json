@@ -1,0 +1,48 @@
+{
+  "synthetic": true,
+  "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=\n-----END PUBLIC KEY-----\n",
+  "request": {
+    "activation_id": "00000000-0000-4000-8000-000000000001",
+    "activation_token": "synthetic-only",
+    "instance_id": "00000000-0000-4000-8000-000000000002",
+    "boot_id": "00000000-0000-4000-8000-000000000003",
+    "request_id": "00000000-0000-4000-8000-000000000004",
+    "sequence": 1,
+    "accounts": [
+      {
+        "platform": "douyin",
+        "platform_account_id": "MS4wLjAB-synthetic",
+        "local_account_id": "00000000-0000-4000-8000-000000000005",
+        "action": "acquire",
+        "expected_epoch": 0
+      }
+    ]
+  },
+  "claims": {
+    "iss": "dyauthreply-account-lease",
+    "aud": "dy-agent",
+    "sub": "00000000-0000-4000-8000-000000000001",
+    "ver": 1,
+    "instance_id": "00000000-0000-4000-8000-000000000002",
+    "boot_id": "00000000-0000-4000-8000-000000000003",
+    "request_id": "00000000-0000-4000-8000-000000000004",
+    "sequence": 1,
+    "iat": 1700000000,
+    "exp": 1700000045,
+    "server_time_ms": 1700000000000,
+    "results": [
+      {
+        "platform": "douyin",
+        "platform_account_id": "MS4wLjAB-synthetic",
+        "local_account_id": "00000000-0000-4000-8000-000000000005",
+        "action": "acquire",
+        "status": "owned",
+        "fence_epoch": 41,
+        "lease_until_ms": 1700000045000
+      }
+    ],
+    "allow_manual": true,
+    "allow_auto": true
+  },
+  "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJkeWF1dGhyZXBseS1hY2NvdW50LWxlYXNlIiwiYXVkIjoiZHktYWdlbnQiLCJzdWIiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDEiLCJ2ZXIiOjEsImluc3RhbmNlX2lkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAyIiwiYm9vdF9pZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMyIsInJlcXVlc3RfaWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDQiLCJzZXF1ZW5jZSI6MSwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjE3MDAwMDAwNDUsInNlcnZlcl90aW1lX21zIjoxNzAwMDAwMDAwMDAwLCJyZXN1bHRzIjpbeyJwbGF0Zm9ybSI6ImRvdXlpbiIsInBsYXRmb3JtX2FjY291bnRfaWQiOiJNUzR3TGpBQi1zeW50aGV0aWMiLCJsb2NhbF9hY2NvdW50X2lkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDA1IiwiYWN0aW9uIjoiYWNxdWlyZSIsInN0YXR1cyI6Im93bmVkIiwiZmVuY2VfZXBvY2giOjQxLCJsZWFzZV91bnRpbF9tcyI6MTcwMDAwMDA0NTAwMH1dLCJhbGxvd19tYW51YWwiOnRydWUsImFsbG93X2F1dG8iOnRydWV9.XhMvRRFBnDQREUr04edPdk6LgQPc60SUjS7qRVkFtWzKQpZFqhCmv6SUFsxpCJgrEeLeLTnyhRSUbGjkpiAXAA"
+}

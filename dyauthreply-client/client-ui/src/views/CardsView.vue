@@ -80,8 +80,8 @@ async function onPickCover(event: Event) {
     formError.value = '请选择图片文件';
     return;
   }
-  if (file.size / 1024 / 1024 > 5) {
-    formError.value = '图片需小于 5MB';
+  if (file.size / 1024 / 1024 > 2) {
+    formError.value = '图片需小于 2MB';
     return;
   }
   uploading.value = true;

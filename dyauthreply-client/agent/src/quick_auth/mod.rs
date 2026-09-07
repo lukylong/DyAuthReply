@@ -22,7 +22,7 @@ use std::{
 };
 use tokio::sync::{watch, Mutex};
 
-const SESSION_TIMEOUT: Duration = Duration::from_secs(1_800);
+const SESSION_TIMEOUT: Duration = Duration::from_mins(30);
 const START_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]

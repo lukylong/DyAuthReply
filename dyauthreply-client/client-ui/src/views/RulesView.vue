@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { onBeforeRouteLeave } from 'vue-router';
 import AppModal from '../components/AppModal.vue';
+import { FlaskConical, Target, AlertTriangle, CheckCircle2, XCircle } from 'lucide-vue-next';
 import {
   cloneRule,
   createRule,
@@ -287,7 +288,7 @@ async function submitForm() {
       })),
     send_mode: ruleHasLinks(form.value.links) ? 'multi_message' : form.value.send_mode,
     priority: Number(form.value.priority) || 0,
-    cooldown_seconds: Number(form.value.cooldown_seconds) || 300,
+    cooldown_seconds: Number(form.value.cooldown_seconds ?? 300),
     status: form.value.status,
     account_ids: [...form.value.account_ids],
     card_ids: [...form.value.card_ids],
@@ -337,7 +338,7 @@ async function confirmMoveAccounts() {
       .map((l) => ({ title: (l.title || '').trim(), url: l.url.trim() })),
     send_mode: ruleHasLinks(form.value.links) ? 'multi_message' : form.value.send_mode,
     priority: Number(form.value.priority) || 0,
-    cooldown_seconds: Number(form.value.cooldown_seconds) || 300,
+    cooldown_seconds: Number(form.value.cooldown_seconds ?? 300),
     status: form.value.status,
     account_ids: [...form.value.account_ids],
     card_ids: [...form.value.card_ids],
@@ -510,7 +511,7 @@ onMounted(async () => {
       <div class="toolbar-right">
         <span class="toolbar-hint">当前：{{ filterLabel }} · 共 {{ rules.length }} 条规则</span>
         <button type="button" class="btn-glass btn-dryrun" @click="dryRunVisible = !dryRunVisible">
-          {{ dryRunVisible ? '收起测试' : '🧪 测试规则' }}
+          <FlaskConical :size="16" /> {{ dryRunVisible ? '收起测试' : '测试规则' }}
         </button>
       </div>
     </div>
@@ -537,17 +538,17 @@ onMounted(async () => {
       </div>
       <div v-if="dryRunResult" class="dryrun-result" :class="dryRunResult.matched ? 'hit' : 'miss'">
         <template v-if="dryRunResult.matched">
-          <span class="result-icon">✅</span>
+          <CheckCircle2 class="result-icon" :size="20" />
           <div class="result-body">
             <div class="result-rule">命中规则：<strong>{{ dryRunResult.rule_name }}</strong>（{{ dryRunResult.match_type }}）</div>
             <div class="result-preview">回复预览：<span class="preview-text">{{ dryRunResult.reply_preview || '（无回复文案）' }}</span></div>
             <div v-if="dryRunResult.miss_reasons.length" class="result-notes">
-              <span v-for="(r, i) in dryRunResult.miss_reasons" :key="i" class="note-item">ℹ️ {{ r }}</span>
+              <span v-for="(r, i) in dryRunResult.miss_reasons" :key="i" class="note-item">{{ r }}</span>
             </div>
           </div>
         </template>
         <template v-else>
-          <span class="result-icon">❌</span>
+          <XCircle class="result-icon" :size="20" />
           <div class="result-body">
             <div class="result-rule">未命中任何规则</div>
             <div v-if="dryRunResult.miss_reasons.length" class="result-notes">
@@ -564,7 +565,7 @@ onMounted(async () => {
     </div>
     
     <div v-else-if="error" class="card error glass-panel">
-      <span class="icon">⚠️</span>
+      <AlertTriangle class="icon" :size="20" />
       <div class="err-text">
         <h4>数据读取失败</h4>
         <p>{{ error }}</p>
@@ -572,7 +573,7 @@ onMounted(async () => {
     </div>
     
     <div v-else-if="rules.length === 0" class="empty-state glass-panel">
-      <div class="empty-icon">🎯</div>
+      <div class="empty-icon"><Target :size="28" /></div>
       <h3>暂无触发规则</h3>
       <p>配置自动回复规则以在满足条件时自动化向客户发送特定的文案或商品卡片。</p>
       <button type="button" class="btn-glass btn-primary-glass mt-16" @click="openCreate">
@@ -905,7 +906,7 @@ onMounted(async () => {
   height: 32px;
   border: 2px solid rgba(255, 255, 255, 0.08);
   border-radius: 50%;
-  border-top-color: var(--accent-crimson);
+  border-top-color: var(--danger);
   animation: spin 1s infinite linear;
 }
 
@@ -995,8 +996,8 @@ onMounted(async () => {
 }
 
 .rule-card:hover {
-  background: var(--glass-bg-hover);
-  border-color: var(--glass-border-active);
+  background: var(--bg-card);
+  border-color: var(--brand-primary);
   transform: translateY(-1px);
 }
 
@@ -1108,7 +1109,7 @@ onMounted(async () => {
 }
 
 .link-preview {
-  color: var(--accent-teal);
+  color: var(--success);
   word-break: break-all;
 }
 
@@ -1167,8 +1168,8 @@ onMounted(async () => {
   gap: 8px;
   padding: 8px 12px;
   min-width: 160px;
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-border);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
   border-radius: 12px;
   font-size: 0.86rem;
   color: var(--text-primary);
@@ -1177,15 +1178,15 @@ onMounted(async () => {
 }
 
 .card-check:hover {
-  background: var(--glass-bg-hover);
-  border-color: var(--glass-border-active);
+  background: var(--bg-card);
+  border-color: var(--brand-primary);
 }
 
 .card-check input[type='checkbox'] {
   flex-shrink: 0;
   width: 16px;
   height: 16px;
-  accent-color: var(--accent-blue);
+  accent-color: var(--brand-primary);
 }
 
 .card-cover {
@@ -1330,7 +1331,7 @@ onMounted(async () => {
   box-shadow: inset 0 1px 2px rgba(67, 56, 202, 0.3), 0 1px 4px rgba(79, 70, 229, 0.35);
 }
 .toggle-btn:focus-visible {
-  outline: 2px solid var(--accent-indigo);
+  outline: 2px solid var(--violet);
   outline-offset: 2px;
 }
 .toggle-knob {
@@ -1359,7 +1360,7 @@ onMounted(async () => {
   padding: 7px 16px;
   border-radius: 9px;
   font-weight: 600;
-  color: var(--accent-indigo);
+  color: var(--violet);
   border: 1px solid rgba(79, 70, 229, 0.3);
   background: rgba(79, 70, 229, 0.06);
 }
@@ -1374,7 +1375,7 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  border-left: 3px solid var(--accent-indigo);
+  border-left: 3px solid var(--violet);
 }
 .dryrun-title {
   font-size: 0.98rem;
@@ -1482,8 +1483,8 @@ onMounted(async () => {
 }
 .preset-btn.active {
   background: rgba(79, 70, 229, 0.12);
-  border-color: var(--accent-indigo);
-  color: var(--accent-indigo);
+  border-color: var(--violet);
+  color: var(--violet);
   font-weight: 600;
 }
 .cooldown-custom {
@@ -1523,15 +1524,15 @@ onMounted(async () => {
 }
 .account-chip.active {
   background: rgba(79, 70, 229, 0.12);
-  border-color: var(--accent-indigo);
-  color: var(--accent-indigo);
+  border-color: var(--violet);
+  color: var(--violet);
   font-weight: 600;
 }
 .chip-check {
   display: inline-block;
   width: 12px;
   font-weight: 700;
-  color: var(--accent-indigo);
+  color: var(--violet);
 }
 .account-empty {
   font-size: 0.8rem;
@@ -1553,7 +1554,7 @@ onMounted(async () => {
   border-radius: 999px;
   background: rgba(79, 70, 229, 0.1);
   border: 1px solid rgba(79, 70, 229, 0.25);
-  color: var(--accent-indigo);
+  color: var(--violet);
 }
 
 /* ── 冲突确认列表 ────────────────────── */
@@ -1607,8 +1608,8 @@ onMounted(async () => {
 }
 .weekday-btn.active {
   background: rgba(79, 70, 229, 0.12);
-  border-color: var(--accent-indigo);
-  color: var(--accent-indigo);
+  border-color: var(--violet);
+  color: var(--violet);
   font-weight: 600;
 }
 </style>

@@ -7,7 +7,9 @@ import {
 } from '../api/client';
 
 export interface ClientRealtimeListener {
+  onReplyLogChanged?: (data: RealtimeAccountStateChanged) => void;
   onAccountStateChanged?: (data: RealtimeAccountStateChanged) => void;
+  onQuickAuthChanged?: (data: RealtimeAccountStateChanged) => void;
   onClose?: () => void;
   onNewMessage?: (data: RealtimeNewMessage) => void;
   onOpen?: () => void;
@@ -32,7 +34,9 @@ function notify<K extends keyof ClientRealtimeListener>(
 function start() {
   if (transport) return;
   transport = new DouyinRealtime({
+    onReplyLogChanged: (data) => notify('onReplyLogChanged', data),
     onAccountStateChanged: (data) => notify('onAccountStateChanged', data),
+    onQuickAuthChanged: (data) => notify('onQuickAuthChanged', data),
     onClose: () => {
       connected.value = false;
       notify('onClose');

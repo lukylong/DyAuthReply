@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """License authorization schemas."""
 from datetime import datetime
+from uuid import UUID
 from typing import Any, Optional, List
 
 from ninja import Field, ModelSchema, Schema
@@ -203,7 +204,7 @@ class LicenseActivationOut(ModelSchema):
 
     class Config:
         model = LicenseActivation
-        model_fields = "__all__"
+        model_exclude = ("renewal_receipt",)
 
     @staticmethod
     def resolve_id(obj):
@@ -283,6 +284,7 @@ class ClientAuthActivateIn(Schema):
 
 
 class ClientAuthCheckInIn(Schema):
+    request_id: Optional[UUID] = None
     activation_id: str
     activation_token: Optional[str] = None
     refresh_token: Optional[str] = None
@@ -337,6 +339,7 @@ class ClientAuthPlanSummary(Schema):
 
 
 class ClientAuthStateOut(Schema):
+    request_id: Optional[str] = None
     activation_id: str
     activation_token: str
     refresh_token: str
@@ -365,3 +368,6 @@ class AppVersionOut(Schema):
     macos_url: str = ""
     windows_url: str = ""
     release_page: str = ""
+    extension_version: str = ""
+    extension_url: str = ""
+    extension_file: str = "douyin-cred-extractor.zip"

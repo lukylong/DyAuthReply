@@ -6,7 +6,7 @@ const getApiPrefix = () => {
       window.location.host.includes('tauri') ||
       window.location.protocol === 'file:')
   ) {
-    return 'http://127.0.0.1:8765/api/client/v1';
+    return 'http://127.0.0.1:18765/api/client/v1';
   }
   return '/api/client/v1';
 };
@@ -16,12 +16,13 @@ export const ADMIN_TOKEN_KEY = 'dyauthreply_admin_token';
 
 async function parseError(res: Response): Promise<string> {
   const text = await res.text();
+  const fallback = res.statusText || `请求失败（HTTP ${res.status}）`;
   try {
     const json = JSON.parse(text) as { detail?: unknown; message?: string };
     const detail = formatApiDetail(json.detail);
-    return detail || json.message || text || res.statusText;
+    return detail || json.message || text || fallback;
   } catch {
-    return text || res.statusText;
+    return text || fallback;
   }
 }
 
@@ -75,18 +76,50 @@ async function request<T>(path: string, init?: RequestInit, admin = false): Prom
     const token = getAdminToken();
     if (token) headers['X-Admin-Token'] = token;
   }
-  const res = await fetch(`${API_PREFIX}${path}`, {
-    ...init,
-    headers,
-  });
+  let res: Response;
+  if (isTauriRuntime()) {
+    if (init?.body != null && typeof init.body !== 'string') throw new Error('本地接口需要 JSON 请求内容');
+    const { invoke } = await import('@tauri-apps/api/core');
+    const response = await invoke<{ status: number; body: string }>('native_request', {
+      path: `/api/client/v1${path}`, method: init?.method || 'GET', body: init?.body ?? null,
+      adminToken: admin ? getAdminToken() : null,
+    });
+    res = new Response(response.status === 204 ? null : response.body, { status: response.status });
+  } else {
+    res = await fetch(`${API_PREFIX}${path}`, { ...init, headers });
+  }
   if (!res.ok) {
     throw new Error(await parseError(res));
   }
   const json = await res.json();
+  if (json && typeof json === 'object' && json._runtime_reload === true) {
+    if (isTauriRuntime()) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('native_reload_configuration');
+    }
+    else {
+      const reload = await fetch(`${API_PREFIX}/runtime/reload`, { method: 'POST' });
+      if (!reload.ok) throw new Error(await parseError(reload));
+      const previous = await reload.json() as { instance: string };
+      // A desktop-owned service restarts through its Rust supervisor, never via a browser-spawned worker.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        try { const health = await fetch(`${API_PREFIX}/runtime/status`); if (health.ok && (await health.json()).instance !== previous.instance) break; } catch { /* restart in progress */ }
+        if (attempt === 119) throw new Error('配置已保存，等待服务重启超时，请重新连接');
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+  }
   if (json && typeof json === 'object' && 'code' in json && json.code === 2000) {
     return json.data as T;
   }
   return json as T;
+}
+
+export async function restartNativeService(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  const { invoke } = await import('@tauri-apps/api/core');
+  await invoke('native_restart');
 }
 
 export interface HealthInfo {
@@ -149,6 +182,7 @@ export interface DouyinAccount {
   credential_state?: string;
   last_probe_error?: string | null;
   auto_reply_enabled?: boolean;
+  runtime_auto_reply_enabled?: boolean;
   reply_today?: number;
   daily_reply_quota?: number;
   sec_uid?: string;
@@ -167,6 +201,7 @@ export interface QuickCreatePayload {
   web_protect?: string;
   keys?: string;
   auto_reply_enabled?: boolean;
+  runtime_auto_reply_enabled?: boolean;
   daily_reply_quota?: number;
 }
 
@@ -218,6 +253,9 @@ export interface AppUpdateInfo {
   notes: string;
   download_url: string;
   release_page: string;
+  extension_version?: string;
+  extension_url?: string;
+  extension_file?: string;
 }
 
 export function checkAppUpdate(current = '') {
@@ -388,6 +426,34 @@ export function listAccounts() {
   return request<DouyinAccount[]>('/douyin/account/all');
 }
 
+export interface CapacityPolicy { conservative: boolean; manual_limit: number | null }
+export interface CapacityBenchmark {
+  estimated_accounts: number; tested_accounts: number; tested_events: number;
+  duration_ms: number; completed_at_ms: number; model_version: string;
+  scheduler_events_per_second: number; cpu_usage_percent: number;
+  available_memory_bytes: number; cpu_limit_accounts: number;
+  memory_limit_accounts: number; scheduler_limit_accounts: number;
+}
+export interface CapacityEstimate {
+  logical_cpus: number; total_memory_bytes: number; available_memory_bytes: number;
+  reported_available_memory_bytes: number; used_memory_bytes: number;
+  hardware_limit: number; validated_ceiling: number; effective_limit: number;
+  hosted_accounts: number; occupancy_percent: number | null; memory_headroom_accounts: number;
+  recommended_min_accounts: number; recommended_max_accounts: number;
+  memory_pressure_percent: number; memory_sample_source: 'system_available' | 'derived_total_minus_used';
+  limiting_factor: string; cpu_usage_percent: number | null; policy: CapacityPolicy; model_version: string;
+  benchmark: CapacityBenchmark | null;
+}
+export function getCapacity() { return request<CapacityEstimate>('/runtime/capacity'); }
+export function runCapacityBenchmark() {
+  return request<{ benchmark: CapacityBenchmark }>('/runtime/capacity/benchmark', {
+    method: 'POST', body: '{}',
+  });
+}
+export function saveCapacity(policy: CapacityPolicy) {
+  return request<CapacityEstimate>('/runtime/capacity', { method: 'PUT', body: JSON.stringify(policy) });
+}
+
 export interface ProfileStats {
   ok: boolean;
   error?: string | null;
@@ -462,6 +528,109 @@ export function importCredential(accountId: string, data: ImportCredentialPayloa
   );
 }
 
+export type QuickAuthMode = 'create' | 'refresh' | 'recover';
+export type QuickAuthState =
+  | 'launching'
+  | 'awaiting_login'
+  | 'collecting'
+  | 'awaiting_confirmation'
+  | 'importing'
+  | 'closing'
+  | 'completed'
+  | 'cancelled'
+  | 'timed_out'
+  | 'browser_exited'
+  | 'failed';
+
+export interface QuickAuthComponent {
+  state: 'ready' | 'missing' | 'incompatible' | 'corrupt' | 'installing' | 'failed';
+  version: string;
+  source: 'managed' | 'development_browser';
+  install_required: boolean;
+  message: string;
+  downloaded_bytes: number;
+  total_bytes: number;
+  progress_percent?: number | null;
+  can_rollback: boolean;
+}
+
+export interface QuickAuthCompleteness {
+  cookie: boolean;
+  scoped_cookies: boolean;
+  server_data: boolean;
+  private_key: boolean;
+  dtrait: boolean;
+  identity: boolean;
+  ready: boolean;
+}
+
+export interface QuickAuthAccount {
+  sec_uid: string;
+  nickname: string;
+  unique_id: string;
+  avatar: string;
+}
+
+export interface QuickAuthSession {
+  session_id: string;
+  mode: QuickAuthMode;
+  target_account_id?: string | null;
+  state: QuickAuthState;
+  message: string;
+  started_at_ms: number;
+  expires_at_ms: number;
+  completeness: QuickAuthCompleteness;
+  account?: QuickAuthAccount | null;
+  component: QuickAuthComponent;
+}
+
+export function getQuickAuthComponent() {
+  return request<QuickAuthComponent>('/douyin/quick-auth/component');
+}
+
+export function installQuickAuthComponent() {
+  return request<QuickAuthComponent>('/douyin/quick-auth/component/install', {
+    method: 'POST',
+    body: '{}',
+  });
+}
+
+export function rollbackQuickAuthComponent() {
+  return request<QuickAuthComponent>('/douyin/quick-auth/component/rollback', {
+    method: 'POST',
+    body: '{}',
+  });
+}
+
+export function startQuickAuth(mode: QuickAuthMode, targetAccountId?: string) {
+  return request<QuickAuthSession>('/douyin/quick-auth/start', {
+    method: 'POST',
+    body: JSON.stringify({ mode, target_account_id: targetAccountId || null }),
+  });
+}
+
+export function getQuickAuthSession(sessionId: string) {
+  return request<QuickAuthSession>(`/douyin/quick-auth/${sessionId}`);
+}
+
+export function getCurrentQuickAuthSession() {
+  return request<QuickAuthSession | null>('/douyin/quick-auth/current');
+}
+
+export function confirmQuickAuth(sessionId: string) {
+  return request<DouyinAccount & { success: boolean; quick_auth: QuickAuthSession; runtime_reload_required?: boolean }>(
+    `/douyin/quick-auth/${sessionId}/confirm`,
+    { method: 'POST', body: '{}' },
+  );
+}
+
+export function cancelQuickAuth(sessionId: string) {
+  return request<QuickAuthSession>(`/douyin/quick-auth/${sessionId}/cancel`, {
+    method: 'POST',
+    body: '{}',
+  });
+}
+
 export interface ConversationItem {
   id: string;
   peer_sec_uid: string;
@@ -490,6 +659,8 @@ export interface MessageMedia {
 }
 
 export interface MessageItem {
+  server_message_id?: string;
+  client_message_id?: string;
   id: string;
   direction: 'in' | 'out';
   content_type: string;
@@ -547,12 +718,12 @@ export function refreshConversationUser(accountId: string, conversationId: strin
   );
 }
 
-export function sendManualReply(accountId: string, conversationId: string, text: string) {
-  return request<{ success: boolean; message?: string; command_id?: string | null }>(
+export function sendManualReply(accountId: string, conversationId: string, text: string, requestId: string) {
+  return request<{ success: boolean; message?: string; command_id?: string | null; client_message_id?: string }>(
     `/douyin/account/${accountId}/manual-reply`,
     {
       method: 'POST',
-      body: JSON.stringify({ conversation_id: conversationId, text }),
+      body: JSON.stringify({ conversation_id: conversationId, text, request_id: requestId }),
     },
   );
 }
@@ -570,6 +741,9 @@ export function getWorkerCommandStatus(commandId: string) {
 }
 
 export interface PageResult<T> {
+  retention_days?: number;
+  has_gap?: boolean;
+  sync_pending?: boolean;
   items: T[];
   total: number;
 }
@@ -677,6 +851,11 @@ export interface DouyinTemplateInput {
 }
 
 export interface DouyinReplyLog {
+  mode?: string;
+  batch_id?: string | null;
+  platform_message_ids?: string[];
+  attempt_count?: number;
+  content_is_excerpt?: boolean;
   id: string;
   account_id?: string | null;
   account_nickname?: string | null;
@@ -694,6 +873,11 @@ export interface DouyinReplyLog {
 }
 
 export interface DouyinReplyLogStat {
+  pending?: number;
+  uncertain?: number;
+  partial?: number;
+  has_gap?: boolean;
+  retention_days?: number;
   total: number;
   success: number;
   failed: number;
@@ -870,26 +1054,32 @@ export function deleteCard(cardId: string) {
   return request<{ success: boolean }>(`/douyin/card/${cardId}`, { method: 'DELETE' });
 }
 
-/** 上传封面图：multipart，经客户端后端转发到公网 file_manager 托管，返回公网 cover_file_id + cover_url。 */
+/** 上传封面图：受限 JSON IPC，经 Rust Agent 转为 multipart 并上传公网。 */
 export async function uploadCardCover(file: File): Promise<{ cover_file_id: string; cover_url: string }> {
-  const fd = new FormData();
-  fd.append('file', file);
-  const res = await fetch(`${API_PREFIX}/douyin/card/cover`, {
-    method: 'POST',
-    body: fd,
+  if (!file.type.startsWith('image/') || file.size <= 0 || file.size > 2 * 1024 * 1024) {
+    throw new Error('封面仅支持不超过 2MB 的图片');
+  }
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('封面读取失败'));
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.readAsDataURL(file);
   });
-  if (!res.ok) {
-    throw new Error(await parseError(res));
-  }
-  const json = await res.json();
-  if (json && typeof json === 'object' && 'code' in json && json.code === 2000) {
-    return json.data;
-  }
-  return json;
+  const comma = dataUrl.indexOf(',');
+  if (comma < 0) throw new Error('封面编码失败');
+  return request<{ cover_file_id: string; cover_url: string }>('/douyin/card/cover', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: file.name,
+      mime: file.type,
+      data_base64: dataUrl.slice(comma + 1),
+    }),
+  });
 }
 
 
 export function listReplyLogs(params?: {
+  mode?: 'automatic' | 'manual' | 'all';
   account_id?: string;
   result?: string;
   page?: number;
@@ -901,13 +1091,14 @@ export function listReplyLogs(params?: {
       pageSize: params?.pageSize ?? 50,
       account_id: params?.account_id,
       result: params?.result,
+      mode: params?.mode,
     }),
   );
 }
 
-export function getReplyLogStat(accountId?: string, scope?: 'all' | 'today') {
+export function getReplyLogStat(accountId?: string, scope?: 'all' | 'today', mode: 'automatic' | 'manual' | 'all' = 'automatic') {
   return request<DouyinReplyLogStat>(
-    withQuery('/douyin/reply-log/stat/summary', { account_id: accountId, scope }),
+    withQuery('/douyin/reply-log/stat/summary', { account_id: accountId, scope, mode }),
   );
 }
 
@@ -945,7 +1136,8 @@ export function statusLabel(status: number): string {
 export function credentialLabel(state?: string): string {
   const map: Record<string, string> = {
     sendable: '可发送',
-    receive_only: '发送封控（仅接收）',
+    receive_only: '仅接收',
+    risk_controlled: '发送封控（仅接收）',
     invalid: '已失效',
     unknown: '未知',
   };
@@ -967,7 +1159,7 @@ function isTauriRuntime(): boolean {
 }
 
 export function getRealtimeWsUrl(): string {
-  if (isTauriRuntime()) return 'ws://127.0.0.1:8765/ws/client/douyin/';
+  if (isTauriRuntime()) return 'ws://127.0.0.1:18765/ws/client/douyin/';
   if (typeof window === 'undefined') return '';
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${proto}//${window.location.host}/ws/client/douyin/`;
@@ -980,9 +1172,12 @@ export interface RealtimeNewMessage {
 
 export interface RealtimeAccountStateChanged {
   revision: string;
+  session_id?: string;
 }
 
 export interface RealtimeHandlers {
+  onReplyLogChanged?: (data: RealtimeAccountStateChanged) => void;
+  onQuickAuthChanged?: (data: RealtimeAccountStateChanged) => void;
   onNewMessage?: (data: RealtimeNewMessage) => void;
   onAccountStateChanged?: (data: RealtimeAccountStateChanged) => void;
   onOpen?: () => void;
@@ -995,6 +1190,9 @@ export interface RealtimeHandlers {
  */
 export class DouyinRealtime {
   private ws: WebSocket | null = null;
+  private nativeId: string | null = null;
+  private nativeConnecting = false;
+  private nativeGeneration = 0;
   private readonly url: string;
   private readonly handlers: RealtimeHandlers;
   private sub: { account_id?: string; conversation_id?: string } = {};
@@ -1009,11 +1207,12 @@ export class DouyinRealtime {
   }
 
   get connected(): boolean {
-    return this.ws?.readyState === WebSocket.OPEN;
+    return this.nativeId !== null || this.ws?.readyState === WebSocket.OPEN;
   }
 
   connect(): void {
     if (!this.url || this.closed) return;
+    if (isTauriRuntime()) { void this.connectNative(); return; }
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
@@ -1030,16 +1229,7 @@ export class DouyinRealtime {
       this.handlers.onOpen?.();
     };
     this.ws.onmessage = (ev) => {
-      try {
-        const msg = JSON.parse(ev.data as string) as { type?: string; data?: any };
-        if (msg.type === 'new_message' && msg.data) {
-          this.handlers.onNewMessage?.(msg.data as RealtimeNewMessage);
-        } else if (msg.type === 'account_state_changed' && msg.data) {
-          this.handlers.onAccountStateChanged?.(msg.data as RealtimeAccountStateChanged);
-        }
-      } catch {
-        // ignore malformed frame
-      }
+      try { this.dispatch(JSON.parse(ev.data as string)); } catch { /* Ignore malformed notifications. */ }
     };
     this.ws.onclose = () => {
       this.stopPing();
@@ -1051,6 +1241,60 @@ export class DouyinRealtime {
     };
   }
 
+  private dispatch(msg: { type?: string; data?: unknown }): void {
+    if (msg.type === 'reply_log_changed' && msg.data) this.handlers.onReplyLogChanged?.(msg.data as RealtimeAccountStateChanged);
+    else if (msg.type === 'quick_auth_changed' && msg.data) this.handlers.onQuickAuthChanged?.(msg.data as RealtimeAccountStateChanged);
+    else if (msg.type === 'new_message' && msg.data) this.handlers.onNewMessage?.(msg.data as RealtimeNewMessage);
+    else if (msg.type === 'account_state_changed' && msg.data) this.handlers.onAccountStateChanged?.(msg.data as RealtimeAccountStateChanged);
+  }
+
+  private async connectNative(): Promise<void> {
+    if (this.nativeId || this.nativeConnecting || this.closed) return;
+    this.nativeConnecting = true;
+    const generation = ++this.nativeGeneration;
+    try {
+      const { invoke, Channel } = await import('@tauri-apps/api/core');
+      const channel = new Channel<{ event: string; data?: { type?: string; data?: unknown } }>();
+      channel.onmessage = (event) => {
+        if (generation !== this.nativeGeneration) return;
+        if (event.event === 'message' && event.data) this.dispatch(event.data);
+        if (event.event === 'reload_required') {
+          ++this.nativeGeneration;
+          this.nativeId = null; this.nativeConnecting = false; this.stopPing();
+          this.handlers.onClose?.();
+          void invoke('native_reload_configuration')
+            .catch(() => undefined)
+            .finally(() => { if (!this.closed) this.scheduleReconnect(); });
+          return;
+        }
+        if (event.event === 'closed') {
+          ++this.nativeGeneration;
+          this.nativeId = null; this.nativeConnecting = false; this.stopPing();
+          this.handlers.onClose?.(); this.scheduleReconnect();
+        }
+      };
+      const id = await invoke<string>('native_ws_connect', { channel });
+      if (this.closed || generation !== this.nativeGeneration) {
+        await invoke('native_ws_close', { connectionId: id }); return;
+      }
+      this.nativeId = id; this.nativeConnecting = false; this.backoff = 1000;
+      this.sendSubscribe(); this.startPing(); this.handlers.onOpen?.();
+    } catch {
+      if (generation !== this.nativeGeneration) return;
+      this.nativeConnecting = false; this.handlers.onClose?.(); this.scheduleReconnect();
+    }
+  }
+
+  private sendNotification(input: object): void {
+    const id = this.nativeId;
+    if (id) {
+      void import('@tauri-apps/api/core').then(({ invoke }) => invoke('native_ws_send', { connectionId: id, input })).catch(() => {
+        if (this.nativeId !== id) return;
+        this.nativeId = null; ++this.nativeGeneration; this.stopPing(); this.handlers.onClose?.(); this.scheduleReconnect();
+      });
+    } else this.ws?.send(JSON.stringify(input));
+  }
+
   subscribe(accountId?: string, conversationId?: string): void {
     this.sub = { account_id: accountId || undefined, conversation_id: conversationId || undefined };
     this.sendSubscribe();
@@ -1058,14 +1302,14 @@ export class DouyinRealtime {
 
   private sendSubscribe(): void {
     if (this.connected && this.sub.account_id) {
-      this.ws?.send(JSON.stringify({ type: 'subscribe', ...this.sub }));
+      this.sendNotification({ type: 'subscribe', ...this.sub });
     }
   }
 
   private startPing(): void {
     this.stopPing();
     this.pingTimer = setInterval(() => {
-      if (this.connected) this.ws?.send(JSON.stringify({ type: 'ping' }));
+      if (this.connected) this.sendNotification({ type: 'ping' });
     }, 25000);
   }
 
@@ -1088,6 +1332,9 @@ export class DouyinRealtime {
 
   close(): void {
     this.closed = true;
+    ++this.nativeGeneration; this.nativeConnecting = false;
+    const id = this.nativeId; this.nativeId = null;
+    if (id) void import('@tauri-apps/api/core').then(({ invoke }) => invoke('native_ws_close', { connectionId: id })).catch(() => {});
     this.stopPing();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);

@@ -39,6 +39,8 @@ from core.license.license_model import (
     ClientDevice,
     LicenseActivation,
     LicenseEvent,
+    AgentAccountLease,
+    AgentSyncState,
 )
 from core.page_manager.page_model import PageMeta
 from core.social.blacklist_model import Blacklist

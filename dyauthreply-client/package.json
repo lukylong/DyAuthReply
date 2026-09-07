@@ -1,14 +1,16 @@
 {
   "name": "dyauthreply-client",
   "private": true,
-  "version": "0.1.25",
+  "version": "0.1.26",
   "description": "DyAuthReply 桌面客户端（免 Docker）",
   "scripts": {
-    "launcher": "python3 launcher/launcher.py",
+    "launcher": "cargo run --locked --manifest-path agent/Cargo.toml --bin dy-agent",
     "ui:dev": "npm run dev --prefix client-ui",
     "ui:build": "npm run build --prefix client-ui",
-    "desktop:dev": "npm run tauri dev --prefix desktop",
+    "desktop:dev": "npm run tauri --prefix desktop -- dev --no-default-features",
     "desktop:build": "npm run tauri build --prefix desktop",
-    "dev": "echo '终端1: npm run launcher' && echo '终端2: npm run desktop:dev'"
+    "dev": "npm run desktop:dev",
+    "agent:build": "node ../scripts/client/build_agent.mjs",
+    "release:check": "node ../scripts/client/check_release_contract.mjs"
   }
 }

@@ -13,7 +13,7 @@ from datetime import timedelta
 from typing import Any, Optional
 
 from django.db import transaction
-from django.db.models import Count, Q
+from django.db.models import Count, Q, F
 from django.utils import timezone
 from ninja.errors import HttpError
 
@@ -383,6 +383,15 @@ def check_in_activation(
         activation = get_activation_by_token(activation_id, activation_token)
     else:
         raise HttpError(400, "缺少续签凭证")
+    # Same lock order as account leasing: license -> activation. The no-op
+    # write also provides SQLite's writer exclusion; authentication is checked
+    # again AFTER waiting, so two old refresh tokens cannot both rotate seq N.
+    LicenseKey.objects.filter(pk=activation.license_key_id).update(last_check_in_at=F('last_check_in_at'))
+    LicenseActivation.objects.select_for_update().get(pk=activation.pk)
+    if refresh_token:
+        activation = get_activation_by_refresh_token(activation_id, refresh_token)
+    else:
+        activation = get_activation_by_token(activation_id, activation_token)
     license_key = activation.license_key
     ensure_license_usable(license_key)
 

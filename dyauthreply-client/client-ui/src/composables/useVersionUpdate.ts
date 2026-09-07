@@ -40,10 +40,10 @@ function getIntervalMs(frequency: string): number {
   }
 }
 
-async function checkUpdate(): Promise<void> {
+async function checkUpdate(force = false): Promise<void> {
   const { settings } = useClientSettings();
 
-  if (!settings.value.version_update.enabled) {
+  if (isChecking.value || (!force && !settings.value.version_update.enabled)) {
     return;
   }
 

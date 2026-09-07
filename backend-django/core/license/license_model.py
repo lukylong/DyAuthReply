@@ -49,6 +49,7 @@ class LicenseKey(RootModel):
         related_name="license_keys",
         help_text="授权套餐",
     )
+    agent_fence_counter = models.PositiveBigIntegerField(default=0, db_default=0, help_text="账号租约全局递增 fencing 序号")
     code_hash = models.CharField(max_length=64, unique=True, db_index=True, help_text="卡密哈希")
     masked_code = models.CharField(max_length=64, db_index=True, help_text="脱敏卡密")
     status = models.CharField(
@@ -177,6 +178,7 @@ class LicenseActivation(RootModel):
     last_valid_until = models.DateTimeField(blank=True, null=True, db_index=True, help_text="离线可用截止")
     lease_expires_at = models.DateTimeField(blank=True, null=True, db_index=True, help_text="当前租约到期时间")
     lease_sequence = models.IntegerField(default=0, help_text="租约版本序号")
+    renewal_receipt = models.JSONField(default=dict, db_default={}, blank=True, editable=False, help_text="服务端加密续签幂等回执")
     revoked_at = models.DateTimeField(blank=True, null=True, help_text="撤销时间")
     revoked_reason = models.CharField(max_length=255, blank=True, null=True, help_text="撤销原因")
 
@@ -236,3 +238,42 @@ class LicenseEvent(RootModel):
 
     def __str__(self):
         return f"{self.event_type} @ {self.sys_create_datetime}"
+
+
+class AgentAccountLease(models.Model):
+    """Current owner per licensed platform identity; old rows may be pruned only after expiry."""
+    import uuid as _uuid
+    id = models.UUIDField(primary_key=True, default=_uuid.uuid4, editable=False)
+    license_key = models.ForeignKey(LicenseKey, on_delete=models.CASCADE, db_constraint=False)
+    platform = models.CharField(max_length=16, default="douyin")
+    platform_account_id = models.CharField(max_length=256)
+    local_account_id = models.CharField(max_length=256)
+    owner_activation = models.ForeignKey(LicenseActivation, on_delete=models.CASCADE, db_constraint=False)
+    owner_instance_id = models.UUIDField()
+    owner_boot_id = models.UUIDField()
+    fence_epoch = models.PositiveBigIntegerField()
+    lease_until = models.DateTimeField(db_index=True)
+    released = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = "core_agent_account_lease"
+        constraints = [models.UniqueConstraint(fields=["license_key", "platform", "platform_account_id"], name="agent_lease_platform_unique")]
+        indexes = [models.Index(fields=["license_key", "lease_until"], name="agent_lease_expiry_idx")]
+
+
+class AgentSyncState(models.Model):
+    """Bounded latest request/result per boot: rejects delayed retries without append-only history."""
+    import uuid as _uuid
+    id = models.UUIDField(primary_key=True, default=_uuid.uuid4, editable=False)
+    activation = models.ForeignKey(LicenseActivation, on_delete=models.CASCADE, db_constraint=False)
+    instance_id = models.UUIDField()
+    boot_id = models.UUIDField()
+    sequence = models.PositiveBigIntegerField(default=0)
+    request_id = models.UUIDField()
+    request_hash = models.CharField(max_length=64)
+    response_claims = models.JSONField(default=dict)
+    updated_at = models.DateTimeField(db_index=True)
+
+    class Meta:
+        db_table = "core_agent_sync_state"
+        constraints = [models.UniqueConstraint(fields=["activation", "instance_id", "boot_id"], name="agent_sync_boot_unique")]

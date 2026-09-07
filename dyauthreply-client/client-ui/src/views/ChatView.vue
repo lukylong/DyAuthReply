@@ -23,6 +23,8 @@ const activeConversationId = ref('');
 const messages = ref<MessageItem[]>([]);
 /** 本地待确认/outbound 消息（发送中/失败），按会话隔离 */
 interface PendingOutbound {
+  accountId: string;
+  clientMessageId?: string;
   localId: string;
   conversationId: string;
   content: string;
@@ -360,14 +362,10 @@ function reconcilePending(items: MessageItem[]) {
   if (!convId) return;
   pendingOutbounds.value = pendingOutbounds.value.filter((p) => {
     if (p.conversationId !== convId) return true;
-    if (p.status === 'failed') return true;
     return !items.some(
       (m) =>
         m.direction === 'out' &&
-        m.content.trim() === p.content.trim() &&
-        Math.abs(
-          new Date(m.received_at || 0).getTime() - new Date(p.createdAt).getTime(),
-        ) < 120_000,
+        Boolean(p.clientMessageId) && m.client_message_id === p.clientMessageId,
     );
   });
 }
@@ -375,7 +373,7 @@ function reconcilePending(items: MessageItem[]) {
 const displayMessages = computed<DisplayMessage[]>(() => {
   const convId = activeConversationId.value;
   const pending = pendingOutbounds.value
-    .filter((p) => p.conversationId === convId)
+    .filter((p) => p.accountId === activeAccountId.value && p.conversationId === convId)
     .map(pendingToMessage);
   return [...messages.value, ...pending].sort((a, b) => {
     const ta = a.received_at ? new Date(a.received_at).getTime() : 0;
@@ -408,8 +406,7 @@ function dismissFailed(msg: DisplayMessage) {
 function retryFailed(msg: DisplayMessage) {
   if (!msg.id.startsWith('local:')) return;
   const content = msg.content;
-  dismissFailed(msg);
-  void sendText(content);
+  void sendText(content, msg.id.slice(6));
 }
 
 function sortConversations(items: ConversationItem[]) {
@@ -696,37 +693,18 @@ async function refreshAfterSend(maxAttempts = 5, intervalMs = 1200) {
   }
 }
 
-async function waitManualReplyResult(commandId: string, sentText: string) {
+async function waitManualReplyResult(commandId: string) {
   const deadline = Date.now() + 25000;
   while (Date.now() < deadline) {
     const st = await getWorkerCommandStatus(commandId);
-    if (st.status === 'success') {
-      msgSig = '';
-      await Promise.all([loadMessages(true, true), loadConversations(true)]);
-      return { ok: true as const };
-    }
-    if (st.status === 'failed') {
-      return { ok: false as const, error: st.error || '发送失败' };
-    }
-    if (st.consumed && st.status === 'unknown') {
-      await refreshAfterSend(3, 800);
-      const latest = messages.value.filter((m) => m.direction === 'out').at(-1);
-      if (latest?.content?.trim() === sentText.trim()) {
-        return { ok: true as const };
-      }
-      return { ok: false as const, error: '发送结果未知，请刷新消息列表' };
-    }
-    await sleep(500);
+    if (st.status === 'success') return { ok: true as const };
+    if (st.status === 'failed') return { ok: false as const, error: st.error || '发送失败' };
+    await sleep(750);
   }
-  await refreshAfterSend(3, 1000);
-  const latest = messages.value.filter((m) => m.direction === 'out').at(-1);
-  if (latest?.content?.trim() === sentText.trim()) {
-    return { ok: true as const };
-  }
-  return { ok: false as const, error: '等待回执超时，请稍后刷新重试' };
+  return { ok: false as const, error: '发送结果待核验，请刷新状态；重试将核验同一请求' };
 }
 
-async function sendText(text: string) {
+async function sendText(text: string, requestId?: string) {
   if (!license.value?.can_use_business) {
     toast.value = `当前授权状态为「${license.value?.state_label || '未激活'}」，无法发送消息`;
     return;
@@ -734,10 +712,18 @@ async function sendText(text: string) {
   const normalized = text.trim();
   if (!normalized || !activeAccountId.value || !activeConversationId.value) return;
 
-  const localId = crypto.randomUUID();
+  if (sending.value) return;
+  const accountId = activeAccountId.value;
+  const conversationId = activeConversationId.value;
+  const localId = requestId || crypto.randomUUID();
+  const previous = pendingOutbounds.value.find((p) => p.localId === localId);
+  if (previous && (previous.accountId !== accountId || previous.conversationId !== conversationId)) return;
+  sending.value = true;
+  removePending(localId);
   pendingOutbounds.value.push({
+    accountId,
     localId,
-    conversationId: activeConversationId.value,
+    conversationId,
     content: normalized,
     status: 'sending',
     createdAt: new Date().toISOString(),
@@ -745,21 +731,23 @@ async function sendText(text: string) {
   stickToBottom.value = true;
   await scrollMessagesToBottom();
 
-  sending.value = true;
   toast.value = '';
   try {
     const res = await sendManualReply(
-      activeAccountId.value,
-      activeConversationId.value,
+      accountId,
+      conversationId,
       normalized,
+      localId,
     );
+    const pending = pendingOutbounds.value.find((p) => p.localId === localId);
+    if (pending) pending.clientMessageId = res.client_message_id;
     if (!res.success) {
       markPendingFailed(localId, res.message || '发送失败');
       toast.value = res.message || '发送失败';
       return;
     }
     if (res.command_id) {
-      const outcome = await waitManualReplyResult(res.command_id, normalized);
+      const outcome = await waitManualReplyResult(res.command_id);
       if (outcome.ok) {
         removePending(localId);
         msgSig = '';
@@ -863,7 +851,7 @@ onUnmounted(() => {
           </div>
           <div class="acc-info">
             <span class="acc-name">{{ acc.nickname }}</span>
-            <span class="acc-sub">今日 {{ acc.reply_today ?? 0 }} 次</span>
+            <span class="acc-sub">今日 {{ acc.reply_today ?? '—' }} 次</span>
           </div>
         </button>
       </div>
@@ -1822,7 +1810,7 @@ onUnmounted(() => {
   flex: 1;
   resize: none;
   border-radius: 12px;
-  border: 1px solid var(--glass-border);
+  border: 1px solid var(--border-subtle);
   background: rgba(255, 255, 255, 0.55);
   color: var(--text-primary);
   padding: 10px 14px;

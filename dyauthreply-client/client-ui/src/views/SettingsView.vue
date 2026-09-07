@@ -1,16 +1,30 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
-import { Bell, RefreshCw, Search, SlidersHorizontal, Zap } from 'lucide-vue-next';
-import { useClientSettings, DEFAULT_UPDATE_MIRRORS } from '../composables/useClientSettings';
-import { useVersionUpdate } from '../composables/useVersionUpdate';
-import { openExternalUrl } from '../api/client';
+import { ref, computed, onMounted } from "vue";
+import {
+  Bell,
+  RefreshCw,
+  Search,
+  SlidersHorizontal,
+  Zap,
+  Gauge,
+  Download,
+} from "lucide-vue-next";
+import {
+  useClientSettings,
+  DEFAULT_UPDATE_MIRRORS,
+} from "../composables/useClientSettings";
+import { useVersionUpdate } from "../composables/useVersionUpdate";
+import CapacityPanel from "../components/CapacityPanel.vue";
+import { openExternalUrl } from "../api/client";
 
 const { settings, resetSettings } = useClientSettings();
 const { checkUpdate, isChecking, updateInfo, checkError } = useVersionUpdate();
 
 // 更新镜像编辑（每行一个；保存时清洗为字符串数组）
 const mirrorsText = ref(
-  (settings.value.version_update.update_mirrors ?? DEFAULT_UPDATE_MIRRORS).join('\n'),
+  (settings.value.version_update.update_mirrors ?? DEFAULT_UPDATE_MIRRORS).join(
+    "\n",
+  ),
 );
 
 function saveMirrors() {
@@ -18,38 +32,42 @@ function saveMirrors() {
     .split(/\r?\n/)
     .map((s) => s.trim())
     .filter(Boolean);
-  settings.value.version_update.update_mirrors = list.length ? list : [...DEFAULT_UPDATE_MIRRORS];
+  settings.value.version_update.update_mirrors = list.length
+    ? list
+    : [...DEFAULT_UPDATE_MIRRORS];
 }
 
 function resetMirrors() {
   settings.value.version_update.update_mirrors = [...DEFAULT_UPDATE_MIRRORS];
-  mirrorsText.value = DEFAULT_UPDATE_MIRRORS.join('\n');
+  mirrorsText.value = DEFAULT_UPDATE_MIRRORS.join("\n");
 }
 
-const activeTab = ref<'version' | 'notification' | 'runtime'>('version');
+const activeTab = ref<"capacity" | "version" | "notification" | "runtime">(
+  "capacity",
+);
 
 // 运行设置：开机自启状态反馈
 const autoStartBusy = ref(false);
-const autoStartMessage = ref('');
-const autoStartMessageType = ref<'info' | 'error' | 'success'>('info');
+const autoStartMessage = ref("");
+const autoStartMessageType = ref<"info" | "error" | "success">("info");
 
 function isTauriEnv(): boolean {
   return (
-    typeof window !== 'undefined' &&
-    ('__TAURI__' in window || '__TAURI_INTERNALS__' in window)
+    typeof window !== "undefined" &&
+    ("__TAURI__" in window || "__TAURI_INTERNALS__" in window)
   );
 }
 
 const checkFrequencyOptions = [
-  { value: 'startup', label: '仅启动时' },
-  { value: '6h', label: '每 6 小时' },
-  { value: 'daily', label: '每天' },
-  { value: 'weekly', label: '每周' },
-  { value: 'manual', label: '手动检查' },
+  { value: "startup", label: "仅启动时" },
+  { value: "6h", label: "每 6 小时" },
+  { value: "daily", label: "每天" },
+  { value: "weekly", label: "每周" },
+  { value: "manual", label: "手动检查" },
 ];
 
 async function handleCheckUpdate() {
-  await checkUpdate();
+  await checkUpdate(true);
 }
 
 async function handleOpenDownload() {
@@ -63,15 +81,15 @@ async function handleOpenDownload() {
 onMounted(async () => {
   if (!isTauriEnv()) return;
   try {
-    const { isEnabled } = await import('@tauri-apps/plugin-autostart');
+    const { isEnabled } = await import("@tauri-apps/plugin-autostart");
     const enabled = await isEnabled();
     settings.value.runtime.auto_start = enabled;
   } catch (error) {
-    console.warn('Failed to read auto-start state:', error);
+    console.warn("Failed to read auto-start state:", error);
   }
 });
 
-function setAutoStartMessage(type: 'info' | 'error' | 'success', text: string) {
+function setAutoStartMessage(type: "info" | "error" | "success", text: string) {
   autoStartMessageType.value = type;
   autoStartMessage.value = text;
 }
@@ -85,17 +103,18 @@ async function onAutoStartChange(event: Event) {
 
 async function handleToggleAutoStart(enabled: boolean) {
   autoStartBusy.value = true;
-  autoStartMessage.value = '';
+  autoStartMessage.value = "";
 
   if (!isTauriEnv()) {
-    setAutoStartMessage('error', '开机自启动仅在桌面客户端中可用');
+    setAutoStartMessage("error", "开机自启动仅在桌面客户端中可用");
     settings.value.runtime.auto_start = false; // 回滚
     autoStartBusy.value = false;
     return;
   }
 
   try {
-    const { enable, disable, isEnabled } = await import('@tauri-apps/plugin-autostart');
+    const { enable, disable, isEnabled } =
+      await import("@tauri-apps/plugin-autostart");
     if (enabled) {
       await enable();
     } else {
@@ -104,11 +123,14 @@ async function handleToggleAutoStart(enabled: boolean) {
     // 以系统真实状态为准回写，确保设置生效
     const actual = await isEnabled();
     settings.value.runtime.auto_start = actual;
-    setAutoStartMessage('success', actual ? '已开启开机自启动' : '已关闭开机自启动');
+    setAutoStartMessage(
+      "success",
+      actual ? "已开启开机自启动" : "已关闭开机自启动",
+    );
   } catch (error) {
-    console.error('Failed to toggle auto-start:', error);
+    console.error("Failed to toggle auto-start:", error);
     const errorMessage = error instanceof Error ? error.message : String(error);
-    setAutoStartMessage('error', `设置失败：${errorMessage}`);
+    setAutoStartMessage("error", `设置失败：${errorMessage}`);
     settings.value.runtime.auto_start = !enabled; // 回滚
   } finally {
     autoStartBusy.value = false;
@@ -116,708 +138,503 @@ async function handleToggleAutoStart(enabled: boolean) {
 }
 
 function handleReset() {
-  if (confirm('确定要恢复默认设置吗？')) {
+  if (confirm("确定要恢复默认设置吗？")) {
+    const autoStart = settings.value.runtime.auto_start;
     resetSettings();
+    settings.value.runtime.auto_start = autoStart;
+    mirrorsText.value = DEFAULT_UPDATE_MIRRORS.join("\n");
   }
 }
 
 const updateStatusText = computed(() => {
-  if (isChecking.value) return '检查中...';
+  if (isChecking.value) return "检查中...";
   if (checkError.value) return `检查失败：${checkError.value}`;
-  if (!updateInfo.value) return '未检查';
+  if (!updateInfo.value) return "未检查";
   if (updateInfo.value.has_update) {
     return `发现新版本 ${updateInfo.value.latest_version}（当前 ${updateInfo.value.current_version}）`;
   }
   return `已是最新版本（当前 ${updateInfo.value.current_version}）`;
 });
 
-const updateStatusType = computed<'info' | 'error' | 'success' | 'update'>(() => {
-  if (isChecking.value) return 'info';
-  if (checkError.value) return 'error';
-  if (!updateInfo.value) return 'info';
-  if (updateInfo.value.has_update) return 'update';
-  return 'success';
-});
+const updateStatusType = computed<"info" | "error" | "success" | "update">(
+  () => {
+    if (isChecking.value) return "info";
+    if (checkError.value) return "error";
+    if (!updateInfo.value) return "info";
+    if (updateInfo.value.has_update) return "update";
+    return "success";
+  },
+);
 </script>
 
 <template>
   <div class="settings-page">
-    <!-- 页面标题 -->
-    <div class="page-header glass-panel">
-      <div class="header-icon"><SlidersHorizontal :size="22" /></div>
-      <div class="header-content">
-        <h1 class="page-title">客户端设置</h1>
-        <p class="page-subtitle">管理客户端的版本更新、通知和运行设置</p>
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">偏好与资源</p>
+        <h1>客户端设置</h1>
+        <p>把资源、提醒和更新安排得井井有条。</p>
       </div>
-    </div>
-
-    <!-- 设置内容容器 -->
-    <div class="settings-content glass-panel">
-      <!-- 标签导航 -->
-      <nav class="settings-nav">
+      <span class="local-tag"><SlidersHorizontal :size="14" /> 本机设置</span>
+    </header>
+    <div class="settings-layout">
+      <nav class="settings-nav" aria-label="设置分类">
         <button
-          :class="['nav-tab', { active: activeTab === 'version' }]"
-          @click="activeTab = 'version'"
+          :class="{ active: activeTab === 'capacity' }"
+          @click="activeTab = 'capacity'"
         >
-          <span class="tab-icon"><RefreshCw :size="16" /></span>
-          <span class="tab-label">版本更新</span>
+          <Gauge :size="18" /><span
+            >承载与性能<small>按需测试与资源策略</small></span
+          >
         </button>
         <button
-          :class="['nav-tab', { active: activeTab === 'notification' }]"
-          @click="activeTab = 'notification'"
-        >
-          <span class="tab-icon"><Bell :size="16" /></span>
-          <span class="tab-label">通知设置</span>
-        </button>
-        <button
-          :class="['nav-tab', { active: activeTab === 'runtime' }]"
+          :class="{ active: activeTab === 'runtime' }"
           @click="activeTab = 'runtime'"
         >
-          <span class="tab-icon"><Zap :size="16" /></span>
-          <span class="tab-label">运行设置</span>
+          <Zap :size="18" /><span>启动与运行<small>系统启动行为</small></span>
         </button>
+        <button
+          :class="{ active: activeTab === 'notification' }"
+          @click="activeTab = 'notification'"
+        >
+          <Bell :size="18" /><span>通知与公告<small>管理信息提醒</small></span>
+        </button>
+        <button
+          :class="{ active: activeTab === 'version' }"
+          @click="activeTab = 'version'"
+        >
+          <RefreshCw :size="18" /><span
+            >版本更新<small>检查更新与下载</small></span
+          >
+        </button>
+        <p class="nav-note">
+          承载设置点击保存后生效；其他偏好自动保存。账号、授权和聊天数据不会随偏好重置而删除。
+        </p>
       </nav>
-
-      <!-- 标签内容 -->
-      <div class="tab-content">
-        <!-- 版本更新 -->
-        <div v-if="activeTab === 'version'" class="settings-section">
-          <div class="section-header">
-            <h2 class="section-title">版本更新设置</h2>
-            <p class="section-subtitle">自动检测并提示最新版本</p>
+      <div class="settings-main">
+        <CapacityPanel v-if="activeTab === 'capacity'" editable />
+        <section v-if="activeTab === 'runtime'" class="settings-section">
+          <header>
+            <h2>启动与运行</h2>
+            <p>保持托管稳定，同时尊重你的桌面使用习惯。</p>
+          </header>
+          <label class="setting-row"
+            ><span
+              ><b>开机自启动</b><small>登录系统后自动启动客户端</small></span
+            ><input
+              type="checkbox"
+              role="switch"
+              :disabled="autoStartBusy || !isTauriEnv()"
+              :checked="settings.runtime.auto_start"
+              @change="onAutoStartChange"
+          /></label>
+          <p v-if="!isTauriEnv()" class="note">
+            浏览器预览只展示状态，开机自启动请在桌面客户端中设置。
+          </p>
+          <p
+            v-if="autoStartMessage"
+            role="status"
+            :class="['feedback', autoStartMessageType]"
+          >
+            {{ autoStartMessage }}
+          </p>
+          <div class="setting-row">
+            <span
+              ><b>关闭窗口</b
+              ><small>关闭后保持后台托管；完全退出请使用托盘菜单。</small></span
+            ><span class="value-tag">保留后台运行</span>
           </div>
-
-          <div class="settings-group">
-            <div class="setting-item">
-              <div class="setting-main">
-                <label class="setting-label">
-                  <input
-                    type="checkbox"
-                    class="setting-checkbox"
-                    v-model="settings.version_update.enabled"
-                  />
-                  <span class="checkbox-icon"></span>
-                  <div class="setting-info">
-                    <span class="setting-name">启用版本更新检查</span>
-                    <span class="setting-desc">自动检测新版本并在应用中提示更新</span>
-                  </div>
-                </label>
-              </div>
-            </div>
-
-            <div v-if="settings.version_update.enabled" class="setting-item nested">
-              <div class="setting-main">
-                <label class="setting-label">
-                  <input
-                    type="checkbox"
-                    class="setting-checkbox"
-                    v-model="settings.version_update.auto_download"
-                  />
-                  <span class="checkbox-icon"></span>
-                  <div class="setting-info">
-                    <span class="setting-name">自动下载更新</span>
-                    <span class="setting-desc">检测到新版本后自动下载并安装（应用内更新，完成后自动重启）</span>
-                  </div>
-                </label>
-              </div>
-            </div>
-
-            <div v-if="settings.version_update.enabled" class="setting-item nested">
-              <div class="setting-main">
-                <div class="setting-info">
-                  <label class="setting-name" for="check-frequency">检查频率</label>
-                  <span class="setting-desc">设置自动检查新版本的频率</span>
-                </div>
-                <select
-                  id="check-frequency"
-                  v-model="settings.version_update.check_frequency"
-                  class="select-glass setting-select"
-                >
-                  <option v-for="opt in checkFrequencyOptions" :key="opt.value" :value="opt.value">
-                    {{ opt.label }}
-                  </option>
-                </select>
-              </div>
-            </div>
-
-            <div v-if="settings.version_update.enabled" class="setting-item nested">
-              <div class="setting-info" style="padding-left: 0; width: 100%">
-                <label class="setting-name" for="update-mirrors">下载镜像加速</label>
-                <span class="setting-desc">
-                  应用内更新的下载镜像（每行一个，前缀型 GitHub 加速代理；保留 https://github.com/ 作为原站兜底）。留空恢复默认。
-                </span>
-                <textarea
-                  id="update-mirrors"
-                  v-model="mirrorsText"
-                  class="mirrors-input"
-                  rows="4"
-                  spellcheck="false"
-                  placeholder="https://ghproxy.net/"
-                  @change="saveMirrors"
-                  @blur="saveMirrors"
-                ></textarea>
-                <div class="mirrors-actions">
-                  <button type="button" class="btn-link" @click="resetMirrors">恢复默认镜像</button>
-                </div>
-              </div>
-            </div>
+          <div class="setting-row">
+            <span
+              ><b>升级与退出保护</b
+              ><small>退出前等待已接收任务结束，防止重复回复。</small></span
+            ><span class="value-tag success">已启用</span>
           </div>
-
-          <div class="settings-action">
-            <div class="action-row">
-              <button
-                class="btn-glass btn-action"
-                @click="handleCheckUpdate"
-                :disabled="isChecking"
+        </section>
+        <section v-if="activeTab === 'notification'" class="settings-section">
+          <header>
+            <h2>通知与公告</h2>
+            <p>选择需要看到的信息。</p>
+          </header>
+          <label class="setting-row"
+            ><span
+              ><b>公告提醒</b
+              ><small>接收服务维护、功能变更与版本公告</small></span
+            ><input
+              type="checkbox"
+              role="switch"
+              v-model="settings.notification.announcement_enabled"
+          /></label>
+          <p class="note">公告展示仍受系统通知总开关控制。</p>
+          <label class="setting-row"
+            ><span
+              ><b>通知总开关</b
+              ><small
+                >管理客户端通知偏好；系统通知还需要操作系统允许。</small
+              ></span
+            ><input
+              type="checkbox"
+              role="switch"
+              v-model="settings.notification.system_enabled"
+          /></label>
+        </section>
+        <section v-if="activeTab === 'version'" class="settings-section">
+          <header>
+            <h2>版本更新</h2>
+            <p>更新前会等待任务结束，保留本机账号与授权。</p>
+          </header>
+          <div class="update-box">
+            <div>
+              <b>{{ updateStatusText }}</b
+              ><small v-if="updateInfo?.notes">{{ updateInfo.notes }}</small>
+            </div>
+            <button
+              class="btn-glass"
+              :disabled="isChecking"
+              @click="handleCheckUpdate"
+            >
+              <Search :size="15" />{{ isChecking ? "检查中…" : "检查更新" }}
+            </button>
+          </div>
+          <label class="setting-row"
+            ><span
+              ><b>自动检查新版本</b
+              ><small>按照设定频率检查可用更新</small></span
+            ><input
+              type="checkbox"
+              role="switch"
+              v-model="settings.version_update.enabled"
+          /></label>
+          <div class="setting-row">
+            <label for="check-frequency"
+              ><b>检查频率</b><small>仅在客户端运行期间检查</small></label
+            ><select
+              id="check-frequency"
+              v-model="settings.version_update.check_frequency"
+              :disabled="!settings.version_update.enabled"
+            >
+              <option
+                v-for="opt in checkFrequencyOptions"
+                :key="opt.value"
+                :value="opt.value"
               >
-                <span class="btn-icon"><Search :size="15" /></span>
-                <span>{{ isChecking ? '检查中...' : '立即检查更新' }}</span>
-              </button>
-              <button
-                v-if="updateStatusType === 'update' && (updateInfo?.download_url || updateInfo?.release_page)"
-                class="btn-glass btn-action btn-primary"
-                @click="handleOpenDownload"
-              >
-                <span class="btn-icon">⬇️</span>
-                <span>前往下载</span>
-              </button>
-            </div>
-            <p :class="['action-status', `status-${updateStatusType}`]">{{ updateStatusText }}</p>
-            <p v-if="updateStatusType === 'update' && updateInfo?.notes" class="update-notes">
-              {{ updateInfo.notes }}
-            </p>
+                {{ opt.label }}
+              </option>
+            </select>
           </div>
-        </div>
-
-        <!-- 通知设置 -->
-        <div v-if="activeTab === 'notification'" class="settings-section">
-          <div class="section-header">
-            <h2 class="section-title">通知设置</h2>
-            <p class="section-subtitle">管理系统通知和公告推送</p>
-          </div>
-
-          <div class="settings-group">
-            <div class="setting-item">
-              <div class="setting-main">
-                <label class="setting-label">
-                  <input
-                    type="checkbox"
-                    class="setting-checkbox"
-                    v-model="settings.notification.system_enabled"
-                  />
-                  <span class="checkbox-icon"></span>
-                  <div class="setting-info">
-                    <span class="setting-name">启用系统通知</span>
-                    <span class="setting-desc">允许客户端发送操作系统原生通知（需用户授权）</span>
-                  </div>
-                </label>
-              </div>
-            </div>
-
-            <div v-if="settings.notification.system_enabled" class="setting-item nested">
-              <div class="setting-main">
-                <label class="setting-label">
-                  <input
-                    type="checkbox"
-                    class="setting-checkbox"
-                    v-model="settings.notification.announcement_enabled"
-                  />
-                  <span class="checkbox-icon"></span>
-                  <div class="setting-info">
-                    <span class="setting-name">启用公告推送</span>
-                    <span class="setting-desc">接收管理后台发布的客户端公告</span>
-                  </div>
-                </label>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 运行设置 -->
-        <div v-if="activeTab === 'runtime'" class="settings-section">
-          <div class="section-header">
-            <h2 class="section-title">运行设置</h2>
-            <p class="section-subtitle">管理客户端运行时行为</p>
-          </div>
-
-          <div class="settings-group">
-            <div class="setting-item">
-              <div class="setting-main">
-                <label class="setting-label">
-                  <input
-                    type="checkbox"
-                    class="setting-checkbox"
-                    :disabled="autoStartBusy"
-                    :checked="settings.runtime.auto_start"
-                    @change="onAutoStartChange"
-                  />
-                  <span class="checkbox-icon"></span>
-                  <div class="setting-info">
-                    <span class="setting-name">开机自启动</span>
-                    <span class="setting-desc">系统启动时自动运行客户端（需系统授权）</span>
-                    <span
-                      v-if="autoStartMessage"
-                      :class="['inline-status', `status-${autoStartMessageType}`]"
-                    >{{ autoStartMessage }}</span>
-                  </div>
-                </label>
-              </div>
-            </div>
-
-            <div class="setting-item">
-              <div class="setting-main">
-                <label class="setting-label">
-                  <input
-                    type="checkbox"
-                    class="setting-checkbox"
-                    v-model="settings.runtime.minimize_to_tray"
-                  />
-                  <span class="checkbox-icon"></span>
-                  <div class="setting-info">
-                    <span class="setting-name">最小化到托盘</span>
-                    <span class="setting-desc">关闭窗口时最小化到系统托盘而不是退出</span>
-                  </div>
-                </label>
-              </div>
-            </div>
-
-            <div v-if="settings.runtime.minimize_to_tray" class="setting-item nested">
-              <div class="setting-main">
-                <label class="setting-label">
-                  <input
-                    type="checkbox"
-                    class="setting-checkbox"
-                    v-model="settings.runtime.start_minimized"
-                  />
-                  <span class="checkbox-icon"></span>
-                  <div class="setting-info">
-                    <span class="setting-name">启动时最小化</span>
-                    <span class="setting-desc">启动时直接最小化到托盘，不显示主窗口</span>
-                  </div>
-                </label>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 底部操作 -->
-        <div class="settings-footer">
-          <button class="btn-glass btn-danger" @click="handleReset">
-            <span class="btn-icon">↻</span>
-            <span>恢复默认设置</span>
+          <label class="setting-row"
+            ><span
+              ><b>自动下载安装</b
+              ><small>检测到更新后自动安装并重启，建议在空闲时使用</small></span
+            ><input
+              type="checkbox"
+              role="switch"
+              :disabled="!settings.version_update.enabled"
+              v-model="settings.version_update.auto_download"
+          /></label>
+          <button
+            v-if="
+              updateStatusType === 'update' &&
+              (updateInfo?.download_url || updateInfo?.release_page)
+            "
+            class="btn-glass btn-primary-glass"
+            @click="handleOpenDownload"
+          >
+            <Download :size="15" />打开下载页
           </button>
-          <p class="footer-hint">所有设置将恢复为默认值</p>
-        </div>
+          <details class="advanced">
+            <summary>高级下载设置</summary>
+            <label for="update-mirrors">下载镜像（每行一个）</label
+            ><textarea
+              id="update-mirrors"
+              v-model="mirrorsText"
+              rows="4"
+              spellcheck="false"
+              @change="saveMirrors"
+            /><button class="btn-glass" @click="resetMirrors">
+              恢复默认镜像
+            </button>
+          </details>
+        </section>
+        <footer class="reset-section">
+          <div>
+            <b>恢复偏好设置</b>
+            <p>只重置通知与更新偏好，保留系统自启状态和承载设置。</p>
+          </div>
+          <button class="btn-glass" @click="handleReset">恢复默认</button>
+        </footer>
       </div>
     </div>
   </div>
 </template>
-
 <style scoped>
 .settings-page {
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-  min-height: 100%;
+  display: grid;
+  gap: 26px;
 }
-
-/* 页面标题 */
 .page-header {
   display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 24px 28px;
-}
-
-.header-icon {
-  width: 48px;
-  height: 48px;
-  display: grid;
-  place-items: center;
-  font-size: 1.5rem;
-  background: rgba(255, 255, 255, 0.5);
-  border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.6);
-  flex-shrink: 0;
-}
-
-.header-content {
-  flex: 1;
-}
-
-.page-title {
-  margin: 0;
-  font-size: 1.5rem;
-  font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: -0.02em;
-}
-
-.page-subtitle {
-  margin: 4px 0 0;
-  font-size: 0.875rem;
-  color: var(--text-muted);
-  font-weight: 500;
-}
-
-/* 设置内容容器 */
-.settings-content {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 500px;
-}
-
-/* 标签导航 */
-.settings-nav {
-  display: flex;
-  gap: 6px;
-  padding: 16px 20px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.04);
-}
-
-.nav-tab {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 18px;
-  background: none;
-  border: 1px solid transparent;
-  border-radius: 12px;
-  color: var(--text-secondary);
-  font-size: 0.9rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: var(--transition-quick);
-  outline: none;
-}
-
-.nav-tab:hover {
-  background: rgba(255, 255, 255, 0.35);
-  color: var(--text-primary);
-}
-
-.nav-tab.active {
-  background: rgba(255, 255, 255, 0.7);
-  border-color: rgba(255, 255, 255, 0.9);
-  color: var(--text-primary);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.03);
-}
-
-.tab-icon {
-  display: inline-flex;
-  align-items: center;
-  line-height: 1;
-}
-
-.tab-label {
-  line-height: 1;
-}
-
-/* 标签内容 */
-.tab-content {
-  flex: 1;
-  padding: 28px 32px;
-  overflow-y: auto;
-}
-
-/* 设置区域 */
-.settings-section {
-  display: flex;
-  flex-direction: column;
-  gap: 28px;
-}
-
-.section-header {
-  padding-bottom: 16px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.04);
-}
-
-.section-title {
-  margin: 0;
-  font-size: 1.25rem;
-  font-weight: 700;
-  color: var(--text-primary);
-  letter-spacing: -0.01em;
-}
-
-.section-subtitle {
-  margin: 6px 0 0;
-  font-size: 0.875rem;
-  color: var(--text-muted);
-  font-weight: 500;
-}
-
-/* 设置组 */
-.settings-group {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-/* 设置项 */
-.setting-item {
-  background: rgba(255, 255, 255, 0.35);
-  border: 1px solid rgba(255, 255, 255, 0.4);
-  border-radius: 14px;
-  padding: 18px 20px;
-  transition: var(--transition-quick);
-}
-
-.setting-item:hover {
-  background: rgba(255, 255, 255, 0.5);
-  border-color: rgba(255, 255, 255, 0.6);
-}
-
-.setting-item.nested {
-  background: rgba(255, 255, 255, 0.25);
-  border-color: rgba(255, 255, 255, 0.3);
-}
-
-.setting-main {
-  display: flex;
-  align-items: flex-start;
   justify-content: space-between;
+  align-items: center;
   gap: 16px;
 }
-
-.setting-label {
-  display: flex;
-  align-items: flex-start;
-  gap: 14px;
-  cursor: pointer;
-  user-select: none;
-  flex: 1;
+.eyebrow {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin: 0 0 8px;
 }
-
-/* 自定义复选框 */
-.setting-checkbox {
-  position: absolute;
-  opacity: 0;
-  pointer-events: none;
+h1 {
+  font-size: 26px;
+  letter-spacing: -0.7px;
+  margin: 0;
 }
-
-.checkbox-icon {
-  width: 22px;
-  height: 22px;
-  border-radius: 7px;
-  border: 2px solid rgba(0, 0, 0, 0.15);
-  background: rgba(255, 255, 255, 0.6);
-  flex-shrink: 0;
-  display: grid;
-  place-items: center;
-  transition: var(--transition-quick);
-  position: relative;
-  margin-top: 0;
+p {
+  color: var(--text-secondary);
+  line-height: 1.6;
+  font-size: 13px;
+  margin: 6px 0 0;
 }
-
-.checkbox-icon::after {
-  content: '✓';
-  font-size: 0.9rem;
-  font-weight: 700;
-  color: white;
-  opacity: 0;
-  transform: scale(0.5);
-  transition: var(--transition-quick);
-}
-
-.setting-checkbox:checked + .checkbox-icon {
-  background: var(--brand-primary);
-  border-color: #0284c7;
-  box-shadow: 0 2px 8px rgba(2, 132, 199, 0.25);
-}
-
-.setting-checkbox:checked + .checkbox-icon::after {
-  opacity: 1;
-  transform: scale(1);
-}
-
-.setting-info {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  flex: 1;
-}
-
-/* 没有复选框的设置项（如"检查频率"）：补齐复选框宽度(22px)+间距(14px)，与上方标题左对齐 */
-.setting-main > .setting-info {
-  padding-left: 36px;
-}
-
-.setting-name {
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: var(--text-primary);
+.local-tag {
   display: flex;
   align-items: center;
-  min-height: 22px;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
-
-.setting-desc {
-  font-size: 0.8125rem;
+.settings-layout {
+  display: grid;
+  grid-template-columns: 215px minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
+}
+.settings-nav {
+  display: grid;
+  gap: 6px;
+  position: sticky;
+  top: 0;
+}
+.settings-nav button {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  text-align: left;
+  padding: 14px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+}
+.settings-nav button.active {
+  background: var(--brand-primary-soft);
+  color: var(--brand-primary);
+}
+.settings-nav button:hover {
+  background: var(--bg-card);
+}
+.settings-nav small {
+  display: block;
+  font-size: 11px;
   color: var(--text-muted);
-  line-height: 1.4;
+  margin-top: 5px;
 }
-
-/* 镜像编辑 */
-.mirrors-input {
+.nav-note {
+  font-size: 11px;
+  padding: 16px 12px;
+  line-height: 1.8;
+}
+.settings-main {
+  min-width: 0;
+  display: grid;
+  gap: 20px;
+}
+.settings-section {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+  padding: 26px;
+}
+.settings-section header {
+  margin-bottom: 14px;
+}
+h2 {
+  font-size: 18px;
+  margin: 0;
+}
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 22px;
+  padding: 22px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.setting-row:last-child {
+  border: 0;
+}
+.setting-row b,
+.setting-row small {
+  display: block;
+}
+.setting-row b {
+  font-size: 14px;
+  font-weight: 600;
+}
+.setting-row small {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-top: 5px;
+}
+.setting-row input[type="checkbox"] {
+  appearance: none;
+  width: 38px;
+  height: 22px;
+  flex: 0 0 38px;
+  border-radius: 20px;
+  background: var(--border-subtle);
+  position: relative;
+  cursor: pointer;
+}
+.setting-row input:checked {
+  background: var(--brand-primary);
+}
+.setting-row input:after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--bg-card);
+  transition: transform 0.15s;
+}
+.setting-row input:checked:after {
+  transform: translateX(16px);
+}
+input:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.value-tag {
+  font-size: 12px;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  background: var(--bg-app);
+  padding: 5px 9px;
+  border-radius: 6px;
+}
+.success {
+  color: var(--success);
+}
+select,
+textarea {
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  padding: 10px;
+  font: inherit;
+  font-size: 13px;
+}
+.setting-row select {
+  max-width: 180px;
+}
+.update-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px;
+  background: var(--bg-app);
+  border-radius: 10px;
+  margin: 20px 0 4px;
+}
+.update-box b {
+  font-size: 13px;
+}
+.update-box small {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
   margin-top: 8px;
+}
+.btn-glass {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+.advanced {
+  margin-top: 24px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+summary {
+  cursor: pointer;
+}
+.advanced label {
+  display: block;
+  margin: 16px 0 8px;
+}
+.advanced textarea {
+  display: block;
   width: 100%;
   box-sizing: border-box;
   resize: vertical;
-  padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  background: rgba(255, 255, 255, 0.6);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.8rem;
-  color: var(--text-primary);
-  line-height: 1.6;
+  margin-bottom: 10px;
 }
-
-.mirrors-input:focus {
-  outline: none;
-  border-color: #0284c7;
-  box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.15);
-}
-
-.mirrors-actions {
-  margin-top: 6px;
-}
-
-.btn-link {
-  background: none;
-  border: none;
-  color: #0284c7;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  cursor: pointer;
-  padding: 0;
-}
-
-.btn-link:hover {
-  text-decoration: underline;
-}
-
-/* 下拉选择框 */
-.setting-select {
-  min-width: 160px;
-  flex-shrink: 0;
-  align-self: flex-start;
-  margin-top: 2px;
-}
-
-/* 设置操作 */
-.settings-action {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 20px;
-  background: rgba(255, 255, 255, 0.25);
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  border-radius: 14px;
-}
-
-.action-row {
+.reset-section {
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 0;
+  border-top: 1px solid var(--border-subtle);
 }
-
-.btn-action {
-  align-self: flex-start;
+.reset-section b {
+  font-size: 13px;
 }
-
-.btn-primary {
-  background: var(--brand-primary);
-  border-color: #0284c7;
-  color: #fff;
+.reset-section p,
+.note {
+  font-size: 12px;
 }
-
-.btn-primary:hover:not(:disabled) {
-  filter: brightness(1.05);
+.feedback {
+  font-size: 12px;
+  color: var(--success);
 }
-
-.btn-icon {
-  display: inline-flex;
-  align-items: center;
-  line-height: 1;
+.feedback.error {
+  color: var(--danger);
 }
-
-.action-status {
-  margin: 0;
-  font-size: 0.875rem;
-  color: var(--text-secondary);
-  font-weight: 500;
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--brand-primary);
+  outline-offset: 3px;
 }
-
-.action-status.status-error {
-  color: #dc2626;
-}
-
-.action-status.status-success {
-  color: #16a34a;
-}
-
-.action-status.status-update {
-  color: #0284c7;
-  font-weight: 600;
-}
-
-.update-notes {
-  margin: 0;
-  font-size: 0.8125rem;
-  color: var(--text-muted);
-  line-height: 1.5;
-  white-space: pre-wrap;
-}
-
-.inline-status {
-  font-size: 0.8125rem;
-  font-weight: 600;
-  margin-top: 2px;
-}
-
-.inline-status.status-error {
-  color: #dc2626;
-}
-
-.inline-status.status-success {
-  color: #16a34a;
-}
-
-.inline-status.status-info {
-  color: var(--text-secondary);
-}
-
-/* 底部操作 */
-.settings-footer {
-  margin-top: auto;
-  padding-top: 28px;
-  border-top: 1px solid rgba(0, 0, 0, 0.04);
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.btn-danger {
-  background: rgba(239, 68, 68, 0.1);
-  border-color: rgba(239, 68, 68, 0.2);
-  color: #dc2626;
-  align-self: flex-start;
-}
-
-.btn-danger:hover:not(:disabled) {
-  background: rgba(239, 68, 68, 0.15);
-  border-color: rgba(239, 68, 68, 0.3);
-  color: #b91c1c;
-}
-
-.footer-hint {
-  margin: 0;
-  font-size: 0.8125rem;
-  color: var(--text-muted);
+@media (max-width: 1100px) {
+  .settings-layout {
+    grid-template-columns: 1fr;
+  }
+  .settings-nav {
+    position: static;
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .nav-note {
+    display: none;
+  }
+  .settings-section {
+    padding: 20px;
+  }
+  .local-tag {
+    display: none;
+  }
 }
 </style>

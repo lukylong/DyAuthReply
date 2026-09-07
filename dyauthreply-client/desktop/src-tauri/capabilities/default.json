@@ -2,54 +2,14 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "opener:default",
-    "shell:default",
-    "updater:default",
     "autostart:allow-enable",
     "autostart:allow-disable",
-    "autostart:allow-is-enabled",
-    {
-      "identifier": "shell:allow-execute",
-      "allow": [
-        {
-          "name": "binaries/launcher",
-          "sidecar": true,
-          "args": true
-        },
-        {
-          "name": "launcher",
-          "sidecar": true,
-          "args": true
-        },
-        {
-          "name": "python3",
-          "cmd": "python3",
-          "args": true
-        }
-      ]
-    },
-    {
-      "identifier": "shell:allow-spawn",
-      "allow": [
-        {
-          "name": "binaries/launcher",
-          "sidecar": true,
-          "args": true
-        },
-        {
-          "name": "launcher",
-          "sidecar": true,
-          "args": true
-        },
-        {
-          "name": "python3",
-          "cmd": "python3",
-          "args": true
-        }
-      ]
-    }
+    "autostart:allow-is-enabled"
   ]
 }

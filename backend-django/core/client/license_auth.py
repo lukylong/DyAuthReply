@@ -11,8 +11,11 @@ import platform
 import random
 import socket
 import threading
+import tempfile
 import time
 import uuid
+from contextlib import contextmanager
+from functools import wraps
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -47,6 +50,58 @@ BUSINESS_ALLOWED_STATES = {STATE_ACTIVE, STATE_GRACE}
 LICENSE_STATE_VERSION = 2
 
 _lease_renewer_lock = threading.Lock()
+_license_operation_mutex = threading.Lock()
+
+
+@contextmanager
+def _license_operation_lock():
+    """Serialize token read/request/publish across the API and worker processes."""
+    if not _license_operation_mutex.acquire(timeout=25):
+        raise HttpError(503, '授权操作正在处理中，请稍后重试')
+    fd = None
+    locked = False
+    try:
+        path = _state_file_path().with_suffix('.lock')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+        if os.fstat(fd).st_size == 0:
+            os.write(fd, b'\0')
+        deadline = time.monotonic() + 25
+        while not locked:
+            try:
+                if os.name == 'nt':
+                    import msvcrt
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise HttpError(503, '授权操作正在处理中，请稍后重试') from None
+                time.sleep(0.05)
+        yield
+    finally:
+        if fd is not None:
+            if locked:
+                if os.name == 'nt':
+                    import msvcrt
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        _license_operation_mutex.release()
+
+
+def _serialized_license_operation(function):
+    @wraps(function)
+    def wrapper(*args, **kwargs):
+        with _license_operation_lock():
+            return function(*args, **kwargs)
+    return wrapper
 _lease_renewer_started = False
 
 
@@ -150,9 +205,18 @@ def _safe_json_load(path: Path) -> dict[str, Any]:
 
 def _safe_json_dump(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(f"{path.suffix}.tmp")
-    temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(path)
+    fd, name = tempfile.mkstemp(prefix=f'.{path.name}.', dir=path.parent)
+    temp_path = Path(name)
+    try:
+        # mkstemp is owner-only and unique across API/worker processes. Persist
+        # the new rotating token before atomically publishing its state file.
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def _normalize_server_url(server_url: str) -> str:
@@ -486,6 +550,7 @@ def client_can_use_business() -> bool:
     return bool(get_public_license_status().get("can_use_business"))
 
 
+@_serialized_license_operation
 def activate_remote_license(*, server_url: str = "", license_code: str) -> dict[str, Any]:
     code = (license_code or "").strip()
     if not code:
@@ -516,6 +581,7 @@ def activate_remote_license(*, server_url: str = "", license_code: str) -> dict[
     return _build_public_status(state)
 
 
+@_serialized_license_operation
 def refresh_remote_license(*, force: bool = False) -> dict[str, Any]:
     current = load_license_state()
     activation_id = current.get("activation_id") or ""
@@ -578,6 +644,7 @@ def refresh_remote_license(*, force: bool = False) -> dict[str, Any]:
         return _build_public_status(state)
 
 
+@_serialized_license_operation
 def deactivate_remote_license(*, reason: str = "") -> dict[str, Any]:
     current = load_license_state()
     activation_id = current.get("activation_id") or ""

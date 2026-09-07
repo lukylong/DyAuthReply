@@ -1,0 +1,1141 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "basic_keyword",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "r",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "reply"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "case_insensitive",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "HeLLo WORLD",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "r",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "reply"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "bound_priority",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "global",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply",
+            "priority": 100
+          },
+          {
+            "id": "bound",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply",
+            "priority": -10,
+            "account_ids": [
+              "a"
+            ]
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "bound",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "reply"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "bound_default_defers_global_keyword",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "bound-default",
+            "account_ids": [
+              "a"
+            ],
+            "match_type": "default",
+            "reply_text": "fallback"
+          },
+          {
+            "id": "global",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "global",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "reply"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "highest_fallback",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "low",
+            "match_type": "default",
+            "priority": 1,
+            "reply_text": "low"
+          },
+          {
+            "id": "high",
+            "match_type": "default",
+            "priority": 2,
+            "reply_text": "high"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "no keyword",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "high",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "high"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "other_account_not_selected",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply",
+            "account_ids": [
+              "b"
+            ]
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": null
+    },
+    {
+      "name": "disabled",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply",
+            "status": false
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": null
+    },
+    {
+      "name": "disabled_invalid_regex_is_not_compiled",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "disabled-regex",
+            "status": false,
+            "match_type": "regex",
+            "regex_pattern": "(",
+            "reply_text": "bad"
+          },
+          {
+            "id": "active",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "active",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "reply"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "creation_order",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "old",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply",
+            "created_at_ms": 1
+          },
+          {
+            "id": "new",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply",
+            "created_at_ms": 2
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "new",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "reply"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "comment_filter",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply",
+            "channel": "comment"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": null
+    },
+    {
+      "name": "all_channel",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply",
+            "channel": "all"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "comment",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "r",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "reply"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "saturday_yes",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply",
+            "weekday_mask": "0000010"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "r",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "reply"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "saturday_no",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply",
+            "weekday_mask": "1111101"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": null
+    },
+    {
+      "name": "invalid_mask_legacy",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply",
+            "weekday_mask": "bad"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "r",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "reply"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "time_start_inclusive",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply",
+            "time_window_start": "14:00:00",
+            "time_window_end": "15:00:00"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "r",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "reply"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "time_end_inclusive",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply",
+            "time_window_start": "13:00:00",
+            "time_window_end": "14:00:00"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "r",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "reply"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "time_reject",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply",
+            "time_window_start": "15:00:00",
+            "time_window_end": "16:00:00"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": null
+    },
+    {
+      "name": "midnight_wrap",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply",
+            "time_window_start": "23:00:00",
+            "time_window_end": "02:00:00"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788625800000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "r",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "reply"
+        ],
+        "day_start_ms": 1788624000000
+      }
+    },
+    {
+      "name": "one_missing_time_all_day",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "contains",
+            "keywords": [
+              "hello"
+            ],
+            "reply_text": "reply",
+            "time_window_start": "23:00:00"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "r",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "reply"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "regex_dotall",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "regex",
+            "match_type": "regex",
+            "regex_pattern": "^Hello.*World$",
+            "reply_text": "regex reply"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "HELLO\nworld",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "regex",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "regex reply"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "regex_backref",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "regex",
+            "match_type": "regex",
+            "regex_pattern": "(hello)\\s+\\1",
+            "reply_text": "regex reply"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello HELLO",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "regex",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "regex reply"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "regex_lookbehind",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "regex",
+            "match_type": "regex",
+            "regex_pattern": "(?<=ID:)\\d+",
+            "reply_text": "regex reply"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "ID:123",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "regex",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "regex reply"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "regex_named",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "regex",
+            "match_type": "regex",
+            "regex_pattern": "(?P<word>hello)\\s+(?P=word)",
+            "reply_text": "regex reply"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "regex",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "regex reply"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "unicode_keyword",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "contains",
+            "keywords": [
+              "你好"
+            ],
+            "reply_text": "好"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "大家你好呀",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "r",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "好"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "template_fallback",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "default",
+            "reply_text": "  ",
+            "template": {
+              "content": "{{nickname}} {{time_greeting}} {{unknown}}",
+              "links": []
+            }
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "r",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "小明 下午好 {{unknown}}"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "rule_overrides_template",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "default",
+            "reply_text": " rule ",
+            "template": {
+              "content": "template"
+            }
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "r",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "rule"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "rule_links_override_template",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "default",
+            "reply_text": "{{link_1_title}} {{link_1}}",
+            "links": [
+              {
+                "url": " https://example.test/a ",
+                "title": " A "
+              }
+            ],
+            "template": {
+              "content": "template",
+              "links": [
+                "https://example.test/b"
+              ]
+            }
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "r",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "A https://example.test/a",
+          "https://example.test/a"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "link_forces_multi_even_merged",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "default",
+            "reply_text": " text ",
+            "send_mode": "merged",
+            "links": [
+              "https://example.test/a"
+            ],
+            "card_urls": [
+              " https://example.test/card "
+            ]
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "r",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "text",
+          "https://example.test/card",
+          "https://example.test/a"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "template_send_mode_merged_keeps_space",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "default",
+            "template": {
+              "content": " template ",
+              "send_mode": "merged"
+            }
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "r",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          " template "
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "unknown_variables_unchanged",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "default",
+            "reply_text": "{{ nickname }} {{陌生}} {{unknown}} {{bad-name}}"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "r",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "小明 {{陌生}} {{unknown}} {{bad-name}}"
+        ],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "no_output",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "default"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788588000000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "r",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [],
+        "day_start_ms": 1788537600000
+      }
+    },
+    {
+      "name": "greeting_night",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "Asia/Shanghai",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "default",
+            "reply_text": "{{time_greeting}}"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1788627600000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "r",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "夜深了"
+        ],
+        "day_start_ms": 1788624000000
+      }
+    },
+    {
+      "name": "timezone_dst_fall",
+      "snapshot": {
+        "version": 1,
+        "revision": 7,
+        "timezone": "America/New_York",
+        "rules": [
+          {
+            "id": "r",
+            "match_type": "default",
+            "reply_text": "{{time_greeting}}"
+          }
+        ]
+      },
+      "input": {
+        "account_id": "a",
+        "text": "hello",
+        "channel": "dm",
+        "at_ms": 1793514600000,
+        "peer_nickname": "小明"
+      },
+      "expected": {
+        "rule_id": "r",
+        "revision": 7,
+        "cooldown_seconds": 0,
+        "segments": [
+          "夜深了"
+        ],
+        "day_start_ms": 1793505600000
+      }
+    }
+  ]
+}

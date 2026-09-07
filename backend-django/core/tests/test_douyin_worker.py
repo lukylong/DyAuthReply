@@ -19,6 +19,10 @@ from core.douyin.runtime.worker import (
     _should_enforce_daily_peer_limit,
 )
 from core.douyin.runtime.message_store import ScannedMessage
+from core.douyin.runtime.transport.sign_types import (
+    LoginExpiredError,
+    SendRiskControlError,
+)
 
 
 class DouyinWorkerRuntimeTests(SimpleTestCase):
@@ -146,6 +150,93 @@ class DouyinProfileBackfillSchedulingTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
 
         self.assertEqual(backfill.await_count, 1)
+
+
+class DouyinManualReplyFailureLoggingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_all_send_failure_branches_await_event_logging(self):
+        cases = (
+            (
+                LoginExpiredError(
+                    "session expired",
+                    http_status=401,
+                    proto_status_code=1001,
+                ),
+                "手动发送失败",
+            ),
+            (
+                SendRiskControlError(
+                    "send blocked",
+                    biz_status_code=8610,
+                    raw_check_code=2,
+                ),
+                "手动发送被封控",
+            ),
+            (RuntimeError("transport failed"), "手动发送失败"),
+        )
+
+        for send_error, expected_title in cases:
+            with self.subTest(error_type=type(send_error).__name__):
+                worker = DouyinWorker(transport_factory=lambda: SimpleNamespace())
+                account = SimpleNamespace(
+                    id="account-manual",
+                    owner_id="owner-manual",
+                    credential_state="sendable",
+                    last_probe_error="",
+                )
+                conversation = SimpleNamespace(peer_nickname="peer")
+                transport = SimpleNamespace(
+                    send_text=AsyncMock(side_effect=send_error),
+                )
+                event_log = AsyncMock(return_value=None)
+
+                with (
+                    patch(
+                        "core.douyin.runtime.worker._client_business_allowed_async",
+                        new=AsyncMock(return_value=True),
+                    ),
+                    patch(
+                        "core.douyin.runtime.worker._fetch_account_orm",
+                        new=AsyncMock(return_value=account),
+                    ),
+                    patch(
+                        "core.douyin.runtime.worker._fetch_conversation",
+                        new=AsyncMock(return_value=conversation),
+                    ),
+                    patch.object(
+                        worker,
+                        "_get_or_create_transport",
+                        new=AsyncMock(return_value=transport),
+                    ),
+                    patch(
+                        "core.douyin.runtime.worker.mark_account_login_invalid",
+                        new=AsyncMock(return_value=None),
+                    ),
+                    patch(
+                        "core.douyin.runtime.worker._mark_credential_invalid",
+                        new=AsyncMock(return_value=None),
+                    ),
+                    patch(
+                        "core.douyin.runtime.worker.mark_account_send_restricted",
+                        new=AsyncMock(return_value=None),
+                    ),
+                    patch(
+                        "core.douyin.runtime.worker.push_to_user",
+                        new=AsyncMock(return_value=None),
+                    ),
+                    patch(
+                        "core.douyin.runtime.worker._log_event",
+                        new=event_log,
+                    ),
+                ):
+                    result = await worker._send_manual_reply(
+                        "account-manual",
+                        conversation_id="conversation-manual",
+                        text="hello",
+                    )
+
+                self.assertEqual(result["status"], "failed")
+                event_log.assert_awaited_once()
+                self.assertEqual(event_log.await_args.args[3], expected_title)
 
 
 class DouyinReplyGuardBoundaryTests(unittest.IsolatedAsyncioTestCase):

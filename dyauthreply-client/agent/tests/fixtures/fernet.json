@@ -1,0 +1,21 @@
+{
+  "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+  "cases": [
+    {
+      "plaintext": "",
+      "token": "gAAAAABlU_EABwcHBwcHBwcHBwcHBwcHB11s-SfFaoMOS-1aXEf5W3KSMBBKDnx-P1CR5rQSWQmOF1R9Numm2tgwbV4eXx1Y3g=="
+    },
+    {
+      "plaintext": "fixture text",
+      "token": "gAAAAABlU_EABwcHBwcHBwcHBwcHBwcHB5LXxTtIDNMAiQONZmIjfQCev48nhO-kIZwwOoSE5XgX1gkVGVRK1bmrfMlIycft1w=="
+    },
+    {
+      "plaintext": "中文凭据测试",
+      "token": "gAAAAABlU_EABwcHBwcHBwcHBwcHBwcHB61Sklp_vlBxwgMWmuuPJ5xsGjwCH6reTcRZ39WXWV9vpxXeBpKot2S0B4BRFPfg185Ij4jmYXr9GrOWgQqMb6o="
+    },
+    {
+      "plaintext": "0123456789abcdef",
+      "token": "gAAAAABlU_EABwcHBwcHBwcHBwcHBwcHB8HD6uiS2A83figAcmuQiYbUXweeN0_XF7Buqy0NSzUxDeFacMEUof5mi3bF00vAVaMCKEaPANqWWTb4NlMV9Fw="
+    }
+  ]
+}

@@ -8,6 +8,7 @@ on:
     paths:
       - 'dyauthreply-client/**'
       - 'backend-django/**'
+      - 'protocol-fixtures/**'
       - 'launcher.spec'
       - 'scripts/client/**'
       - '.github/workflows/client-build.yml'
@@ -29,8 +30,141 @@ env:
   UPDATE_MIRRORS: 'https://ghproxy.net/,https://gh-proxy.com/,https://ghfast.top/,https://github.com/'
 
 jobs:
+  release-preflight:
+    name: Release identity and publication preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Verify stable overwrite identity and synchronized version
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ "$GITHUB_REF" == refs/tags/client-v* ]]; then
+            args+=(--tag "$GITHUB_REF_NAME")
+          fi
+          node scripts/client/check_release_contract.mjs "${args[@]}"
+
+      - name: Require every release credential
+        if: startsWith(github.ref, 'refs/tags/client-v')
+        shell: bash
+        env:
+          LEASE_KEY: ${{ secrets.LICENSE_LEASE_PUBLIC_KEY_B64 }}
+          UPDATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          DIST_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$LEASE_KEY"
+          test -n "$UPDATE_KEY"
+          test -n "$DIST_TOKEN"
+          echo 'RELEASE_CREDENTIALS_PRESENT=1'
+
+      - name: Prepare draft and rolling releases
+        if: startsWith(github.ref, 'refs/tags/client-v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIST_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft \
+              --title "DyAuthReply Client $GITHUB_REF_NAME" \
+              --notes-file .github/client-release-notes.md
+          fi
+          if ! GH_TOKEN="$DIST_TOKEN" gh release view client-latest --repo "$DIST_REPO" >/dev/null 2>&1; then
+            GH_TOKEN="$DIST_TOKEN" gh release create client-latest --repo "$DIST_REPO" --latest \
+              --title "D助手 客户端与插件下载" \
+              --notes "安装包随新版本滚动更新，本 Release 始终为最新版。"
+          fi
+
+  agent-quality:
+    name: Rust Agent quality gate
+    needs: release-preflight
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install native transport build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev pkg-config
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - name: Setup Python protocol verifier
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install protocol verifier dependency
+        run: >-
+          python -m pip install
+          'Django==5.2.7'
+          'protobuf>=5.27.1,<6'
+          'cryptography>=42.0.5,<45'
+
+      - name: Cache Rust Agent dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dyauthreply-client/agent
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path dyauthreply-client/agent/Cargo.toml -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --manifest-path dyauthreply-client/agent/Cargo.toml --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked --manifest-path dyauthreply-client/agent/Cargo.toml
+
+      - name: Run deterministic 10/100/300 account simulations
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --release --locked --manifest-path dyauthreply-client/agent/Cargo.toml --bin runtime-sim -- --accounts 10 --events-per-account 100
+          cargo run --release --locked --manifest-path dyauthreply-client/agent/Cargo.toml --bin runtime-sim -- --accounts 100 --events-per-account 2
+          cargo run --release --locked --manifest-path dyauthreply-client/agent/Cargo.toml --bin runtime-sim -- --accounts 300 --events-per-account 1
+
+      - name: Run real runtime memory CPU and hard-cap soak gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          common=(--max-rss-mib 512 --max-growth-mib 128 --max-tail-growth-mib 32 --max-cpu-cores 8 --max-drain-ms 10000 --max-backpressure-per-event 100 --max-thread-growth 0)
+          cargo run --release --locked --manifest-path dyauthreply-client/agent/Cargo.toml --bin runtime-soak -- \
+            --accounts 300 --cycles 20 --events-per-account 50 --producers 128 "${common[@]}"
+          cargo run --release --locked --manifest-path dyauthreply-client/agent/Cargo.toml --bin runtime-soak -- \
+            --accounts 512 --cycles 5 --events-per-account 20 --producers 256 "${common[@]}"
+
+      - name: Verify shared Python protocol corpus
+        env:
+          PYTHONPATH: backend-django
+        run: >-
+          python -m unittest -q
+          core.tests.test_douyin_wire_codec
+          core.tests.test_douyin_protocol_corpus
+          core.tests.test_douyin_http_request_plan_corpus
+
+      - name: Verify embedded Rust protocol corpus
+        run: >-
+          cargo run --release --locked
+          --manifest-path dyauthreply-client/agent/Cargo.toml
+          -- --verify-protocol
+
   build:
     name: Build (${{ matrix.platform_label }})
+    needs: [release-preflight, agent-quality]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -48,19 +182,10 @@ jobs:
             rust_target: x86_64-pc-windows-msvc
             artifact_name: dyauthreply-windows-x64
             bundle: nsis
-            python_arch: x64
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          architecture: ${{ matrix.python_arch || 'x64' }}
-          cache: pip
-          cache-dependency-path: backend-django/requirements.txt
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -70,7 +195,6 @@ jobs:
           cache-dependency-path: |
             dyauthreply-client/client-ui/package-lock.json
             dyauthreply-client/desktop/package-lock.json
-            backend-django/core/douyin/runtime/transport/sign/js/package-lock.json
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -83,27 +207,18 @@ jobs:
         with:
           workspaces: dyauthreply-client/desktop/src-tauri
 
-      - name: Install Python dependencies
-        shell: bash
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller
-          pip install -r backend-django/requirements.txt
-
-      - name: Build launcher sidecar (macOS)
+      - name: Install native transport build prerequisites (macOS)
         if: runner.os == 'macOS'
+        run: brew list cmake >/dev/null 2>&1 || brew install cmake
+
+      - name: Install native transport build prerequisites (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install nasm llvm -y --no-progress
+
+      - name: Build native Rust Agent
         shell: bash
-        run: python3 scripts/client/build_launcher.py --rust-target "${{ matrix.rust_target }}"
-
-      - name: Build launcher sidecar (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: python scripts/client/build_launcher.py --rust-target "${{ matrix.rust_target }}"
-
-      - name: Smoke test launcher sidecar (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: python scripts/client/smoke_test_launcher.py "dyauthreply-client/desktop/src-tauri/binaries/launcher-${{ matrix.rust_target }}.exe"
+        run: node scripts/client/build_agent.mjs --profile release --target "${{ matrix.rust_target }}"
 
       - name: Install npm dependencies
         shell: bash
@@ -125,7 +240,55 @@ jobs:
         working-directory: dyauthreply-client/desktop
         env:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          DY_AGENT_BUILD_PROFILE: release
+          DY_AGENT_BUILD_TARGET: ${{ matrix.rust_target }}
         run: npm run tauri build -- --target ${{ matrix.rust_target }} --bundles ${{ matrix.bundle }}
+
+      - name: Audit native release sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--target "${{ matrix.rust_target }}")
+          if [[ "$GITHUB_REF" == refs/tags/client-v* ]]; then
+            args+=(--tag "$GITHUB_REF_NAME")
+          fi
+          node scripts/client/check_release_contract.mjs "${args[@]}"
+
+      - name: Audit final macOS application bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=$(find "dyauthreply-client/desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos" -maxdepth 1 -name '*.app' -type d -print -quit)
+          test -n "$app"
+          dyauthreply-client/desktop/verify-bundle.sh "$app"
+
+      - name: Smoke install final Windows NSIS package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundle = "dyauthreply-client/desktop/src-tauri/target/${{ matrix.rust_target }}/release/bundle/nsis"
+          $installer = Get-ChildItem $bundle -Filter '*-setup.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'Windows installer missing' }
+          $installDir = Join-Path $env:RUNNER_TEMP 'dyauthreply-native-install'
+          New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+          $legacyPath = Join-Path $installDir 'launcher.exe'
+          Copy-Item (Join-Path $env:WINDIR 'System32/cmd.exe') $legacyPath
+          $legacy = Start-Process -FilePath $legacyPath -ArgumentList @('/c', 'ping -t 127.0.0.1') -PassThru
+          Start-Sleep -Milliseconds 500
+          $process = Start-Process -FilePath $installer.FullName -ArgumentList @('/S', "/D=$installDir") -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "NSIS install failed: $($process.ExitCode)" }
+          if (Get-Process -Id $legacy.Id -ErrorAction SilentlyContinue) { throw 'Legacy launcher survived preinstall hook' }
+          Remove-Item $legacyPath -Force -ErrorAction SilentlyContinue
+          node scripts/client/audit_native_bundle.mjs "$installDir"
+          if (-not (Test-Path (Join-Path $installDir 'dyauthreply.exe'))) { throw 'Desktop executable missing' }
+          $uninstaller = Get-ChildItem $installDir -Filter 'uninstall.exe' | Select-Object -First 1
+          if ($uninstaller) {
+            $uninstall = Start-Process -FilePath $uninstaller.FullName -ArgumentList '/S' -Wait -PassThru
+            if ($uninstall.ExitCode -ne 0) { throw "NSIS uninstall failed: $($uninstall.ExitCode)" }
+          }
+          Write-Output 'WINDOWS_NSIS_SMOKE_PASS=1'
 
       - name: Collect installer files only
         shell: bash
@@ -152,77 +315,27 @@ jobs:
             echo "No installer found under $bundle_root"
             exit 1
           fi
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            test "$(find dist-installers -maxdepth 1 -name '*.dmg' | wc -l | tr -d ' ')" = 1
+            test "$(find dist-installers -maxdepth 1 -name '*.app.tar.gz' | wc -l | tr -d ' ')" = 1
+            test "$(find dist-installers -maxdepth 1 -name '*.app.tar.gz.sig' | wc -l | tr -d ' ')" = 1
+          else
+            test "$(find dist-installers -maxdepth 1 -name '*-setup.exe' | wc -l | tr -d ' ')" = 1
+            test "$(find dist-installers -maxdepth 1 -name '*-setup.exe.sig' | wc -l | tr -d ' ')" = 1
+          fi
           ls -la dist-installers/
 
-      # Release tag: upload installers directly to GitHub Release (avoid Actions artifact quota).
-      - name: Create GitHub Release and upload (macOS)
-        if: startsWith(github.ref, 'refs/tags/client-v') && matrix.platform_label == 'macOS Apple Silicon'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: DyAuthReply Client ${{ github.ref_name }}
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-          body_path: .github/client-release-notes.md
-          files: dist-installers/*
-          fail_on_unmatched_files: true
-
-      - name: Append installer to GitHub Release (Windows)
-        if: startsWith(github.ref, 'refs/tags/client-v') && matrix.platform_label == 'Windows x64'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: dist-installers/*
-          fail_on_unmatched_files: true
-          make_latest: false
-
-      # 同步到公开下载仓（主仓私有，外部无法直接下载其 Release）。
-      # 用 DIST_REPO_TOKEN（对 DyAuthReply-dist 有写权限的 PAT）把安装包以稳定文件名
-      # 上传到公开仓的滚动 client-latest Release，落地页 latest/download 链接始终有效。
-      - name: Sync installer to public download repo
+      # Both matrix jobs upload only to the draft versioned release. The manifest
+      # job promotes all platforms together after every build/signature is present.
+      - name: Upload signed installers to draft release
         if: startsWith(github.ref, 'refs/tags/client-v')
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
-          DIST_REPO_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [ -z "${DIST_REPO_TOKEN:-}" ]; then
-            echo "DIST_REPO_TOKEN 未配置，跳过公开仓同步"
-            exit 0
-          fi
-          # 待上传资产列表：源文件 -> 稳定文件名
-          declare -a uploads=()
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            uploads+=("$(ls dist-installers/*.dmg | head -n1)::DAssistant-macos-aarch64.dmg")
-            # macOS updater 产物 + 签名（应用内更新下载的就是 .app.tar.gz）
-            if ls dist-installers/*.app.tar.gz >/dev/null 2>&1; then
-              uploads+=("$(ls dist-installers/*.app.tar.gz | head -n1)::DAssistant-macos-aarch64.app.tar.gz")
-            fi
-            if ls dist-installers/*.app.tar.gz.sig >/dev/null 2>&1; then
-              uploads+=("$(ls dist-installers/*.app.tar.gz.sig | head -n1)::DAssistant-macos-aarch64.app.tar.gz.sig")
-            fi
-          else
-            uploads+=("$(ls dist-installers/*-setup.exe | head -n1)::DAssistant-windows-x64-setup.exe")
-            # Windows NSIS 安装包同时作为 updater 产物，附带签名
-            if ls dist-installers/*-setup.exe.sig >/dev/null 2>&1; then
-              uploads+=("$(ls dist-installers/*-setup.exe.sig | head -n1)::DAssistant-windows-x64-setup.exe.sig")
-            fi
-          fi
-          # 确保滚动 release 存在（首次或被删除时自动创建并标记为 latest）
-          if ! gh release view client-latest --repo "$DIST_REPO" >/dev/null 2>&1; then
-            gh release create client-latest --repo "$DIST_REPO" --latest \
-              --title "D助手 客户端与插件下载" \
-              --notes "安装包随新版本滚动更新，本 Release 始终为最新版。"
-          fi
-          for item in "${uploads[@]}"; do
-            src="${item%%::*}"
-            asset="${item##*::}"
-            cp "$src" "$asset"
-            gh release upload client-latest "$asset" --repo "$DIST_REPO" --clobber
-            echo "已同步 $asset 到 $DIST_REPO (client-latest)"
-          done
+          gh release upload "$GITHUB_REF_NAME" dist-installers/* \
+            --repo "$GITHUB_REPOSITORY" --clobber
 
       # PR / manual runs: keep a short-lived artifact for debugging only.
       - name: Upload installer artifacts
@@ -250,6 +363,32 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Promote complete signed installer set to public rolling release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIST_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist-installers dist-public
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.dmg' --pattern '*.app.tar.gz' --pattern '*.app.tar.gz.sig' \
+            --pattern '*-setup.exe' --pattern '*-setup.exe.sig' \
+            --dir dist-installers --clobber
+          test "$(find dist-installers -maxdepth 1 -name '*.dmg' | wc -l | tr -d ' ')" = 1
+          test "$(find dist-installers -maxdepth 1 -name '*.app.tar.gz' | wc -l | tr -d ' ')" = 1
+          test "$(find dist-installers -maxdepth 1 -name '*.app.tar.gz.sig' | wc -l | tr -d ' ')" = 1
+          test "$(find dist-installers -maxdepth 1 -name '*-setup.exe' | wc -l | tr -d ' ')" = 1
+          test "$(find dist-installers -maxdepth 1 -name '*-setup.exe.sig' | wc -l | tr -d ' ')" = 1
+          cp "$(find dist-installers -maxdepth 1 -name '*.dmg' -print -quit)" dist-public/DAssistant-macos-aarch64.dmg
+          cp "$(find dist-installers -maxdepth 1 -name '*.app.tar.gz' -print -quit)" dist-public/DAssistant-macos-aarch64.app.tar.gz
+          cp "$(find dist-installers -maxdepth 1 -name '*.app.tar.gz.sig' -print -quit)" dist-public/DAssistant-macos-aarch64.app.tar.gz.sig
+          cp "$(find dist-installers -maxdepth 1 -name '*-setup.exe' -print -quit)" dist-public/DAssistant-windows-x64-setup.exe
+          cp "$(find dist-installers -maxdepth 1 -name '*-setup.exe.sig' -print -quit)" dist-public/DAssistant-windows-x64-setup.exe.sig
+          GH_TOKEN="$DIST_TOKEN" gh release upload client-latest dist-public/* \
+            --repo "$DIST_REPO" --clobber
+          echo 'PUBLIC_INSTALLER_SET_COMPLETE=1'
 
       - name: Package browser extension
         shell: bash
@@ -293,8 +432,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${DIST_REPO_TOKEN:-}" ]; then
-            echo "DIST_REPO_TOKEN 未配置，跳过扩展同步"
-            exit 0
+            echo "DIST_REPO_TOKEN 未配置，停止发布"
+            exit 1
           fi
           gh release upload client-latest dist-extension/douyin-cred-extractor.zip \
             --repo "$DIST_REPO" --clobber
@@ -308,34 +447,56 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${DIST_REPO_TOKEN:-}" ]; then
-            echo "DIST_REPO_TOKEN 未配置，跳过 manifest 发布"
-            exit 0
+            echo "DIST_REPO_TOKEN 未配置，停止发布"
+            exit 1
           fi
 
           version=$(python3 -c "import json;print(json.load(open('dyauthreply-client/desktop/src-tauri/tauri.conf.json'))['version'])")
           pub_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           notes="${GITHUB_REF_NAME:-}"
 
-          mkdir -p sigs dist-manifests
-          # 从 dist 仓 client-latest 拉取各平台 updater 产物签名（由 build 阶段上传）
-          gh release download client-latest --repo "$DIST_REPO" \
-            --pattern 'DAssistant-windows-x64-setup.exe.sig' --dir sigs --clobber || true
-          gh release download client-latest --repo "$DIST_REPO" \
-            --pattern 'DAssistant-macos-aarch64.app.tar.gz.sig' --dir sigs --clobber || true
+          mkdir -p dist-manifests
+          test -s dist-public/DAssistant-windows-x64-setup.exe.sig
+          test -s dist-public/DAssistant-macos-aarch64.app.tar.gz.sig
 
           args=(--version "$version" --pub-date "$pub_date" --notes "$notes"
-                --mirrors "$UPDATE_MIRRORS" --out-dir dist-manifests)
-          if [ -f sigs/DAssistant-windows-x64-setup.exe.sig ]; then
-            args+=(--windows-url "https://github.com/$DIST_REPO/releases/latest/download/DAssistant-windows-x64-setup.exe"
-                   --windows-sig-file sigs/DAssistant-windows-x64-setup.exe.sig)
-          fi
-          if [ -f sigs/DAssistant-macos-aarch64.app.tar.gz.sig ]; then
-            args+=(--macos-url "https://github.com/$DIST_REPO/releases/latest/download/DAssistant-macos-aarch64.app.tar.gz"
-                   --macos-sig-file sigs/DAssistant-macos-aarch64.app.tar.gz.sig)
-          fi
+                --mirrors "$UPDATE_MIRRORS" --out-dir dist-manifests
+                --windows-url "https://github.com/$DIST_REPO/releases/latest/download/DAssistant-windows-x64-setup.exe"
+                --windows-sig-file dist-public/DAssistant-windows-x64-setup.exe.sig
+                --macos-url "https://github.com/$DIST_REPO/releases/latest/download/DAssistant-macos-aarch64.app.tar.gz"
+                --macos-sig-file dist-public/DAssistant-macos-aarch64.app.tar.gz.sig)
 
           python3 scripts/client/gen_update_manifest.py "${args[@]}"
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          expected = "${{ github.ref_name }}".removeprefix("client-v")
+          files = sorted(Path("dist-manifests").glob("latest*.json"))
+          if not files:
+              raise SystemExit("No updater manifests generated")
+          for path in files:
+              payload = json.loads(path.read_text())
+              if payload.get("version") != expected:
+                  raise SystemExit(f"Version mismatch in {path}")
+              platforms = payload.get("platforms") or {}
+              for name in ("windows-x86_64", "darwin-aarch64"):
+                  item = platforms.get(name) or {}
+                  if not str(item.get("url") or "").startswith("https://") or not item.get("signature"):
+                      raise SystemExit(f"Incomplete {name} in {path}")
+          print(f"UPDATER_MANIFESTS_COMPLETE={len(files)}")
+          PY
 
           ls -la dist-manifests/
           gh release upload client-latest dist-manifests/latest*.json --repo "$DIST_REPO" --clobber
           echo "已发布 latest.json 多镜像变体到 $DIST_REPO (client-latest)"
+
+      - name: Publish versioned release after every promotion gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --draft=false --latest
+          echo 'VERSIONED_RELEASE_PUBLISHED=1'

@@ -552,7 +552,7 @@ DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower()
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '修复客户端手动回复偶发重复发送：SQLite 命令在执行前由单个 Worker 原子领取\n'
-    '多个 Worker 同时观察到同一命令时仅一个实例执行，避免产生两条平台消息\n'
-    'Worker 异常退出后的未完成命令可在租约超时后自动恢复，不会永久卡住',
+    '客户端运行时已完整迁移为 Rust 原生引擎，不再打包 Python 或 Node 运行环境\n'
+    '修复快捷登录授权后的会话重载与组件状态竞态，提升授权成功率\n'
+    '修复消息风险状态误锁定，并完成协议、续签和安装包发布链路核验',
 )

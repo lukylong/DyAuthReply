@@ -123,10 +123,6 @@ impl LiveSender {
         ) {
             return Err(LiveSendError::AlreadyClaimed);
         }
-        // The send HTTP client is constructed from the same fixed profile.
-        // Keep the request/header identity stable rather than mixing the
-        // imported browser's TLS profile with this frozen Windows UA.
-        REFERENCE_UA.clone_into(&mut operation.request.user_agent);
         operation
             .request
             .client_msg_id
@@ -320,18 +316,41 @@ fn send_allowed(operation: &SendOperation) -> bool {
         && i64::try_from(control.state.lease_epoch).ok() == Some(operation.lease.fence_epoch)
 }
 
+#[cfg(test)]
 pub(crate) const REFERENCE_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
-pub(super) fn reference_headers() -> Vec<OrderedHeader> {
+
+pub(super) fn browser_client_hints(user_agent: &str) -> (String, &'static str) {
+    let version = user_agent
+        .split("Chrome/")
+        .nth(1)
+        .or_else(|| user_agent.split("Chromium/").nth(1))
+        .and_then(|value| value.split_whitespace().next())
+        .unwrap_or("151.0.0.0");
+    let major = version.split('.').next().unwrap_or("151");
+    let platform = if user_agent.contains("Macintosh") {
+        "\"macOS\""
+    } else if user_agent.contains("Linux") && !user_agent.contains("Android") {
+        "\"Linux\""
+    } else {
+        "\"Windows\""
+    };
+    (
+        format!(
+            "\"Not=A?Brand\";v=\"99\", \"Google Chrome\";v=\"{major}\", \"Chromium\";v=\"{major}\""
+        ),
+        platform,
+    )
+}
+
+pub(super) fn headers_for_user_agent(user_agent: &str) -> Vec<OrderedHeader> {
+    let (client_hint, platform) = browser_client_hints(user_agent);
     [
         ("content-type", "application/x-protobuf"),
         ("accept", "application/x-protobuf"),
-        ("user-agent", REFERENCE_UA),
-        (
-            "sec-ch-ua",
-            "\"Not=A?Brand\";v=\"99\", \"Google Chrome\";v=\"151\", \"Chromium\";v=\"151\"",
-        ),
+        ("user-agent", user_agent),
+        ("sec-ch-ua", client_hint.as_str()),
         ("sec-ch-ua-mobile", "?0"),
-        ("sec-ch-ua-platform", "\"Windows\""),
+        ("sec-ch-ua-platform", platform),
         (
             "accept-language",
             "zh-CN,zh;q=0.9,en;q=0.8,zh-TW;q=0.7,ja;q=0.6",
@@ -347,13 +366,18 @@ pub(super) fn reference_headers() -> Vec<OrderedHeader> {
     .collect()
 }
 
+#[cfg(test)]
+pub(super) fn reference_headers() -> Vec<OrderedHeader> {
+    headers_for_user_agent(REFERENCE_UA)
+}
+
 async fn signed_plan(
     signer: &NativeSigner,
     operation: &SendOperation,
 ) -> Result<super::http_plan::RequestPlan, LiveSendError> {
     let body =
         encode_send_message_request(&operation.request).map_err(|_| LiveSendError::Payload)?;
-    let headers = reference_headers();
+    let headers = headers_for_user_agent(&operation.request.user_agent);
     let credentials = &operation.credentials;
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -649,6 +673,22 @@ mod tests {
             .map(|header| vec![header.name, header.value])
             .collect();
         assert_eq!(serde_json::to_value(actual).unwrap(), *expected);
+    }
+
+    #[test]
+    fn imported_macos_browser_identity_is_preserved_for_live_send() {
+        let user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
+        let headers = headers_for_user_agent(user_agent);
+        let value = |name: &str| {
+            headers
+                .iter()
+                .find(|header| header.name == name)
+                .map(|header| header.value.as_str())
+                .unwrap()
+        };
+        assert_eq!(value("user-agent"), user_agent);
+        assert_eq!(value("sec-ch-ua-platform"), "\"macOS\"");
+        assert!(value("sec-ch-ua").contains("v=\"152\""));
     }
     #[tokio::test]
     async fn automatic_transport_rejects_unguarded_batch_without_http() {

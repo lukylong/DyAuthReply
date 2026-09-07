@@ -309,7 +309,7 @@ async function refreshAccounts() {
 
 function accountStatusLabel(acc: DouyinAccount) {
   if (acc.credential_state === 'receive_only') {
-    return isSendRestricted(acc) ? '发送封控（仅接收）' : '仅接收（发送凭证不完整）';
+    return isSendRestricted(acc) ? '客户端发送受限（仅接收）' : '仅接收（发送凭证不完整）';
   }
   if (acc.credential_state === 'invalid' || acc.status === 2) return '登录失效';
   if (isAccountHealthy(acc)) {
@@ -330,13 +330,13 @@ function isAccountHealthy(acc: DouyinAccount) {
 function isSendRestricted(acc: DouyinAccount) {
   const detail = acc.last_probe_error || '';
   return acc.credential_state === 'receive_only'
-    && ['发送封控', '发送风控', 'business=', 'raw_check='].some((marker) => detail.includes(marker));
+    && ['客户端协议发送', '发送封控', '发送风控', 'business=', 'raw_check='].some((marker) => detail.includes(marker));
 }
 
 function accountCredentialLabel(acc: DouyinAccount) {
   if (acc.credential_state === 'invalid') return '登录失效';
   if (acc.credential_state === 'receive_only') {
-    return isSendRestricted(acc) ? '发送封控（仅接收）' : '仅接收';
+    return isSendRestricted(acc) ? '客户端发送受限（仅接收）' : '仅接收';
   }
   if (isAccountHealthy(acc)) return '账号正常';
   if (acc.credential_state === 'sendable') return '可发送';

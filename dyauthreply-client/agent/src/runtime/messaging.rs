@@ -259,7 +259,6 @@ struct Inner {
     runtime: RuntimeHandle,
     store: Arc<CoreStore>,
     signer: NativeSigner,
-    send_http: ProtocolHttpClient,
     controller: OnceLock<Arc<HostedController>>,
     business: Arc<crate::business::BusinessStore>,
     configuration_gate: tokio::sync::RwLock<()>,
@@ -271,14 +270,8 @@ pub struct ManualService {
     inner: Arc<Inner>,
 }
 
-fn protocol_http_clients() -> Result<(ProtocolHttpClient, ProtocolHttpClient)> {
-    // Send headers/A-Bogus use the frozen Windows Chrome identity. Keep TLS
-    // emulation on that same profile instead of borrowing the UA of a
-    // credential-import browser (for example macOS Chrome 152).
-    let budget = ProtocolHttpClient::new(8)?;
-    let send = ProtocolHttpClient::for_user_agent(8, crate::protocol::live_sender::REFERENCE_UA)?
-        .sharing_budget(&budget);
-    Ok((budget, send))
+fn protocol_http_budget() -> Result<ProtocolHttpClient> {
+    Ok(ProtocolHttpClient::new(8)?)
 }
 
 fn preparation_failure(error: &AccountRequestError) -> String {
@@ -327,7 +320,7 @@ impl ManualService {
             None
         };
         let signer = NativeSigner::new(4)?;
-        let (budget, send_http) = protocol_http_clients()?;
+        let budget = protocol_http_budget()?;
         let mut profiles = BTreeMap::new();
         let mut accounts = BTreeMap::new();
         for credentials in loaded {
@@ -400,7 +393,6 @@ impl ManualService {
                 runtime,
                 store,
                 signer,
-                send_http,
                 controller: OnceLock::new(),
                 rule_path: settings.rule_config_file.clone(),
                 rule_slots: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -1688,7 +1680,7 @@ impl ManualService {
             let outcome = LiveSender::new(
                 self.inner.store.clone(),
                 self.inner.signer.clone(),
-                self.inner.send_http.clone(),
+                slot.http.clone(),
             )
             .send(operation)
             .await?;

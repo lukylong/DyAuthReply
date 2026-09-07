@@ -13,7 +13,7 @@ use serde_json::Value;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const IDENTITY_PATH: &str = "/passport/safe/get_identity_security_token/";
-use super::live_sender::{reference_headers, REFERENCE_UA};
+use super::live_sender::{browser_client_hints, headers_for_user_agent};
 
 #[derive(Debug, Clone, Serialize, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -307,16 +307,14 @@ impl NativeAccountSession {
         } else {
             csrf
         };
+        let (client_hint, platform) = browser_client_hints(&self.credentials.user_agent);
         headers.extend([
-            OrderedHeader::new("user-agent", REFERENCE_UA),
+            OrderedHeader::new("user-agent", &self.credentials.user_agent),
             OrderedHeader::new("accept", "application/json, text/javascript"),
             OrderedHeader::new("referer", "https://www.douyin.com/chat?isPopup=1"),
-            OrderedHeader::new(
-                "sec-ch-ua",
-                "\"Not=A?Brand\";v=\"99\", \"Google Chrome\";v=\"151\", \"Chromium\";v=\"151\"",
-            ),
+            OrderedHeader::new("sec-ch-ua", client_hint),
             OrderedHeader::new("sec-ch-ua-mobile", "?0"),
-            OrderedHeader::new("sec-ch-ua-platform", "\"Windows\""),
+            OrderedHeader::new("sec-ch-ua-platform", platform),
             OrderedHeader::new(
                 "accept-language",
                 "zh-CN,zh;q=0.9,en;q=0.8,zh-TW;q=0.7,ja;q=0.6",
@@ -394,9 +392,14 @@ impl NativeAccountSession {
         short_id: u64,
     ) -> Result<super::inbox::ConversationContext, AccountRequestError> {
         const STEP: &str = "conversation";
-        let request = super::inbox::encode_conversation_info(id, short_id, 10001, REFERENCE_UA)
-            .map_err(|_| AccountRequestError::Decode { step: STEP })?;
-        let mut headers = reference_headers();
+        let request = super::inbox::encode_conversation_info(
+            id,
+            short_id,
+            10001,
+            &self.credentials.user_agent,
+        )
+        .map_err(|_| AccountRequestError::Decode { step: STEP })?;
+        let mut headers = headers_for_user_agent(&self.credentials.user_agent);
         headers.push(OrderedHeader::new(
             "cookie",
             self.credentials.cookie_header("imapi.douyin.com"),

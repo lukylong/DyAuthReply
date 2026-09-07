@@ -1145,7 +1145,7 @@ export function credentialLabel(state?: string): string {
   const map: Record<string, string> = {
     sendable: '可发送',
     receive_only: '仅接收',
-    risk_controlled: '发送封控（仅接收）',
+    risk_controlled: '客户端发送受限（仅接收）',
     invalid: '已失效',
     unknown: '未知',
   };

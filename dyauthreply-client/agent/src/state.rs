@@ -118,7 +118,7 @@ impl AccountDisplayStatus {
             Self::Degraded => "降级运行",
             Self::ReceiveOnly => "仅接收",
             Self::AuthenticationInvalid => "认证失效",
-            Self::RiskControlled => "发送风控（仅接收）",
+            Self::RiskControlled => "客户端发送受限（仅接收）",
             Self::LeaseExpired => "租约失效",
             Self::OwnershipLost => "租约已丢失",
             Self::PausedAuto => "自动回复已暂停",

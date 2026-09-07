@@ -75,9 +75,10 @@ fn account_view(
 ) -> Value {
     let (credential, detail) = match state.send {
         SendCapability::Sendable => ("sendable", ""),
-        SendCapability::RiskControlled => {
-            ("receive_only", "发送风控，平台拒绝发送；接收状态独立监控")
-        }
+        SendCapability::RiskControlled => (
+            "receive_only",
+            "客户端协议发送被平台拒绝；创作者中心发送状态需独立判断，接收状态独立监控",
+        ),
         SendCapability::ReceiveOnly => ("receive_only", "发送凭证不完整"),
         SendCapability::AuthExpired => ("invalid", "登录失效，请重新导入凭证"),
         SendCapability::Unknown => ("unknown", "尚未取得本次凭证的发送成功证据"),
@@ -379,7 +380,10 @@ mod tests {
             assert_eq!(value["credential_state"], expected);
             assert_eq!(value["auto_reply_enabled"], false);
             assert_eq!(
-                value["last_probe_error"].as_str().unwrap().contains("风控"),
+                value["last_probe_error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("客户端协议发送"),
                 send == SendCapability::RiskControlled
             );
         }

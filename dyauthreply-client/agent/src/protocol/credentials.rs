@@ -225,11 +225,12 @@ impl AccountCredentials {
             "{:x}",
             Sha256::digest(
                 format!(
-                    "native-binding-v1\0{}\0{}\0{}\0{}",
+                    "native-binding-v2\0{}\0{}\0{}\0{}\0{}",
                     self.account_id,
                     self.expected_sec_uid,
                     self.cookie_header("www.douyin.com"),
-                    self.private_key
+                    self.private_key,
+                    self.user_agent,
                 )
                 .as_bytes()
             )
@@ -548,6 +549,20 @@ mod tests {
             first.cookie_header("www.douyin.com"),
             "sessionid=stable; exact=1"
         );
+    }
+
+    #[test]
+    fn send_observation_binding_includes_imported_browser_identity() {
+        let first = AccountCredentials::import_json(
+            br#"{"account_id":"a","expected_sec_uid":"self","user_agent":"Chrome/151.0","storage_state":{"cookies":[{"name":"sessionid","value":"stable"}],"_bd_ticket":{}}}"#,
+        )
+        .unwrap();
+        let second = AccountCredentials::import_json(
+            br#"{"account_id":"a","expected_sec_uid":"self","user_agent":"Chrome/152.0","storage_state":{"cookies":[{"name":"sessionid","value":"stable"}],"_bd_ticket":{}}}"#,
+        )
+        .unwrap();
+        assert_ne!(first.binding_digest(), second.binding_digest());
+        assert_eq!(first.binding_digest(), first.binding_digest());
     }
     #[test]
     fn cookie_only_bundle_and_partial_update_do_not_carry_old_session_signing_material() {

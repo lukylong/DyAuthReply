@@ -546,13 +546,13 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.28'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.29'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '快捷登录完成并通过身份、租约与接收链路校验后显示账号正常，不再误显示为待检测\n'
-    '补齐作品接口要求的 Rust 原生 x-secsdk-web-signature URL 签名，并对瞬时 HTTP 403 最多进行两次有界退避重试\n'
-    '发送能力仍按真实平台回执独立判定，登录失效、发送封控与仅接收状态保持明确展示',
+    '修复快捷登录凭证与固定 Windows Chrome 151 发送身份混用导致的平台 7911 拒绝\n'
+    '发送链现在统一使用每个账号实际导入的浏览器身份，并自动清除旧指纹产生的历史受限状态\n'
+    '客户端协议拒绝与创作者中心账号状态分开显示，不再误报为账号整体封控',
 )

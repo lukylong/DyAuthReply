@@ -47,6 +47,9 @@
       "nsis"
     ],
     "createUpdaterArtifacts": true,
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "windows": {
       "nsis": {
         "installerHooks": "installer-hooks.nsh"

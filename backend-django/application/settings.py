@@ -546,13 +546,13 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.30'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.31'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '修复快捷登录凭证与固定 Windows Chrome 151 发送身份混用导致的平台 7911 拒绝\n'
-    '发送链现在统一使用每个账号实际导入的浏览器身份，并通过一次性持久迁移清除旧指纹产生的历史受限状态\n'
-    '客户端协议拒绝与创作者中心账号状态分开显示，不再误报为账号整体封控',
+    '修复授权续签异常后账号租约任务退出，账号无需重新登录即可自动恢复收发\n'
+    '修复空闲重启丢失发送能力，以及 WebSocket 重连后未补查断线消息的问题\n'
+    '客户端租约恢复与抖音登录失效分开显示，减少无效的重复快捷登录',
 )

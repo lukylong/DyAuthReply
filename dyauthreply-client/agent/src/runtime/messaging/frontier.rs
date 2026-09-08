@@ -27,8 +27,17 @@ pub struct FrontierStatus {
     pub last_control_kind: Option<i64>,
     pub consecutive_failures: u32,
     pub retry_at_monotonic_ms: u64,
+    #[serde(skip)]
+    reconcile_pending: bool,
 }
 impl FrontierStatus {
+    fn connected(&mut self) {
+        self.connected = true;
+        self.healthy = false;
+        self.connections = self.connections.saturating_add(1);
+        self.last_error = None;
+        self.reconcile_pending = true;
+    }
     fn failed(&mut self, now: u64, reason: String) {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         let delay = 2000u64
@@ -58,6 +67,7 @@ impl ManualService {
             .context("account missing")?;
         let mut owner = slot.frontier.lock().await;
         if owner.as_ref().is_some_and(|o| !o.join.is_finished()) {
+            self.recover_frontier_gap(work).await;
             if let Some(owner) = owner.as_ref() {
                 owner
                     .commands
@@ -179,10 +189,12 @@ impl ManualService {
         let slot = &self.inner.accounts[&work.account_id];
         {
             let mut status = slot.frontier_status.lock().await;
-            status.connected = true;
-            status.connections += 1;
-            status.last_error = None;
+            status.connected();
         }
+        // A healthy new socket says nothing about messages missed while it
+        // was disconnected. Repair via the durable HTTP cursor after connect,
+        // not only before reconnect (which leaves a receive gap).
+        self.recover_frontier_gap(&work).await;
         let result = self
             .receive_frontier(&work, &mut control, &mut commands, &mut socket)
             .await;
@@ -209,6 +221,16 @@ impl ManualService {
             let _ = self.reconcile(work.account_id.to_string()).await;
         }
     }
+    async fn recover_frontier_gap(&self, work: &WorkEnvelope) {
+        let status = &self.inner.accounts[&work.account_id].frontier_status;
+        let pending = status.lock().await.reconcile_pending;
+        if pending && self.reconcile(work.account_id.to_string()).await.is_ok() {
+            status.lock().await.reconcile_pending = false;
+        }
+        // A full queue retains pending=true; the existing central keepalive
+        // retries admission. No extra timers or whole-account scans are added.
+    }
+
     async fn receive_frontier(
         &self,
         work: &WorkEnvelope,
@@ -402,6 +424,19 @@ async fn send(socket: &mut WebSocket, message: Message) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn every_new_socket_requires_gap_reconciliation() {
+        let mut status = FrontierStatus::default();
+        status.connected();
+        assert!(status.reconcile_pending);
+        assert!(!status.healthy);
+        status.reconcile_pending = false;
+        status.healthy = true;
+        status.connected();
+        assert_eq!(status.connections, 2);
+        assert!(status.reconcile_pending);
+        assert!(!status.healthy);
+    }
     #[test]
     fn connection_failures_back_off_without_own_timers_and_cap_at_one_minute() {
         let mut status = FrontierStatus::default();

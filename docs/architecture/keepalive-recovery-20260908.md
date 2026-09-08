@@ -17,6 +17,8 @@ The September 8 investigation found:
 4. A five-minute restore-only expiry of send evidence silently disabled automatic
    replies after idle restarts, unlike uninterrupted operation.
 5. Account cards could display historical sendability while ownership was lost.
+6. Socket reconnect did not enqueue cursor reconciliation, so messages arriving
+   during disconnection could remain absent until a later HTTP scan.
 
 ## Required behavior
 
@@ -38,6 +40,9 @@ The September 8 investigation found:
   Changed credentials, newer explicit rejection and authentication expiry are not
   overwritten by old success.
 - Show lease recovery separately from platform login errors.
+- Every new socket enqueues one account-scoped durable-cursor reconciliation.
+  Failed queue admission remains pending for the existing central keepalive;
+  this must not create extra timers or trigger a scan of all accounts.
 
 ## Release acceptance
 

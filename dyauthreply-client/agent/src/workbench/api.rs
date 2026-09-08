@@ -84,6 +84,12 @@ fn account_view(
         SendCapability::Unknown => ("unknown", "尚未取得本次凭证的发送成功证据"),
     };
     data["credential_state"] = json!(credential);
+    let detail = match state.ownership {
+        crate::state::OwnershipState::Lost | crate::state::OwnershipState::Expired => {
+            "客户端账号租约已失效，等待授权续签与租约恢复；不代表抖音账号登录失效"
+        }
+        _ => detail,
+    };
     data["last_probe_error"] = json!(detail);
     data["status"] = json!(if state.send == SendCapability::AuthExpired {
         2
@@ -387,6 +393,21 @@ mod tests {
                 send == SendCapability::RiskControlled
             );
         }
+    }
+    #[test]
+    fn lease_loss_is_not_reported_as_platform_login_failure() {
+        let state = crate::state::AccountRuntimeState {
+            ownership: OwnershipState::Lost,
+            send: SendCapability::Sendable,
+            ..Default::default()
+        };
+        let value = account_view(json!({}), state, true, "租约已丢失");
+        assert_eq!(value["credential_state"], "sendable");
+        assert!(value["last_probe_error"]
+            .as_str()
+            .unwrap()
+            .contains("等待授权续签"));
+        assert_eq!(value["auto_reply_enabled"], false);
     }
     #[test]
     fn running_actor_with_risk_or_unverified_identity_is_not_auto_ready() {

@@ -90,7 +90,11 @@ pub(super) fn restore(
                 "risk_controlled" => SendCapability::RiskControlled,
                 "receive_only" => SendCapability::ReceiveOnly,
                 "auth_expired" => SendCapability::AuthExpired,
-                "sendable" if at <= now && now - at <= 300_000 => SendCapability::Sendable,
+                // This is historical delivery evidence for the same credentials,
+                // not a five-minute lease. Current verified identity and hosted
+                // ownership independently gate all sends. A restart must not
+                // disable automation only because the account was idle.
+                "sendable" if at > 0 && at <= now => SendCapability::Sendable,
                 _ => SendCapability::Unknown,
             });
         }
@@ -200,6 +204,50 @@ mod tests {
         );
         assert_eq!(
             restore(&c, &lease, "different-account", &a, 400_000).unwrap(),
+            SendCapability::Unknown
+        );
+    }
+
+    #[test]
+    fn same_credential_send_evidence_survives_idle_restart_without_refreshing_age() {
+        let (_dir, store, lease) = fixture();
+        let c = store.lock_connection().unwrap();
+        let digest = "a".repeat(64);
+        restore(&c, &lease, "self", &digest, 1000).unwrap();
+        let observation = SendObservation {
+            canonical_sec_uid: "self",
+            credential_digest: &digest,
+            capability: SendCapability::Sendable,
+        };
+        record(&c, &lease, observation, 1000).unwrap();
+        assert_eq!(
+            restore(&c, &lease, "self", &digest, 3_600_000).unwrap(),
+            SendCapability::Sendable
+        );
+        let at: i64 = c
+            .query_row(
+                "SELECT observed_at_ms FROM account_protocol_state",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(at, 1000);
+        record(
+            &c,
+            &lease,
+            SendObservation {
+                capability: SendCapability::RiskControlled,
+                ..observation
+            },
+            3_600_001,
+        )
+        .unwrap();
+        assert_eq!(
+            restore(&c, &lease, "self", &digest, 7_200_000).unwrap(),
+            SendCapability::RiskControlled
+        );
+        assert_eq!(
+            restore(&c, &lease, "self", &"b".repeat(64), 7_200_000).unwrap(),
             SendCapability::Unknown
         );
     }

@@ -120,18 +120,25 @@ impl NativeLicense {
         }))
     }
     /// # Errors
-    /// Builds private hosted settings only from the currently verified local entitlement.
+    /// Builds dormant recovery settings from a verified activation, including an
+    /// expired lease. Settings grant no rights; fresh server-signed account
+    /// leases are required before the controller can enable any business work.
     pub fn hosted_settings(
         &self,
         accounts: &[crate::credential_store::registry::AccountRecord],
     ) -> Result<Option<crate::runtime::hosted::HostedSettings>> {
-        if self.status()["can_use_business"] != true || accounts.is_empty() {
+        if accounts.is_empty() {
+            return Ok(None);
+        }
+        let status = self.status();
+        if status["can_use_business"] != true && status["state"] != "expired" {
             return Ok(None);
         }
         let current = self
             .cache
             .read()
             .map_err(|_| anyhow::anyhow!("授权状态锁异常"))?;
+        state::verify(&self.config.public_key_pem, &current)?;
         let activation_id = uuid::Uuid::parse_str(string(&current, "activation_id"))?;
         let token = string(&current, "activation_token");
         anyhow::ensure!(!token.is_empty(), "授权凭证缺失");

@@ -187,6 +187,7 @@ impl HostedController {
             next_sync: Instant::now(),
             request_started: Instant::now(),
             failures: 0,
+            awaiting_auth: false,
         };
         let join = tokio::spawn(async move {
             let result = driver.run(ticks, stop_rx).await;
@@ -250,6 +251,7 @@ struct Driver {
     next_sync: Instant,
     request_started: Instant,
     failures: u32,
+    awaiting_auth: bool,
 }
 impl Driver {
     async fn run(
@@ -279,7 +281,10 @@ impl Driver {
                     self.refresh_request_identity()?;
                 }
                 match self.refresh_auth().await {
-                    Ok(_) => {
+                    Ok(false) => {
+                        self.suspend_until_authorization().await?;
+                    }
+                    Ok(true) => {
                         let client = self.client.clone();
                         let request = self.request.clone();
                         self.pending =
@@ -312,12 +317,12 @@ impl Driver {
                         }
                         Err(error) => {
                             self.status.send_modify(|s| s.last_error = Some("hosted_sync_failed"));
-                            // The shared license writer may have rotated the token
-                            // between this request and its response. Retry briefly;
-                            // only a new valid server signature can extend rights.
-                            if matches!(error, ControlError::Http(401)) && self.auth_state_file.is_some() && self.failures < 2 {
-                                self.failures += 1;
-                                self.next_sync = Instant::now() + Duration::from_millis(500);
+                            // Never keep using denied rights. The independent license
+                            // task can renew later; retain this controller and resume
+                            // only when its bound authorization token actually changes.
+                            if matches!(error, ControlError::Http(401 | 403)) && self.auth_state_file.is_some() {
+                                tracing::warn!(%error, "hosted authorization suspended; awaiting license rotation");
+                                self.suspend_until_authorization().await?;
                                 continue;
                             }
                             if !retryable(&error) {
@@ -345,15 +350,49 @@ impl Driver {
 
     async fn refresh_auth(&mut self) -> Result<bool, ControlError> {
         let Some(path) = self.auth_state_file.clone() else {
-            return Ok(false);
+            return Ok(true);
         };
         let auth: AuthSnapshot = tokio::task::spawn_blocking(move || read_auth_snapshot(&path))
             .await
             .map_err(|_| ControlError::Transport)??;
-        auth.validate(self.request.activation_id, &self.authority_url)?;
+        auth.validate_binding(self.request.activation_id, &self.authority_url)?;
         let changed = auth.activation_token != self.request.activation_token;
+        if !matches!(auth.local_state.as_str(), "active" | "grace")
+            || (self.awaiting_auth && !changed)
+        {
+            return Ok(false);
+        }
         self.request.activation_token = auth.activation_token;
-        Ok(changed)
+        self.awaiting_auth = false;
+        Ok(true)
+    }
+
+    async fn suspend_until_authorization(&mut self) -> Result<()> {
+        if !self.awaiting_auth {
+            let releases = if self
+                .request
+                .accounts
+                .iter()
+                .all(|a| a.action == LeaseAction::Release)
+            {
+                self.request.accounts.clone()
+            } else {
+                self.release_operations()?
+            };
+            self.invalidate(OwnershipState::Lost).await?;
+            // The server may still own the retired epoch. Release it after
+            // renewal before reacquiring, otherwise acquire may return that
+            // same epoch which durable fencing correctly refuses to revive.
+            self.advance_request()?;
+            if !releases.is_empty() {
+                self.request.accounts = releases;
+            }
+            self.awaiting_auth = true;
+        }
+        self.status
+            .send_modify(|s| s.last_error = Some("hosted_authorization_pending"));
+        self.next_sync = Instant::now() + Duration::from_secs(2);
+        Ok(())
     }
 
     fn refresh_request_identity(&mut self) -> Result<()> {
@@ -587,9 +626,20 @@ struct AuthSnapshot {
 }
 impl AuthSnapshot {
     fn validate(&self, activation_id: Uuid, authority_url: &str) -> Result<(), ControlError> {
+        self.validate_binding(activation_id, authority_url)?;
+        if !matches!(self.local_state.as_str(), "active" | "grace") {
+            return Err(ControlError::Binding);
+        }
+        Ok(())
+    }
+
+    fn validate_binding(
+        &self,
+        activation_id: Uuid,
+        authority_url: &str,
+    ) -> Result<(), ControlError> {
         if self.activation_id != activation_id
             || self.server_url.trim_end_matches('/') != authority_url
-            || !matches!(self.local_state.as_str(), "active" | "grace")
             || self.activation_token.is_empty()
             || self.activation_token.len() > 512
         {
@@ -720,3 +770,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "hosted_recovery_tests.rs"]
+mod recovery_tests;

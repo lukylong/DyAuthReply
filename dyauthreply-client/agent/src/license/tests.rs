@@ -207,3 +207,47 @@ async fn terminal_runtime_tick_stops_renewal_without_overflow_or_network() {
         .expect("terminal tick must stop scheduler")
         .expect("no arithmetic overflow panic");
 }
+
+#[test]
+fn expired_verified_license_keeps_dormant_recovery_configuration() {
+    let root = tempfile::tempdir().unwrap();
+    let config = LicenseConfig {
+        server_url: "http://127.0.0.1".into(),
+        public_key_pem: public_key(),
+        state_file: root.path().join("state.json"),
+        api_token: "x".repeat(32),
+    };
+    let id = uuid::Uuid::new_v4();
+    let expired = now().unwrap() - 7200;
+    let claims = json!({"iss":"dyauthreply-license","sub":id,"activation_id":id,"license_key_id":"license","device_fingerprint":"device","lease_sequence":1,"iat":expired-1800,"exp":expired,"grace_until":expired+3600,"feature_flags":{"auto_reply":true}});
+    let input = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(br#"{"alg":"EdDSA","typ":"JWT"}"#),
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap())
+    );
+    let signed = format!(
+        "{input}.{}",
+        URL_SAFE_NO_PAD.encode(key().sign(input.as_bytes()).to_bytes())
+    );
+    let value = json!({"server_url":config.server_url,"activation_id":id,"license_key_id":"license","device_fingerprint":"device","activation_token":"old","lease_sequence":1,"lease_token":signed,"local_state":"active"});
+    state::save(&config.state_file, &value).unwrap();
+    let manager = NativeLicense::new(config).unwrap();
+    assert_eq!(manager.status()["can_use_business"], false);
+    assert_eq!(manager.status()["state"], "expired");
+    let accounts = [crate::credential_store::registry::AccountRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        sec_uid: "scope".into(),
+        generation: 1,
+        nickname: "fixture".into(),
+        deleted: false,
+        verified_at_ms: 1,
+    }];
+    let settings = manager.hosted_settings(&accounts).unwrap().unwrap();
+    assert_eq!(settings.activation_id, id);
+    assert!(settings.auth_state_file.is_some());
+    assert_eq!(manager.status()["can_use_business"], false);
+    let mut revoked = value;
+    revoked["local_state"] = json!("revoked");
+    manager.cache(revoked);
+    assert!(manager.hosted_settings(&accounts).unwrap().is_none());
+}

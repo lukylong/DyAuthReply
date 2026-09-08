@@ -3,6 +3,7 @@ import { onBeforeRouteLeave } from 'vue-router';
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { Ellipsis, KeyRound, LoaderCircle, Plus, Search, ShieldCheck, Smartphone, TriangleAlert } from 'lucide-vue-next';
 import AppModal from '../components/AppModal.vue';
+import { hasUnavailableLease } from '../utils/accountLease';
 import AccountProfileDrawer from '../components/AccountProfileDrawer.vue';
 import {
   deleteAccount,
@@ -308,6 +309,7 @@ async function refreshAccounts() {
 }
 
 function accountStatusLabel(acc: DouyinAccount) {
+  if (hasUnavailableLease(acc)) return acc.last_probe_error || '客户端租约恢复中，不代表抖音登录失效';
   if (acc.credential_state === 'receive_only') {
     return isSendRestricted(acc) ? '客户端发送受限（仅接收）' : '仅接收（发送凭证不完整）';
   }
@@ -334,6 +336,7 @@ function isSendRestricted(acc: DouyinAccount) {
 }
 
 function accountCredentialLabel(acc: DouyinAccount) {
+  if (hasUnavailableLease(acc)) return '租约恢复中';
   if (acc.credential_state === 'invalid') return '登录失效';
   if (acc.credential_state === 'receive_only') {
     return isSendRestricted(acc) ? '客户端发送受限（仅接收）' : '仅接收';
@@ -585,15 +588,19 @@ onMounted(async () => {
         <span
           class="credential-badge"
           :class="{
-            success: isAccountHealthy(acc) || acc.credential_state === 'sendable',
-            warning: acc.credential_state === 'receive_only',
+            success: !hasUnavailableLease(acc) && (isAccountHealthy(acc) || acc.credential_state === 'sendable'),
+            warning: hasUnavailableLease(acc) || acc.credential_state === 'receive_only',
             danger: acc.credential_state === 'invalid',
           }"
           :title="accountStatusLabel(acc)"
         >
           {{ accountCredentialLabel(acc) }}
         </span>
-        <p v-if="acc.credential_state === 'receive_only'" class="account-alert risk-alert">
+        <p v-if="hasUnavailableLease(acc)" class="account-alert risk-alert">
+          <TriangleAlert :size="14" />
+          <span>{{ acc.last_probe_error || '等待客户端授权续签与租约恢复，不代表抖音登录失效' }}</span>
+        </p>
+        <p v-else-if="acc.credential_state === 'receive_only'" class="account-alert risk-alert">
           <TriangleAlert :size="14" />
           <span>{{ acc.last_probe_error || '当前仅可接收消息，请更新发送凭证' }}</span>
         </p>

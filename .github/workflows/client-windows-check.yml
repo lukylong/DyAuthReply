@@ -1,0 +1,130 @@
+name: Client Windows Runtime Check
+
+# Runs the native Agent on a real Windows host: the full test suite, protocol
+# parity, a live dy-agent.exe process, and the published installer end to end.
+# No account credentials are used; nothing is published.
+on:
+  workflow_dispatch:
+    inputs:
+      installer_tag:
+        description: 'Release tag whose Windows installer to smoke test'
+        required: false
+        default: 'client-latest'
+  push:
+    branches:
+      - 'windows-check/**'
+
+concurrency:
+  group: client-windows-check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: '1.98.1'
+  DIST_REPO: lukylong/DyAuthReply-dist
+
+jobs:
+  agent-on-windows:
+    name: Native Agent on Windows
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install native transport build prerequisites
+        shell: pwsh
+        run: choco install nasm llvm -y --no-progress
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache Rust Agent dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dyauthreply-client/agent
+
+      - name: Run full Agent test suite on Windows
+        run: cargo test --locked --manifest-path dyauthreply-client/agent/Cargo.toml
+
+      - name: Verify embedded protocol corpus on Windows
+        run: cargo run --release --locked --manifest-path dyauthreply-client/agent/Cargo.toml -- --verify-protocol
+
+      - name: Run deterministic runtime simulation on Windows
+        run: cargo run --release --locked --manifest-path dyauthreply-client/agent/Cargo.toml --bin runtime-sim -- --accounts 100 --events-per-account 2
+
+      - name: Start dy-agent.exe and probe health, lock and port handling
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --release --locked --manifest-path dyauthreply-client/agent/Cargo.toml --bin dy-agent
+          $exe = Resolve-Path 'dyauthreply-client/agent/target/release/dy-agent.exe'
+          $data = Join-Path $env:RUNNER_TEMP 'dy-agent-data'
+          $env:DY_AGENT_DATA_DIR = $data
+          $agent = Start-Process -FilePath $exe -PassThru -RedirectStandardOutput "$data.out" -RedirectStandardError "$data.err"
+          $health = $null
+          for ($i = 0; $i -lt 60 -and -not $health; $i++) {
+            Start-Sleep -Milliseconds 500
+            try { $health = Invoke-RestMethod -Uri 'http://127.0.0.1:18765/health' -TimeoutSec 2 } catch {}
+          }
+          if (-not $health) { Get-Content "$data.err" -Tail 40; throw 'dy-agent.exe never answered /health' }
+          if ($health.service -ne 'dy-agent' -or $health.runtime.phase -ne 'running') { throw "unexpected health: $($health | ConvertTo-Json -Depth 3)" }
+          if (-not $health.protocol_parity_all_verified) { throw 'protocol parity not verified at runtime' }
+          Write-Output "HEALTH_OK phase=$($health.runtime.phase) storage_integrity=$($health.storage.database_integrity_verified)"
+          # A second instance on the same data dir must refuse to start.
+          $second = Start-Process -FilePath $exe -PassThru -Wait -RedirectStandardOutput "$data.2.out" -RedirectStandardError "$data.2.err"
+          if ($second.ExitCode -eq 0) { throw 'second Agent instance started on a locked data directory' }
+          Write-Output "SECOND_INSTANCE_REJECTED exit=$($second.ExitCode)"
+          # A different data dir while the port is taken must fail cleanly, not hang.
+          $env:DY_AGENT_DATA_DIR = "$data-other"
+          $third = Start-Process -FilePath $exe -PassThru -RedirectStandardOutput "$data.3.out" -RedirectStandardError "$data.3.err"
+          if (-not $third.WaitForExit(20000)) { Stop-Process -Id $third.Id -Force; throw 'Agent hung when port 18765 was occupied' }
+          if ($third.ExitCode -eq 0) { throw 'Agent reported success without binding its port' }
+          Write-Output "PORT_CONFLICT_REPORTED exit=$($third.ExitCode)"
+          Stop-Process -Id $agent.Id
+          $agent.WaitForExit(10000) | Out-Null
+          $files = Get-ChildItem $data -Name
+          Write-Output "DATA_DIR_FILES=$($files -join ',')"
+          Write-Output 'WINDOWS_AGENT_RUNTIME_PASS=1'
+
+  installer-on-windows:
+    name: Published installer on Windows
+    runs-on: windows-latest
+    steps:
+      - name: Install, launch and probe the published Windows build
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.installer_tag || 'client-latest' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $work = Join-Path $env:RUNNER_TEMP 'installer'
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          gh release download $env:TAG --repo $env:DIST_REPO --pattern 'DAssistant-windows-x64-setup.exe' --dir $work
+          $installer = Join-Path $work 'DAssistant-windows-x64-setup.exe'
+          $installDir = Join-Path $env:RUNNER_TEMP 'dassistant'
+          $p = Start-Process -FilePath $installer -ArgumentList @('/S', "/D=$installDir") -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "NSIS install failed: $($p.ExitCode)" }
+          $app = Join-Path $installDir 'dyauthreply.exe'
+          if (-not (Test-Path $app)) { throw 'dyauthreply.exe missing after install' }
+          Write-Output "INSTALLED_VERSION=$((Get-Item $app).VersionInfo.ProductVersion)"
+          $shell = Start-Process -FilePath $app -PassThru
+          $health = $null
+          for ($i = 0; $i -lt 90 -and -not $health; $i++) {
+            Start-Sleep -Seconds 1
+            try { $health = Invoke-RestMethod -Uri 'http://127.0.0.1:18765/health' -TimeoutSec 2 } catch {}
+          }
+          $agents = Get-Process -Name 'dy-agent' -ErrorAction SilentlyContinue
+          Write-Output "SIDECAR_PROCESSES=$(@($agents).Count)"
+          $root = Join-Path $env:APPDATA 'DyAuthReply'
+          if (Test-Path $root) { Write-Output "APPDATA_ENTRIES=$((Get-ChildItem $root -Name) -join ',')" }
+          $log = Join-Path $root 'logs/native-agent.log'
+          if (Test-Path $log) { Get-Content $log -Tail 20 }
+          if (-not $health) { throw 'installed desktop app did not bring up the native Agent' }
+          if ($health.runtime.phase -ne 'running') { throw "unexpected sidecar phase $($health.runtime.phase)" }
+          Write-Output "INSTALLED_HEALTH_OK service=$($health.service) phase=$($health.runtime.phase)"
+          Stop-Process -Id $shell.Id -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 3
+          $left = Get-Process -Name 'dy-agent' -ErrorAction SilentlyContinue
+          Write-Output "SIDECAR_AFTER_SHELL_KILL=$(@($left).Count)"
+          Write-Output 'WINDOWS_INSTALLER_RUNTIME_PASS=1'

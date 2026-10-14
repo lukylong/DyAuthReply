@@ -1,11 +1,11 @@
-use super::component::{
-    self, file_digest, safe_relative, valid_digest, valid_version, Manifest, ResolvedComponent,
-    CAPTURE_CONTRACT,
+use super::{
+    component::{
+        self, file_digest, safe_relative, valid_digest, Manifest, ResolvedComponent,
+        CAPTURE_CONTRACT,
+    },
+    sources,
 };
 use anyhow::{Context, Result};
-use futures_util::StreamExt;
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fs::File,
@@ -13,44 +13,11 @@ use std::{
     path::{Component, Path},
     sync::Arc,
 };
-use tokio::io::AsyncWriteExt;
 
-const CATALOG_URL: &str =
-    "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
-const MAX_CATALOG_BYTES: usize = 512 * 1024;
-const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_UNPACKED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 30_000;
 
 pub type Progress = Arc<dyn Fn(u64, u64) + Send + Sync>;
-
-#[derive(Deserialize)]
-struct Catalog {
-    channels: Channels,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct Channels {
-    stable: Channel,
-}
-
-#[derive(Deserialize)]
-struct Channel {
-    version: String,
-    downloads: Downloads,
-}
-
-#[derive(Deserialize)]
-struct Downloads {
-    chrome: Vec<Download>,
-}
-
-#[derive(Deserialize)]
-struct Download {
-    platform: String,
-    url: String,
-}
 
 struct InstallSpec {
     version: String,
@@ -58,11 +25,17 @@ struct InstallSpec {
     executable_inside: &'static str,
 }
 
-/// Downloads and atomically selects the current stable managed authorization browser.
+/// Downloads (mirror first) and atomically selects the browser version pinned in this client.
 /// # Errors
-/// Rejects untrusted catalogs/URLs, oversized archives, unsafe entries and failed publication.
+/// Rejects unverified archives, unsafe entries and failed publication.
 pub async fn install_latest(root: &Path, progress: Progress) -> Result<ResolvedComponent> {
-    let spec = catalog_spec().await?;
+    let (platform, executable_inside) = platform_contract()?;
+    let pinned = sources::pinned(platform)?;
+    let mut spec = InstallSpec {
+        version: pinned.version.clone(),
+        url: String::new(),
+        executable_inside,
+    };
     if let Ok(current) = component::resolve(root) {
         if current.view.source == "managed" && current.view.version == spec.version {
             progress(1, 1);
@@ -76,7 +49,8 @@ pub async fn install_latest(root: &Path, progress: Progress) -> Result<ResolvedC
     create_private_dir(&stage)?;
     let archive = stage.join("browser.zip");
     let result = async {
-        let archive_sha256 = download(&spec.url, &archive, progress).await?;
+        spec.url = sources::download_verified(&pinned, &archive, progress).await?;
+        let archive_sha256 = pinned.archive.sha256.to_ascii_lowercase();
         let root = root.to_owned();
         let publish_stage = stage.clone();
         let publish_archive = archive.clone();
@@ -132,43 +106,6 @@ pub fn rollback(root: &Path) -> Result<ResolvedComponent> {
     Ok(resolved)
 }
 
-async fn catalog_spec() -> Result<InstallSpec> {
-    let response = wreq::Client::builder()
-        .redirect(wreq::redirect::Policy::none())
-        .retry(wreq::retry::Policy::never())
-        .timeout(std::time::Duration::from_secs(20))
-        .build()?
-        .get(CATALOG_URL)
-        .send()
-        .await?;
-    anyhow::ensure!(response.status().is_success(), "快捷登录组件目录获取失败");
-    let bytes = response.bytes().await?;
-    anyhow::ensure!(
-        !bytes.is_empty() && bytes.len() <= MAX_CATALOG_BYTES,
-        "快捷登录组件目录无效"
-    );
-    let catalog: Catalog = serde_json::from_slice(&bytes)?;
-    anyhow::ensure!(
-        valid_version(&catalog.channels.stable.version),
-        "快捷登录组件版本无效"
-    );
-    let (platform, executable_inside) = platform_contract()?;
-    let item = catalog
-        .channels
-        .stable
-        .downloads
-        .chrome
-        .into_iter()
-        .find(|item| item.platform == platform)
-        .context("快捷登录组件不支持当前系统")?;
-    validate_download_url(&item.url, &catalog.channels.stable.version, platform)?;
-    Ok(InstallSpec {
-        version: catalog.channels.stable.version,
-        url: item.url,
-        executable_inside,
-    })
-}
-
 fn platform_contract() -> Result<(&'static str, &'static str)> {
     match component::target() {
         "aarch64-apple-darwin" => Ok((
@@ -182,56 +119,6 @@ fn platform_contract() -> Result<(&'static str, &'static str)> {
         "x86_64-pc-windows-msvc" => Ok(("win64", "chrome-win64/chrome.exe")),
         _ => anyhow::bail!("快捷登录组件不支持当前系统"),
     }
-}
-
-fn validate_download_url(raw: &str, version: &str, platform: &str) -> Result<()> {
-    let uri: wreq::Uri = raw.parse()?;
-    let expected = format!("/chrome-for-testing-public/{version}/{platform}/chrome-{platform}.zip");
-    anyhow::ensure!(
-        uri.scheme_str() == Some("https")
-            && uri.host() == Some("storage.googleapis.com")
-            && uri.path() == expected
-            && uri.query().is_none(),
-        "快捷登录组件下载地址无效"
-    );
-    Ok(())
-}
-
-async fn download(raw: &str, output: &Path, progress: Progress) -> Result<String> {
-    let response = wreq::Client::builder()
-        .redirect(wreq::redirect::Policy::none())
-        .retry(wreq::retry::Policy::never())
-        .timeout(std::time::Duration::from_secs(600))
-        .build()?
-        .get(raw)
-        .send()
-        .await?;
-    anyhow::ensure!(response.status().is_success(), "快捷登录组件下载失败");
-    let total = response.content_length().unwrap_or(0);
-    anyhow::ensure!(
-        total == 0 || total <= MAX_ARCHIVE_BYTES,
-        "快捷登录组件安装包过大"
-    );
-    let mut file = tokio::fs::File::create(output).await?;
-    let mut stream = response.bytes_stream();
-    let mut digest = Sha256::new();
-    let mut downloaded = 0_u64;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        downloaded = downloaded
-            .checked_add(u64::try_from(chunk.len())?)
-            .context("快捷登录组件大小溢出")?;
-        anyhow::ensure!(downloaded <= MAX_ARCHIVE_BYTES, "快捷登录组件安装包过大");
-        digest.update(&chunk);
-        file.write_all(&chunk).await?;
-        progress(downloaded, total);
-    }
-    anyhow::ensure!(downloaded > 1024 * 1024, "快捷登录组件安装包不完整");
-    if total > 0 {
-        anyhow::ensure!(downloaded == total, "快捷登录组件下载不完整");
-    }
-    file.sync_all().await?;
-    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn publish(
@@ -468,24 +355,34 @@ mod tests {
     use super::*;
     use zip::write::SimpleFileOptions;
 
-    #[test]
-    fn catalog_urls_are_exactly_scoped_to_version_and_platform() {
-        assert!(validate_download_url(
-            "https://storage.googleapis.com/chrome-for-testing-public/152.0.1/mac-arm64/chrome-mac-arm64.zip",
-            "152.0.1",
-            "mac-arm64"
+    /// Live check of the real mirror-first download path (≈200 MB). Run with
+    /// `cargo test --lib live_pinned_component_installs -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "downloads the real pinned browser archive"]
+    async fn live_pinned_component_installs_from_mirror_and_resolves() {
+        let root = tempfile::tempdir().unwrap();
+        let started = std::time::Instant::now();
+        let resolved = install_latest(root.path(), Arc::new(|_, _| {}))
+            .await
+            .unwrap();
+        let manifest: Manifest = serde_json::from_slice(
+            &std::fs::read(root.path().join("components/chromium/current.json")).unwrap(),
         )
-        .is_ok());
-        assert!(
-            validate_download_url("https://example.com/chrome.zip", "152.0.1", "mac-arm64")
-                .is_err()
+        .unwrap();
+        println!(
+            "installed {} from {} in {:?}",
+            resolved.view.version,
+            manifest.source_url,
+            started.elapsed()
         );
-        assert!(validate_download_url(
-            "https://storage.googleapis.com/chrome-for-testing-public/other/mac-arm64/chrome-mac-arm64.zip",
-            "152.0.1",
-            "mac-arm64"
-        )
-        .is_err());
+        assert!(manifest
+            .source_url
+            .starts_with("https://cdn.npmmirror.com/"));
+        assert!(resolved.executable.is_file());
+        let again = install_latest(root.path(), Arc::new(|_, _| {}))
+            .await
+            .unwrap();
+        assert_eq!(again.view.version, resolved.view.version);
     }
 
     #[test]

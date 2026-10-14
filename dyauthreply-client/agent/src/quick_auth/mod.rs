@@ -3,6 +3,7 @@ pub mod api;
 mod cdp;
 mod component;
 mod installer;
+mod sources;
 
 use crate::onboarding::Importer;
 use anyhow::{Context, Result};

@@ -13,6 +13,8 @@ pub enum Eligibility {
     IgnoreHistory,
     IgnoreExpired,
     IgnoreSystem,
+    IgnoreNonDirect,
+    IgnoreEmpty,
     DeferIdentity,
     DeferTimestamp,
     DeferContent,
@@ -22,7 +24,20 @@ impl Eligibility {
     pub const fn is_terminal_ignore(self) -> bool {
         matches!(
             self,
-            Self::IgnoreSelf | Self::IgnoreHistory | Self::IgnoreExpired | Self::IgnoreSystem
+            Self::IgnoreSelf
+                | Self::IgnoreHistory
+                | Self::IgnoreExpired
+                | Self::IgnoreSystem
+                | Self::IgnoreNonDirect
+                | Self::IgnoreEmpty
+        )
+    }
+    /// Packets that are never conversation messages: consumed without a reply-log audit.
+    #[must_use]
+    pub const fn is_silent(self) -> bool {
+        matches!(
+            self,
+            Self::IgnoreSystem | Self::IgnoreNonDirect | Self::IgnoreEmpty
         )
     }
 }
@@ -41,6 +56,13 @@ pub fn eligibility(
     // sender; judging identity first left them deferred forever in the spool.
     if content.is_some_and(|c| c.contains_key("read_index") || c.contains_key("command_type")) {
         return Eligibility::IgnoreSystem;
+    }
+    // Only single chats (type 1, `0:1:uid:uid`) are auto-reply targets; groups arrive as type 2.
+    if event.message_type != 1 {
+        return Eligibility::IgnoreNonDirect;
+    }
+    if event.content_json.trim().is_empty() && event.text.is_none() {
+        return Eligibility::IgnoreEmpty;
     }
     if event.version != 1
         || own_sec_uid.is_empty()
@@ -75,10 +97,7 @@ pub fn eligibility(
     let text = content.get("text").and_then(serde_json::Value::as_str);
     // Rich-media/default trigger parity is a separate rule-engine gate. Preserve
     // those receipts pending rather than silently treating media as no-match.
-    if event.message_type != 1
-        || text.is_none_or(|s| s.trim().is_empty() || s.len() > 4096)
-        || text != event.text.as_deref()
-    {
+    if text.is_none_or(|s| s.trim().is_empty() || s.len() > 4096) || text != event.text.as_deref() {
         return Eligibility::DeferContent;
     }
     Eligibility::Candidate
@@ -134,7 +153,7 @@ mod tests {
         e.message_type = 7;
         assert_eq!(
             eligibility(&e, "self", START, START + 1),
-            Eligibility::DeferContent
+            Eligibility::IgnoreNonDirect
         );
         e.message_type = 1;
         e.content_json = r#"{"text":"hello","command_type":1}"#.into();
@@ -212,6 +231,36 @@ mod tests {
             eligibility(&e, "", START, START + 1),
             Eligibility::IgnoreSystem
         );
+    }
+    #[test]
+    fn group_and_empty_packets_are_silent_terminal_ignores() {
+        let mut e = event();
+        e.message_type = 2;
+        assert_eq!(
+            eligibility(&e, "self", START, START + 1),
+            Eligibility::IgnoreNonDirect
+        );
+        e = event();
+        e.text = None;
+        e.content_json = String::new();
+        assert_eq!(
+            eligibility(&e, "self", START, START + 1),
+            Eligibility::IgnoreEmpty
+        );
+        e.content_json = "  ".into();
+        assert_eq!(
+            eligibility(&e, "self", START, START + 1),
+            Eligibility::IgnoreEmpty
+        );
+        for silent in [
+            Eligibility::IgnoreSystem,
+            Eligibility::IgnoreNonDirect,
+            Eligibility::IgnoreEmpty,
+        ] {
+            assert!(silent.is_terminal_ignore() && silent.is_silent());
+        }
+        assert!(!Eligibility::IgnoreExpired.is_silent());
+        assert!(!Eligibility::DeferContent.is_silent());
     }
     #[test]
     fn deferred_receipts_expire_once_older_than_the_reply_window() {

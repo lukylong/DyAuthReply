@@ -220,8 +220,8 @@ enum Planned {
 impl PlanPass<'_> {
     /// Terminal non-candidates are consumed; deferrals stay pending until they expire.
     fn settle_ineligible(&self, receipt: &InboundReceipt, decision: Eligibility) -> Result<()> {
-        if decision == Eligibility::IgnoreSystem {
-            // Control packets are not conversation messages; keep them out of the reply log.
+        if decision.is_silent() {
+            // Control/group/empty packets are not direct messages; keep them out of the reply log.
             self.store.consume_inbound(self.lease, key(receipt), None)?;
         } else if decision.is_terminal_ignore() {
             self.store.consume_inbound_audited(
@@ -593,5 +593,60 @@ mod tests {
                 usize::from(mode == "unknown_nickname")
             );
         }
+    }
+
+    #[test]
+    fn non_message_packets_are_consumed_without_reply_log_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CoreStore::open(dir.path()).unwrap();
+        store.enable_audit_journal().unwrap();
+        let now = crate::workbench::now_ms();
+        let lease = store
+            .install_verified_account_lease("account", "i", "b", 1, now + 60000)
+            .unwrap()
+            .token();
+        let fresh = (now - 1000) * 1000;
+        let row = |id: &str, sender_uid: &str, kind: u64, content: &str, at: i64| {
+            let event = serde_json::json!({"version":1,"server_message_id":id,"conversation_id":"c",
+                "conversation_short_id":"456","sender_uid":sender_uid,"sender_sec_uid":"peer",
+                "client_message_id":"","message_type":kind,"create_time_us":at,
+                "content_json":content,"text":null});
+            let payload = serde_json::to_vec(&event).unwrap();
+            crate::store::InboundReceiptDraft {
+                event_id: id.into(),
+                payload_hash: format!("{:x}", Sha256::digest(&payload)),
+                payload,
+            }
+        };
+        let drafts = [
+            row("11", "", 1, r#"{"command_type":1}"#, fresh),
+            row("12", "42", 2, r#"{"text":"group"}"#, fresh),
+            row("13", "42", 1, "", fresh),
+            // A genuine direct message that expired keeps its "skipped" audit.
+            row("14", "42", 1, r#"{"text":"late"}"#, (now - 600_000) * 1000),
+        ];
+        store
+            .record_inbound_page(&lease, "s", 1, 1, &drafts)
+            .unwrap();
+        let engine = RuleEngine::from_json(br#"{"version":1,"revision":2,"timezone":"Asia/Shanghai","rules":[{"id":"r","match_type":"default","reply_text":"reply"}]}"#).unwrap();
+        let mut policy = policy();
+        policy.silent_start = None;
+        policy.silent_end = None;
+        let pass = PlanPass {
+            workbench: None,
+            store: &store,
+            lease: &lease,
+            policy: &policy,
+            engine: &engine,
+            own: "self",
+            cutoff: u64::try_from(now - 3_600_000).unwrap() * 1000,
+            now,
+        };
+        assert!(pass.run().unwrap().is_empty());
+        assert!(store
+            .pending_inbound_receipts(&lease, 128)
+            .unwrap()
+            .is_empty());
+        assert_eq!(store.audit_changes(0, 100).unwrap().records.len(), 1);
     }
 }

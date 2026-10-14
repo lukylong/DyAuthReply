@@ -17,12 +17,14 @@ pub struct Described {
     pub content: String,
 }
 
-/// Returns `None` for control packets that are not visible conversation messages.
+/// Returns `None` for control packets and content-less pushes, which are not
+/// visible conversation messages.
 #[must_use]
 pub fn describe(content_json: &str, decoded_text: Option<&str>) -> Option<Described> {
     let parsed = serde_json::from_str::<Value>(content_json).ok();
     let Some(obj) = parsed.as_ref().and_then(Value::as_object) else {
-        return Some(fallback(decoded_text));
+        let text = decoded_text.filter(|t| !t.trim().is_empty())?;
+        return Some(labelled("text", text.to_owned()));
     };
     if obj.contains_key("read_index") || obj.contains_key("command_type") {
         return None;
@@ -234,9 +236,9 @@ mod tests {
             describe("not json", Some("hi")).unwrap(),
             labelled("text", "hi".into())
         );
-        assert_eq!(
-            describe("[]", None).unwrap(),
-            labelled("other", "[暂不支持的消息类型]".into())
-        );
+        // Content-less pushes (e.g. the platform's follow-up after a link) are not messages.
+        assert_eq!(describe("[]", None), None);
+        assert_eq!(describe("", None), None);
+        assert_eq!(describe("  ", None), None);
     }
 }

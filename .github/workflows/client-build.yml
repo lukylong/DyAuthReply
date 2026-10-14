@@ -530,9 +530,32 @@ jobs:
           print(f"UPDATER_MANIFESTS_COMPLETE={len(files)}")
           PY
 
+          # In-app release notes for the self-hosted download site, taken from the same
+          # settings.py default the backend falls back to. Uploaded BEFORE latest.json:
+          # the server publishes a version as soon as it sees it in latest.json.
+          python3 - <<'PY'
+          import ast
+          import json
+          from pathlib import Path
+          tree = ast.parse(Path("backend-django/application/settings.py").read_text(encoding="utf-8"))
+          notes = None
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "DOWNLOAD_RELEASE_NOTES" for t in node.targets):
+                  call = node.value
+                  if isinstance(call, ast.Call) and len(call.args) == 2 and isinstance(call.args[1], ast.Constant):
+                      notes = call.args[1].value
+          if not notes:
+              raise SystemExit("DOWNLOAD_RELEASE_NOTES default not found in settings.py")
+          version = "${{ github.ref_name }}".removeprefix("client-v")
+          Path("dist-manifests/client-release.json").write_text(
+              json.dumps({"version": version, "notes": notes}, ensure_ascii=False), encoding="utf-8")
+          print(f"CLIENT_RELEASE_NOTES={version}")
+          PY
+
           ls -la dist-manifests/
+          gh release upload client-latest dist-manifests/client-release.json --repo "$DIST_REPO" --clobber
           gh release upload client-latest dist-manifests/latest*.json --repo "$DIST_REPO" --clobber
-          echo "已发布 latest.json 多镜像变体到 $DIST_REPO (client-latest)"
+          echo "已发布 client-release.json 与 latest.json 多镜像变体到 $DIST_REPO (client-latest)"
 
       - name: Publish versioned release after every promotion gate
         shell: bash

@@ -20,6 +20,16 @@ class CoreConfig(AppConfig):
 
     def ready(self):
         """应用初始化时执行"""
-        # 导入信号处理器（如果有）
-        # import core.signals
-        pass
+        import os
+
+        from django.conf import settings
+
+        # 自托管下载：Web 进程后台轮询新版本，先同步安装包再发布版本号（见 download_sync）。
+        if (
+            os.environ.get("ROLE") == "web"
+            and settings.DOWNLOAD_PUBLIC_BASE_URL
+            and os.environ.get("DOWNLOAD_AUTO_SYNC", "true").lower() != "false"
+        ):
+            from core.license.download_sync import start_background
+
+            start_background()

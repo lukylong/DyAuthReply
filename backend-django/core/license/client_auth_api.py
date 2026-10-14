@@ -5,6 +5,8 @@ from django.conf import settings
 from ninja import File, Form, Router
 from ninja.files import UploadedFile
 
+from core.license.diagnostic_schema import DiagnosticIngestIn, DiagnosticIngestOut
+
 from core.license.license_schema import (
     ClientAuthActivateIn,
     ClientAuthStateOut,
@@ -102,6 +104,17 @@ def deactivate(request, data: ClientAuthDeactivateIn):
         reason=(data.reason or "").strip(),
         ip=get_client_ip(request),
     )
+
+
+# ---- 客户端运行诊断（客户端设置中手动开启，默认关闭）----
+
+@router.post("/telemetry/ingest", response=DiagnosticIngestOut, auth=None, summary="客户端运行诊断上报")
+def telemetry_ingest(request, data: DiagnosticIngestIn):
+    """开启「上报运行诊断」的客户端定期上报脱敏后的运行快照与告警事件。复用 activation 鉴权。"""
+    from core.license.diagnostic_service import ingest
+
+    activation = get_activation_by_token(data.activation_id, data.activation_token)
+    return ingest(activation, data)
 
 
 # ---- 客户端卡片同步（客户端为真源，推送到公网托管落地页/封面）----

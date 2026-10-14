@@ -178,6 +178,18 @@ class SchedulerService:
         )
         logger.info("定期清理任务已启动（每天凌晨3点）")
 
+        from scheduler.tasks import purge_client_diagnostics
+
+        self._scheduler.add_job(
+            func=purge_client_diagnostics,
+            trigger=CronTrigger(hour=3, minute=20),
+            id='_client_diagnostics_purge',
+            name='清理过期客户端诊断事件',
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
+        )
+
     def enable_job_sync(self, interval_seconds: int = 60):
         """
         启用定期同步任务（可选功能）

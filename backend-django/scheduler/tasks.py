@@ -168,6 +168,22 @@ def cleanup_old_logs():
         return {"success": False, "error": error_msg}
 
 
+def purge_client_diagnostics():
+    """
+    清理过期的客户端运行诊断事件（保留 30 天）。
+    调度器以系统任务自动注册，每天凌晨 3:20 执行，无需手动配置。
+    """
+    from core.license.diagnostic_service import purge_expired
+
+    try:
+        deleted = purge_expired()
+        logger.info(f"清理过期客户端诊断事件 {deleted} 条")
+        return {"success": True, "deleted_count": deleted}
+    except Exception as e:
+        logger.error(f"清理客户端诊断事件失败: {str(e)}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
 # =============================================================================
 # 抖音托管相关定时任务
 # =============================================================================

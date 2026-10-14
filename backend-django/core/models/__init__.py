@@ -42,6 +42,7 @@ from core.license.license_model import (
     AgentAccountLease,
     AgentSyncState,
 )
+from core.license.diagnostic_model import ClientDiagnosticState, ClientDiagnosticEvent
 from core.page_manager.page_model import PageMeta
 from core.social.blacklist_model import Blacklist
 from core.social.quick_reply_model import QuickReply

@@ -46,6 +46,10 @@ pub fn router(service: Arc<ManualService>, db: Arc<Workbench>, token: String) ->
             get(messages).options(options),
         )
         .route(
+            "/api/client/v1/douyin/account/{account}/conversation/{conversation}/message/{message}/image",
+            get(message_image).options(options),
+        )
+        .route(
             "/api/client/v1/douyin/account/{account}/conversation/{conversation}/refresh-user",
             post(refresh_peer).options(options),
         )
@@ -259,6 +263,39 @@ async fn messages(
     match tokio::task::spawn_blocking(move || app.db.messages(&account, &conversation)).await {
         Ok(Ok(v)) => Json(v).into_response(),
         _ => error(StatusCode::NOT_FOUND, "会话不存在或消息读取失败"),
+    }
+}
+/// Decrypts one encrypted chat image (album photo or video poster) for display.
+async fn message_image(
+    State(app): State<App>,
+    Path((account, conversation, message)): Path<(String, String, String)>,
+) -> Response {
+    if !app.service.has_account(&account) {
+        return error(StatusCode::NOT_FOUND, "账号未托管");
+    }
+    let db = app.db.clone();
+    let source = match tokio::task::spawn_blocking(move || {
+        db.media_source(&account, &conversation, &message)
+    })
+    .await
+    {
+        Ok(Ok(Some(source))) => source,
+        Ok(Ok(None)) => return error(StatusCode::NOT_FOUND, "该消息没有可解密的图片"),
+        _ => return error(StatusCode::NOT_FOUND, "会话或消息不存在"),
+    };
+    match super::media::fetch_decrypted(&source).await {
+        Ok((bytes, content_type)) => (
+            [
+                (axum::http::header::CONTENT_TYPE, content_type),
+                (axum::http::header::CACHE_CONTROL, "private, max-age=86400"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(error_message) => {
+            tracing::warn!(error = %error_message, "encrypted chat image unavailable");
+            error(StatusCode::BAD_GATEWAY, "图片获取或解密失败")
+        }
     }
 }
 async fn refresh_peer(

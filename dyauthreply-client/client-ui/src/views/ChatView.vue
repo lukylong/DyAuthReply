@@ -6,7 +6,7 @@ import {
   listAccounts,
   listConversations,
   listMessages,
-  messageImageUrl,
+  fetchMessageImage,
   refreshConversationUser,
   sendManualReply,
   type ConversationItem,
@@ -167,19 +167,45 @@ function inlineDataUri(msg: MessageItem): string {
   return '';
 }
 
-// 加密图片/视频封面走后端解密代理；表情等公开资源用直链
-function proxyImageUrl(msg: MessageItem): string {
-  if (!activeAccountId.value || !activeConversationId.value) return '';
-  return messageImageUrl(activeAccountId.value, activeConversationId.value, msg.id);
+// 加密图片/视频封面：由本地服务下载并解密后转成 blob 地址显示；解密完成前先用内嵌预览图。
+// 表情、分享视频封面等公开资源直接用直链。
+const decryptedMedia = ref<Record<string, string>>({});
+const decryptingMedia = new Set<string>();
+
+async function loadEncryptedMedia(items: MessageItem[]) {
+  const accountId = activeAccountId.value;
+  const conversationId = activeConversationId.value;
+  if (!accountId || !conversationId) return;
+  for (const msg of items) {
+    if (!msg.media?.encrypted || decryptedMedia.value[msg.id] || decryptingMedia.has(msg.id)
+      || brokenMedia.value[msg.id]) continue;
+    decryptingMedia.add(msg.id);
+    try {
+      const blob = await fetchMessageImage(accountId, conversationId, msg.id);
+      if (accountId !== activeAccountId.value || conversationId !== activeConversationId.value) return;
+      decryptedMedia.value[msg.id] = URL.createObjectURL(blob);
+    } catch {
+      // 无法解密时保留内嵌预览图；连预览图都没有则回退占位
+      if (!inlineDataUri(msg)) brokenMedia.value[msg.id] = true;
+    } finally {
+      decryptingMedia.delete(msg.id);
+    }
+  }
+}
+
+function releaseDecryptedMedia() {
+  for (const url of Object.values(decryptedMedia.value)) URL.revokeObjectURL(url);
+  decryptedMedia.value = {};
+  decryptingMedia.clear();
 }
 
 function imageSrc(msg: MessageItem): string {
-  if (msg.media?.encrypted) return proxyImageUrl(msg);
+  if (msg.media?.encrypted) return decryptedMedia.value[msg.id] || inlineDataUri(msg);
   return inlineDataUri(msg) || msg.media?.url || msg.media?.cover_url || '';
 }
 
 function videoCover(msg: MessageItem): string {
-  if (msg.media?.encrypted) return proxyImageUrl(msg);
+  if (msg.media?.encrypted) return decryptedMedia.value[msg.id] || inlineDataUri(msg);
   return inlineDataUri(msg) || msg.media?.cover_url || msg.media?.url || '';
 }
 
@@ -598,6 +624,7 @@ async function loadMessages(silent = false, force = false) {
       msgSig = sig;
       messages.value = items;
       reconcilePending(items);
+      void loadEncryptedMedia(items);
       if (shouldScroll) {
         stickToBottom.value = true;
         await scrollMessagesToBottom();
@@ -792,6 +819,7 @@ watch(activeAccountId, () => {
 
 watch(activeConversationId, () => {
   msgSig = '';
+  releaseDecryptedMedia();
   loadMessages();
   subscribeRealtime();
 });
@@ -813,6 +841,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  releaseDecryptedMedia();
   stopPolling();
   unsubscribeRealtime?.();
   unsubscribeRealtime = null;

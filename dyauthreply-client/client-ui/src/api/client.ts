@@ -719,6 +719,23 @@ export function messageImageUrl(
   return `${API_PREFIX}/douyin/account/${accountId}/conversation/${conversationId}/message/${messageId}/image`;
 }
 
+/** 加密图片/视频封面：本地服务解密后的图片字节。本地接口需要鉴权，<img> 无法直连，故取回为 Blob。 */
+export async function fetchMessageImage(
+  accountId: string,
+  conversationId: string,
+  messageId: string,
+): Promise<Blob> {
+  const path = `/douyin/account/${encodeURIComponent(accountId)}/conversation/${encodeURIComponent(conversationId)}/message/${encodeURIComponent(messageId)}/image`;
+  if (isTauriRuntime()) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const bytes = await invoke<ArrayBuffer>('native_request_image', { path: `/api/client/v1${path}` });
+    return new Blob([bytes]);
+  }
+  const res = await fetch(`${API_PREFIX}${path}`);
+  if (!res.ok) throw new Error(await parseError(res));
+  return res.blob();
+}
+
 export function refreshConversationUser(accountId: string, conversationId: string) {
   return request<{ success: boolean; message?: string }>(
     `/douyin/account/${accountId}/conversation/${conversationId}/refresh-user`,

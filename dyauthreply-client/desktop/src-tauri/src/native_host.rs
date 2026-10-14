@@ -297,6 +297,33 @@ impl NativeHost {
             .map_err(|_| "本地服务返回格式错误")?;
         Ok(NativeResponse { status, body })
     }
+    /// Binary GET for chat image bytes only; JSON requests keep using [`Self::request`].
+    pub async fn request_image(&self, path: String) -> Result<Vec<u8>, String> {
+        let url = ipc_url(&path)?;
+        let segments: Vec<&str> = url.path().split('/').collect();
+        // /api/client/v1/douyin/account/{a}/conversation/{c}/message/{m}/image
+        if segments.len() != 12
+            || segments[4..6] != ["douyin", "account"]
+            || segments[7] != "conversation"
+            || segments[9] != "message"
+            || segments[11] != "image"
+            || url.query().is_some()
+        {
+            return Err("请求路径未开放".into());
+        }
+        let auth = self.connection().await?;
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(auth.token)
+            .send()
+            .await
+            .map_err(|_| "本地服务请求失败，请检查连接")?;
+        if !response.status().is_success() {
+            return Err("图片获取或解密失败".into());
+        }
+        bounded_body(response, 20 * 1024 * 1024).await
+    }
     pub async fn reload_configuration(&self) -> Result<(), String> {
         if self.status().await.owned {
             return self.restart().await;

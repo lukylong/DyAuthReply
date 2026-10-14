@@ -35,6 +35,15 @@ pub async fn native_request(
     host.request(path, method, body, admin_token).await
 }
 #[tauri::command]
+pub async fn native_request_image(
+    window: WebviewWindow,
+    host: State<'_, Arc<NativeHost>>,
+    path: String,
+) -> Result<tauri::ipc::Response, String> {
+    require_local(&window)?;
+    Ok(tauri::ipc::Response::new(host.request_image(path).await?))
+}
+#[tauri::command]
 pub async fn native_restart(
     window: WebviewWindow,
     host: State<'_, Arc<NativeHost>>,

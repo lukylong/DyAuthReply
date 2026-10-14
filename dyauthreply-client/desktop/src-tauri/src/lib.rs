@@ -396,6 +396,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             backend_status,
             native_request,
+            native_request_image,
             native_restart,
             native_reload_configuration,
             native_ws_connect,

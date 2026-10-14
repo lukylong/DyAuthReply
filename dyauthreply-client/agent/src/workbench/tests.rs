@@ -435,3 +435,40 @@ fn peerless_direct_chats_are_resolved_once_and_never_overwritten() {
         .set_conversation_peer("a", &due[0].0, "fallback_x")
         .is_err());
 }
+#[test]
+fn rich_media_is_shown_with_its_preview_and_counted_against_the_byte_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Workbench::open(root.path()).unwrap();
+    db.ensure_account("a", "self").unwrap();
+    let mut image = event("7681885293746357940", "peer");
+    image.text = None;
+    image.content_json = r#"{"resource_url":{"skey":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","origin_url_list":["https://p3-im.douyinpic.com/o"]},"cover_width":1,"cover_height":2,"inline_pic":"UklGRg=="}"#.into();
+    db.project("a", "self", &[image]).unwrap();
+    let conversations = db.conversations("a", 1, 50, "").unwrap();
+    let id = conversations["items"][0]["id"].as_str().unwrap();
+    let messages = db.messages("a", id).unwrap();
+    let message = &messages[0];
+    assert_eq!(message["content_type"], "image");
+    assert_eq!(message["media"]["encrypted"], true);
+    assert_eq!(message["media"]["inline_pic"], "UklGRg==");
+    assert!(message["media"].get("skey").is_none());
+    let source = db
+        .media_source("a", id, message["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(source.url, "https://p3-im.douyinpic.com/o");
+    assert!(db
+        .media_source("b", id, message["id"].as_str().unwrap())
+        .is_err());
+    let (counted, actual): (i64, i64) = {
+        let conn = db.lock().unwrap();
+        (
+            conn.query_row("SELECT CAST(value AS INTEGER) FROM meta WHERE key='message_bytes'", [], |r| r.get(0)).unwrap(),
+            conn.query_row("SELECT sum(length(CAST(content AS BLOB))+length(CAST(coalesce(media,'') AS BLOB))) FROM messages", [], |r| r.get(0)).unwrap(),
+        )
+    };
+    assert_eq!(counted, actual);
+    drop(db);
+    // Reopening is idempotent for the added columns and triggers.
+    Workbench::open(root.path()).unwrap();
+}

@@ -14,6 +14,7 @@ use std::{
 pub mod api;
 mod content;
 mod import;
+pub(crate) mod media;
 #[cfg(test)]
 mod tests;
 
@@ -79,6 +80,7 @@ impl Workbench {
         db.pragma_update(None, "journal_size_limit", 4 * 1024 * 1024)?;
         db.pragma_update(None, "max_page_count", 32768)?;
         db.execute_batch(SCHEMA)?;
+        add_media_columns(&db)?;
         // Group chats were projected before direct-message filtering existed;
         // their platform IDs are bare digits, unlike `0:1:uid:uid` single chats.
         db.execute_batch(
@@ -416,9 +418,34 @@ impl Workbench {
     pub fn messages(&self, account: &str, conversation: &str) -> Result<Value> {
         self.route(account, conversation)?;
         let db = self.lock()?;
-        let mut q=db.prepare("SELECT id,direction,kind,content,at_ms,server_id,client_id FROM (SELECT * FROM messages WHERE account_id=?1 AND conversation_id=?2 ORDER BY at_ms DESC,id DESC LIMIT 200) ORDER BY at_ms,id")?;
-        let rows=q.query_map(params![account,conversation],|r|Ok(json!({"id":r.get::<_,String>(0)?,"direction":r.get::<_,String>(1)?,"content_type":r.get::<_,String>(2)?,"content":r.get::<_,String>(3)?,"received_at":iso(r.get(4)?),"processed":true,"server_message_id":r.get::<_,String>(5)?,"client_message_id":r.get::<_,String>(6)?})))?;
+        let mut q=db.prepare("SELECT id,direction,kind,content,at_ms,server_id,client_id,media FROM (SELECT * FROM messages WHERE account_id=?1 AND conversation_id=?2 ORDER BY at_ms DESC,id DESC LIMIT 200) ORDER BY at_ms,id")?;
+        let rows=q.query_map(params![account,conversation],|r|{
+            let media=r.get::<_,Option<String>>(7)?.and_then(|m|serde_json::from_str::<Value>(&m).ok()).unwrap_or(Value::Null);
+            Ok(json!({"id":r.get::<_,String>(0)?,"direction":r.get::<_,String>(1)?,"content_type":r.get::<_,String>(2)?,"content":r.get::<_,String>(3)?,"received_at":iso(r.get(4)?),"processed":true,"server_message_id":r.get::<_,String>(5)?,"client_message_id":r.get::<_,String>(6)?,"media":media}))
+        })?;
         Ok(Value::Array(rows.collect::<rusqlite::Result<Vec<_>>>()?))
+    }
+    /// Encrypted image source for one account-scoped message, if it has one.
+    /// # Errors
+    /// Rejects cross-account routes and corrupt stored sources.
+    pub fn media_source(
+        &self,
+        account: &str,
+        conversation: &str,
+        message: &str,
+    ) -> Result<Option<media::MediaSource>> {
+        self.route(account, conversation)?;
+        let raw: Option<Option<String>> = self
+            .lock()?
+            .query_row(
+                "SELECT media_source FROM messages WHERE account_id=?1 AND conversation_id=?2 AND id=?3",
+                params![account, conversation, message],
+                |r| r.get(0),
+            )
+            .optional()?;
+        raw.flatten()
+            .map(|s| serde_json::from_str(&s).context("stored media source invalid"))
+            .transpose()
     }
     /// Called before durable receipts are consumed. Retry is idempotent by exact server ID;
     /// a projection failure leaves receipt payloads available for restart recovery.
@@ -499,7 +526,13 @@ impl Workbench {
                 conversation = Some(id);
             }
             let id = conversation.context("conversation missing")?;
-            tx.execute("INSERT INTO messages(id,account_id,conversation_id,server_id,client_id,direction,kind,content,at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![uuid::Uuid::new_v4().to_string(),account,id,event.server_message_id,event.client_message_id,direction,described.kind,content,at])?;
+            let media = described.media.as_ref().map(Value::to_string);
+            let source = described
+                .source
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?;
+            tx.execute("INSERT INTO messages(id,account_id,conversation_id,server_id,client_id,direction,kind,content,at_ms,media,media_source) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![uuid::Uuid::new_v4().to_string(),account,id,event.server_message_id,event.client_message_id,direction,described.kind,content,at,media,source])?;
             tx.execute(
                 "UPDATE conversations SET updated=?1,preview=?2 WHERE id=?3 AND updated<=?1",
                 params![at, content.chars().take(200).collect::<String>(), id],
@@ -582,6 +615,25 @@ fn repair_peer(
         params![account, event.conversation_id],
         |r| r.get(0),
     )?))
+}
+/// Adds rich-media columns in place; the schema version stays 1 so an older client
+/// can still open (and ignore) them after a downgrade.
+fn add_media_columns(db: &Connection) -> Result<()> {
+    let columns: Vec<String> = db
+        .prepare("SELECT name FROM pragma_table_info('messages')")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for column in ["media", "media_source"] {
+        if !columns.iter().any(|c| c == column) {
+            db.execute_batch(&format!("ALTER TABLE messages ADD COLUMN {column} TEXT"))?;
+        }
+    }
+    // Media (inline previews) counts toward the same rolling byte budget as bodies.
+    db.execute_batch("
+CREATE TRIGGER IF NOT EXISTS message_media_bytes_insert AFTER INSERT ON messages BEGIN UPDATE meta SET value=CAST(CAST(value AS INTEGER)+length(CAST(coalesce(new.media,'') AS BLOB)) AS TEXT) WHERE key='message_bytes'; END;
+CREATE TRIGGER IF NOT EXISTS message_media_bytes_delete AFTER DELETE ON messages BEGIN UPDATE meta SET value=CAST(CAST(value AS INTEGER)-length(CAST(coalesce(old.media,'') AS BLOB)) AS TEXT) WHERE key='message_bytes'; END;
+CREATE TRIGGER IF NOT EXISTS message_media_bytes_update AFTER UPDATE OF media ON messages BEGIN UPDATE meta SET value=CAST(CAST(value AS INTEGER)+length(CAST(coalesce(new.media,'') AS BLOB))-length(CAST(coalesce(old.media,'') AS BLOB)) AS TEXT) WHERE key='message_bytes'; END;")?;
+    Ok(())
 }
 fn valid_peer(sec_uid: &str) -> bool {
     !sec_uid.is_empty()

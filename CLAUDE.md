@@ -301,7 +301,9 @@ dyauthreply-client/
 - 抖音协议有**两份实现必须保持一致**：Python（`backend-django/core/douyin/runtime`，权威 pb2 编码器）与 Rust（`agent/src/protocol`）。共享黄金语料在 `protocol-fixtures/*.json`；改协议/请求组装后同时跑 Python `core.tests.test_douyin_{wire_codec,protocol_corpus,http_request_plan_corpus}` 与 `agent -- --verify-protocol`
 - Python 侧 `backend-django/core/client/` 仍是**公网服务端**的 license/鉴权/公告/更新清单接口（`/api/client-auth/*`），不是客户端本地后端
 - 发布契约（`scripts/client/check_release_contract.mjs`）：`productName`=`D助手`、`identifier`=`com.dyauthreply.client`、数据根目录 `DyAuthReply` 不得变更（否则已装用户会分叉）；`externalBin` 只能是 `binaries/dy-agent`
-- 发布：推送 `client-v*` tag 触发 `client-build.yml`（preflight → agent-quality → 多平台 build → 更新清单 manifest，产物发布到 `DIST_REPO`）
+- 发布：推送 `client-v*` tag 触发 `client-build.yml`（preflight 后 agent-quality 与多平台 build 并行，两者都通过才执行 manifest 发布到 `DIST_REPO`）。main 上的客户端改动也会跑同一流水线（只编译测试不发布），用于预热 Rust 缓存——Actions 缓存按 ref 隔离，tag 只能读 main 的缓存
+- 发版后同步顺序：先等 CI 发布成功，再在服务器 `/www/wwwroot/dy-auth-reply` 执行 `git pull --ff-only origin main && docker restart zq-backend zq-scheduler`（后端源码挂载，`settings.py` 的 `DOWNLOAD_LATEST_VERSION` 驱动升级提示），然后 `docker exec zq-backend python manage.py sync_downloads --force` 同步 `/downloads/` 安装包。顺序反了会让客户端提示升级却下载到旧包
+- 快捷登录组件：版本与各平台 SHA-256 固定在 `agent/quick-auth-component.json`（编译期内置），下载顺序国内镜像 → Google 官方，只认固定摘要。升级组件版本：`node scripts/client/pin_quick_auth_component.mjs`（从官方源计算摘要并确认镜像逐字节一致）；发版 preflight 会以 `--available` 校验两个源均可下载
 - 数据目录：开发态 `DyAuthReply/data/client/`；macOS 正式版 `~/Library/Application Support/DyAuthReply/`；Windows 正式版 `%APPDATA%\DyAuthReply\`；开发时可用 `DY_AGENT_DATA_DIR` / `DY_AGENT_BIND` 覆盖
 - 约束：`dyauthreply-client/**` 内不得 `import` 或修改 `web/apps/web-ele/**`
 - 更多细节：`dyauthreply-client/agent/README.md`（Agent 能力与验证命令）、`PLAN.zh-CN.md`（产品规划，部分已被 Rust 迁移取代）

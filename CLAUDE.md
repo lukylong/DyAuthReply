@@ -305,6 +305,8 @@ dyauthreply-client/
 - 发版后同步顺序：先等 CI 发布成功，再在服务器 `/www/wwwroot/dy-auth-reply` 执行 `git pull --ff-only origin main && docker restart zq-backend zq-scheduler`（后端源码挂载，`settings.py` 的 `DOWNLOAD_LATEST_VERSION` 驱动升级提示），然后 `docker exec zq-backend python manage.py sync_downloads --force` 同步 `/downloads/` 安装包。顺序反了会让客户端提示升级却下载到旧包
 - 快捷登录组件：版本与各平台 SHA-256 固定在 `agent/quick-auth-component.json`（编译期内置），下载顺序国内镜像 → Google 官方，只认固定摘要。升级组件版本：`node scripts/client/pin_quick_auth_component.mjs`（从官方源计算摘要并确认镜像逐字节一致）；发版 preflight 会以 `--available` 校验两个源均可下载
 - 数据目录：开发态 `DyAuthReply/data/client/`；macOS 正式版 `~/Library/Application Support/DyAuthReply/`；Windows 正式版 `%APPDATA%\DyAuthReply\`；开发时可用 `DY_AGENT_DATA_DIR` / `DY_AGENT_BIND` 覆盖
+- 运行诊断（`agent/src/diagnostics/`，默认关闭）：tracing 层仅在开启后采集 WARN/ERROR 与 `INFO_MESSAGES` 白名单里的关键事件，字段按 `FIELDS` 白名单映射并脱敏（账号 ID 哈希、sec_uid/长数字 ID/URL 路径参数替换）；服务端 `core/license/diagnostic_service.py` 再按 `EVENT_FIELDS` 过滤一次。新增要上报的字段需两端同时加白名单。上传失败不能写日志（会回灌缓冲）
+- 聊天媒体（`agent/src/workbench/media.rs`）：加密图片 AES-GCM（key=hex skey，nonce=前 12 字节）；URL 来自对方消息，只允许 HTTPS 字节系 CDN 后缀、禁止重定向，防 SSRF。`<img>` 无法携带本地接口 Bearer 令牌，前端经桌面壳 `native_request_image` 取字节转 blob URL
 - 约束：`dyauthreply-client/**` 内不得 `import` 或修改 `web/apps/web-ele/**`
 - 更多细节：`dyauthreply-client/agent/README.md`（Agent 能力与验证命令）、`PLAN.zh-CN.md`（产品规划，部分已被 Rust 迁移取代）
 

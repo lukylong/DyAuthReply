@@ -16,10 +16,12 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
 const pinPath = join(root, 'dyauthreply-client/agent/quick-auth-component.json');
 const CATALOG = 'https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json';
 const PLATFORMS = ['mac-arm64', 'mac-x64', 'win64'];
-export const sources = (version, platform) => [
-  `https://cdn.npmmirror.com/binaries/chrome-for-testing/${version}/${platform}/chrome-${platform}.zip`,
-  `https://storage.googleapis.com/chrome-for-testing-public/${version}/${platform}/chrome-${platform}.zip`,
-];
+const MIRROR = 'https://cdn.npmmirror.com/binaries/chrome-for-testing/{version}/{platform}/chrome-{platform}.zip';
+const ORIGIN = 'https://storage.googleapis.com/chrome-for-testing-public/{version}/{platform}/chrome-{platform}.zip';
+const expand = (template, version, platform) =>
+  template.replaceAll('{version}', version).replaceAll('{platform}', platform);
+// Pinning always hashes Google's origin and requires the public mirror to be identical.
+export const sources = (version, platform) => [expand(MIRROR, version, platform), expand(ORIGIN, version, platform)];
 const arg = (name) => {
   const index = process.argv.indexOf(name);
   return index < 0 ? '' : process.argv[index + 1] || '';
@@ -51,7 +53,7 @@ const check = process.argv.includes('--check');
 if (process.argv.includes('--available')) {
   const pinned = JSON.parse(readFileSync(pinPath, 'utf8'));
   for (const platform of PLATFORMS) {
-    for (const url of sources(pinned.version, platform)) {
+    for (const url of pinned.sources.map((t) => expand(t, pinned.version, platform))) {
       const response = await fetch(url, { method: 'HEAD', redirect: 'error' });
       const size = Number(response.headers.get('content-length'));
       if (!response.ok || size !== pinned.platforms[platform].size) {
@@ -82,6 +84,9 @@ if (check) {
   if (!/^\d+(\.\d+){1,3}$/.test(version)) throw new Error(`invalid version ${version}`);
   const platforms = {};
   for (const platform of PLATFORMS) platforms[platform] = await pinPlatform(version, platform);
-  writeFileSync(pinPath, `${JSON.stringify({ version, platforms }, null, 2)}\n`);
+  // Keep any extra (e.g. self-hosted) sources configured in the existing pin.
+  let configured = [MIRROR, ORIGIN];
+  try { configured = JSON.parse(readFileSync(pinPath, 'utf8')).sources || configured; } catch {}
+  writeFileSync(pinPath, `${JSON.stringify({ version, sources: configured, platforms }, null, 2)}\n`);
   console.log(JSON.stringify({ result: 'QUICK_AUTH_COMPONENT_PINNED', version }));
 }

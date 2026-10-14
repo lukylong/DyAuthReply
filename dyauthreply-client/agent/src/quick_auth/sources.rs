@@ -21,6 +21,8 @@ const SOURCE_TIMEOUT: Duration = Duration::from_mins(30);
 #[derive(Deserialize)]
 struct Pin {
     version: String,
+    /// Ordered URL templates with `{version}` and `{platform}`; first reachable wins.
+    sources: Vec<String>,
     platforms: BTreeMap<String, PinnedArchive>,
 }
 
@@ -32,8 +34,8 @@ pub struct PinnedArchive {
 
 pub struct PinnedSpec {
     pub version: String,
-    pub platform: &'static str,
     pub archive: PinnedArchive,
+    pub sources: Vec<String>,
 }
 
 /// # Errors
@@ -50,20 +52,38 @@ pub fn pinned(platform: &'static str) -> Result<PinnedSpec> {
         valid_digest(&archive.sha256) && (1024 * 1024..=MAX_ARCHIVE_BYTES).contains(&archive.size),
         "快捷登录组件版本清单无效"
     );
+    let sources = pin
+        .sources
+        .iter()
+        .map(|template| source_url(template, &pin.version, platform))
+        .collect::<Result<Vec<_>>>()?;
+    anyhow::ensure!((1..=8).contains(&sources.len()), "快捷登录组件下载源无效");
     Ok(PinnedSpec {
         version: pin.version,
-        platform,
         archive,
+        sources,
     })
 }
 
-/// Mirror first, origin second. Both serve the identical Chrome for Testing archive path.
-#[must_use]
-pub fn source_urls(version: &str, platform: &str) -> [String; 2] {
-    [
-        format!("https://cdn.npmmirror.com/binaries/chrome-for-testing/{version}/{platform}/chrome-{platform}.zip"),
-        format!("https://storage.googleapis.com/chrome-for-testing-public/{version}/{platform}/chrome-{platform}.zip"),
-    ]
+/// Expands one source template. Only HTTPS without query/fragment is accepted; the
+/// archive digest, not the host, is what establishes trust.
+fn source_url(template: &str, version: &str, platform: &str) -> Result<String> {
+    anyhow::ensure!(
+        template.contains("{version}") && template.contains("{platform}"),
+        "快捷登录组件下载源无效"
+    );
+    let url = template
+        .replace("{version}", version)
+        .replace("{platform}", platform);
+    let uri: wreq::Uri = url.parse()?;
+    anyhow::ensure!(
+        uri.scheme_str() == Some("https")
+            && uri.host().is_some_and(|host| !host.is_empty())
+            && uri.query().is_none()
+            && !url.contains('#'),
+        "快捷登录组件下载源无效"
+    );
+    Ok(url)
 }
 
 /// Downloads the pinned archive, falling back across sources until one matches the pin.
@@ -75,8 +95,7 @@ pub async fn download_verified(
     output: &Path,
     progress: Progress,
 ) -> Result<String> {
-    let urls = source_urls(&spec.version, spec.platform);
-    first_verified(&urls, &spec.archive.sha256, |url| {
+    first_verified(&spec.sources, &spec.archive.sha256, |url| {
         let progress = progress.clone();
         let size = spec.archive.size;
         async move { fetch(&url, output, size, progress).await }
@@ -155,16 +174,40 @@ mod tests {
     }
 
     #[test]
-    fn sources_are_mirror_first_and_scoped_to_the_exact_archive() {
-        let [mirror, origin] = source_urls("155.0.1", "win64");
+    fn shipped_sources_keep_the_official_origin_as_last_resort() {
+        let spec = pinned("win64").unwrap();
+        assert!(spec
+            .sources
+            .iter()
+            .all(|url| url.ends_with("/win64/chrome-win64.zip")));
         assert_eq!(
-            mirror,
-            "https://cdn.npmmirror.com/binaries/chrome-for-testing/155.0.1/win64/chrome-win64.zip"
+            spec.sources.last().unwrap(),
+            &format!(
+                "https://storage.googleapis.com/chrome-for-testing-public/{}/win64/chrome-win64.zip",
+                spec.version
+            )
         );
+    }
+
+    #[test]
+    fn source_templates_must_be_plain_https_for_the_exact_archive() {
         assert_eq!(
-            origin,
-            "https://storage.googleapis.com/chrome-for-testing-public/155.0.1/win64/chrome-win64.zip"
+            source_url(
+                "https://oss.example.cn/cft/{version}/{platform}/chrome-{platform}.zip",
+                "1.2.3",
+                "win64"
+            )
+            .unwrap(),
+            "https://oss.example.cn/cft/1.2.3/win64/chrome-win64.zip"
         );
+        for bad in [
+            "http://oss.example.cn/{version}/{platform}.zip",
+            "https://oss.example.cn/fixed.zip",
+            "https://oss.example.cn/{version}/{platform}.zip?token=1",
+            "https://oss.example.cn/{version}/{platform}.zip#x",
+        ] {
+            assert!(source_url(bad, "1.2.3", "win64").is_err(), "{bad}");
+        }
     }
 
     #[tokio::test]

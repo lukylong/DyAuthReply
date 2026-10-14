@@ -546,13 +546,13 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.33'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.34'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '修复作品列表拉取失败：改用创作者中心接口，快捷登录账号无需额外凭证\n'
-    '修复系统通知长期积压导致账号收消息可能停止的问题\n'
-    '私信工作台不再显示群聊消息，分享视频、图片、语音等消息显示为可读内容',
+    '回复日志不再出现群聊消息和空内容推送产生的「已跳过」记录\n'
+    '私信工作台不再显示发送链接后出现的「暂不支持的消息类型」占位\n'
+    '包含 0.1.33 的作品列表、收消息积压与群聊过滤修复',
 )

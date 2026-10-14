@@ -328,3 +328,110 @@ fn reopening_removes_previously_projected_group_conversations_only() {
         .unwrap();
     assert_eq!(bytes, actual);
 }
+#[test]
+fn conversation_started_by_us_learns_its_peer_from_a_later_reply() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Workbench::open(root.path()).unwrap();
+    db.ensure_account("a", "self").unwrap();
+    let mut ours = event("7681885293746357910", "self");
+    ours.conversation_id = "0:1:1:2".into();
+    db.project("a", "self", &[ours]).unwrap();
+    let conversations = db.conversations("a", 1, 50, "").unwrap();
+    assert_eq!(conversations["items"][0]["peer_sec_uid"], "");
+    assert_eq!(conversations["items"][0]["peer_nickname"], "");
+    let reply = || {
+        let mut reply = event("7681885293746357911", "peer-sec");
+        reply.conversation_id = "0:1:1:2".into();
+        reply
+    };
+    db.project("a", "self", &[reply()]).unwrap();
+    let id = conversations["items"][0]["id"].as_str().unwrap();
+    assert_eq!(db.peer_scope("a", id).unwrap(), "peer-sec");
+    // Re-projecting an already stored reply (history pages) also repairs a peerless row.
+    db.lock()
+        .unwrap()
+        .execute("UPDATE conversations SET peer=''", [])
+        .unwrap();
+    db.project("a", "self", &[reply()]).unwrap();
+    assert_eq!(db.peer_scope("a", id).unwrap(), "peer-sec");
+}
+#[test]
+fn placeholder_names_are_reported_missing_and_queued_for_backfill_once() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Workbench::open(root.path()).unwrap();
+    db.ensure_account("a", "self").unwrap();
+    let mut inbound = event("7681885293746357920", "peer-sec");
+    inbound.conversation_id = "0:1:1:3".into();
+    db.project("a", "self", &[inbound]).unwrap();
+    // Rows written by earlier versions carried the sec_uid or a fixed text as the name.
+    db.lock()
+        .unwrap()
+        .execute(
+            "UPDATE conversations SET data=json_set(data,'$.peer_nickname','peer-sec')",
+            [],
+        )
+        .unwrap();
+    let listed = db.conversations("a", 1, 50, "").unwrap();
+    assert_eq!(listed["items"][0]["peer_nickname"], "");
+    let now = now_ms();
+    let due = db.peers_missing_profile("a", 5, now).unwrap();
+    assert_eq!(due.len(), 1);
+    assert!(db
+        .peers_missing_profile("a", 5, now + 60_000)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        db.peers_missing_profile("a", 5, now + PEER_PROFILE_RETRY_MS + 1)
+            .unwrap()
+            .len(),
+        1
+    );
+    let id = listed["items"][0]["id"].as_str().unwrap();
+    db.set_peer_profile(
+        "a",
+        id,
+        &crate::protocol::VerifiedSelf {
+            user_id: "3".into(),
+            sec_uid: "peer-sec".into(),
+            nickname: "真名".into(),
+            avatar: "https://example.com/a.jpg".into(),
+            unique_id: "u".into(),
+            follower_count: 0,
+            following_count: 0,
+            aweme_count: 0,
+            total_favorited: 0,
+        },
+    )
+    .unwrap();
+    assert!(db
+        .peers_missing_profile("a", 5, now + 2 * PEER_PROFILE_RETRY_MS)
+        .unwrap()
+        .is_empty());
+}
+#[test]
+fn peerless_direct_chats_are_resolved_once_and_never_overwritten() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Workbench::open(root.path()).unwrap();
+    db.ensure_account("a", "self").unwrap();
+    let mut ours = event("7681885293746357930", "self");
+    ours.conversation_id = "0:1:1:2".into();
+    db.project("a", "self", &[ours]).unwrap();
+    let now = now_ms();
+    let due = db.peerless_conversations("a", 5, now).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].1, "0:1:1:2");
+    assert_eq!(due[0].2, 7_681_885_293_746_357_819);
+    assert!(db
+        .peerless_conversations("a", 5, now + 1)
+        .unwrap()
+        .is_empty());
+    assert!(db
+        .set_conversation_peer("a", &due[0].0, "peer-sec")
+        .unwrap());
+    assert_eq!(db.peer_scope("a", &due[0].0).unwrap(), "peer-sec");
+    assert!(!db.set_conversation_peer("a", &due[0].0, "other").unwrap());
+    assert_eq!(db.peer_scope("a", &due[0].0).unwrap(), "peer-sec");
+    assert!(db
+        .set_conversation_peer("a", &due[0].0, "fallback_x")
+        .is_err());
+}

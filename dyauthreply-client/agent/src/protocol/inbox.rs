@@ -1,7 +1,7 @@
 //! Native `get_by_user` wire encoding/decoding with explicit cursor semantics.
 use super::{
     im::{ProtocolError, BUILD_ID, SDK_VERSION},
-    wire::{self, WireError, WireField},
+    wire::{self, WireError, WireField, WireValue},
 };
 
 pub struct InboxMessage {
@@ -190,7 +190,11 @@ pub struct ConversationContext {
     pub conversation_id: String,
     pub short_id: u64,
     pub ticket: String,
+    /// Members as `(uid, sec_uid)`; for a direct chat, ourselves and the peer.
+    pub participants: Vec<(u64, String)>,
 }
+
+const MAX_PARTICIPANTS: usize = 64;
 /// # Errors
 /// Rejects empty/invalid routing identifiers and wire encoding errors.
 pub fn encode_conversation_info(
@@ -228,6 +232,7 @@ pub fn decode_conversation_info(raw: &[u8]) -> Result<ConversationContext, Proto
         conversation_id: String::new(),
         short_id: 0,
         ticket: String::new(),
+        participants: Vec::new(),
     };
     if status_code != 0 {
         return Ok(result);
@@ -247,12 +252,83 @@ pub fn decode_conversation_info(raw: &[u8]) -> Result<ConversationContext, Proto
     result.conversation_id = text(&fields, 1)?;
     result.short_id = num(&fields, 2)?;
     result.ticket = text(&fields, 4)?;
+    // Members are advisory (peer naming only). A shape we do not understand must never
+    // fail the context, because sending depends on its ticket.
+    result.participants = participants(&fields).unwrap_or_default();
     Ok(result)
+}
+
+/// `info.6` holds the member list; each repeated `1` is one member with uid `1`
+/// and `sec_uid` `5`.
+fn participants(info: &[WireField<'_>]) -> Option<Vec<(u64, String)>> {
+    let mut members = Vec::new();
+    for list in info.iter().filter(|field| field.number == 6) {
+        let WireValue::LengthDelimited(raw) = list.value else {
+            return None;
+        };
+        for entry in wire::decode_message(raw).ok()? {
+            let (1, WireValue::LengthDelimited(raw)) = (entry.number, entry.value) else {
+                continue;
+            };
+            let member = wire::decode_message(raw).ok()?;
+            let (uid, sec_uid) = (num(&member, 1).ok()?, text(&member, 5).ok()?);
+            if uid > 0 && !sec_uid.is_empty() && members.len() < MAX_PARTICIPANTS {
+                members.push((uid, sec_uid));
+            }
+        }
+    }
+    Some(members)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn conversation_info_exposes_both_direct_chat_members() {
+        let member = |uid: u64, sec: &str| {
+            let mut m = Vec::new();
+            wire::append_varint_field(&mut m, 1, uid).unwrap();
+            wire::append_string_field(&mut m, 5, sec).unwrap();
+            m
+        };
+        let mut list = Vec::new();
+        wire::append_bytes_field(&mut list, 1, &member(1, "self-sec")).unwrap();
+        wire::append_bytes_field(&mut list, 1, &member(2, "peer-sec")).unwrap();
+        let mut info = Vec::new();
+        wire::append_string_field(&mut info, 1, "0:1:1:2").unwrap();
+        wire::append_varint_field(&mut info, 2, 9).unwrap();
+        wire::append_string_field(&mut info, 4, "ticket").unwrap();
+        wire::append_bytes_field(&mut info, 6, &list).unwrap();
+        let mut wrapper = Vec::new();
+        wire::append_bytes_field(&mut wrapper, 1, &info).unwrap();
+        let mut inner = Vec::new();
+        wire::append_bytes_field(&mut inner, 610, &wrapper).unwrap();
+        let mut envelope = Vec::new();
+        wire::append_varint_field(&mut envelope, 3, 0).unwrap();
+        wire::append_bytes_field(&mut envelope, 6, &inner).unwrap();
+        let context = decode_conversation_info(&envelope).unwrap();
+        assert_eq!(context.ticket, "ticket");
+        assert_eq!(
+            context.participants,
+            vec![(1, "self-sec".to_owned()), (2, "peer-sec".to_owned())]
+        );
+        // An unexpected member shape never fails the context that sending relies on.
+        let mut odd = Vec::new();
+        wire::append_string_field(&mut odd, 1, "0:1:1:2").unwrap();
+        wire::append_varint_field(&mut odd, 2, 9).unwrap();
+        wire::append_string_field(&mut odd, 4, "ticket").unwrap();
+        wire::append_bytes_field(&mut odd, 6, &member(1, "flat-member")).unwrap();
+        let mut wrapper = Vec::new();
+        wire::append_bytes_field(&mut wrapper, 1, &odd).unwrap();
+        let mut inner = Vec::new();
+        wire::append_bytes_field(&mut inner, 610, &wrapper).unwrap();
+        let mut envelope = Vec::new();
+        wire::append_varint_field(&mut envelope, 3, 0).unwrap();
+        wire::append_bytes_field(&mut envelope, 6, &inner).unwrap();
+        let context = decode_conversation_info(&envelope).unwrap();
+        assert_eq!(context.ticket, "ticket");
+        assert!(context.participants.is_empty());
+    }
     #[test]
     fn invalid_utf8_message_is_not_silently_accepted() {
         let mut body = Vec::new();

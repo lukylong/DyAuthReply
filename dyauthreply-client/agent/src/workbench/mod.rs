@@ -41,6 +41,10 @@ const RETENTION_MS: i64 = 30 * 86_400_000;
 const MAX_MESSAGES: i64 = 100_000;
 const PER_ACCOUNT_MESSAGES: i64 = 10_000;
 const MAX_CONTENT_BYTES: i64 = 32 * 1024 * 1024;
+/// A peer whose public profile could not be read is retried at most this often.
+pub(crate) const PEER_PROFILE_RETRY_MS: i64 = 6 * 3_600_000;
+/// Rows written before profile backfill stored the `sec_uid` or this text as the name.
+const PLACEHOLDER_NAME: &str = "未知联系人";
 
 pub(crate) fn now_ms() -> i64 {
     i64::try_from(
@@ -229,6 +233,101 @@ impl Workbench {
         );
         Ok(peer)
     }
+    /// Claims up to `limit` conversations whose peer is known but whose public profile is
+    /// missing, recording the attempt so each is retried at most every
+    /// [`PEER_PROFILE_RETRY_MS`].
+    /// # Errors
+    /// Reports projection read/write failures.
+    pub fn peers_missing_profile(
+        &self,
+        account: &str,
+        limit: u32,
+        now: i64,
+    ) -> Result<Vec<String>> {
+        let mut db = self.lock()?;
+        let tx = db.transaction()?;
+        let due: Vec<String> = {
+            let mut q = tx.prepare(
+                "SELECT id FROM conversations WHERE account_id=?1 AND peer<>'' AND peer NOT LIKE 'fallback\\_%' ESCAPE '\\'
+                 AND coalesce(json_extract(data,'$.peer_nickname'),'') IN ('',peer,?2)
+                 AND coalesce(json_extract(data,'$.peer_profile_attempt_ms'),0) <= ?3
+                 ORDER BY updated DESC,id LIMIT ?4",
+            )?;
+            let rows = q.query_map(
+                params![
+                    account,
+                    PLACEHOLDER_NAME,
+                    now - PEER_PROFILE_RETRY_MS,
+                    limit.min(20)
+                ],
+                |r| r.get(0),
+            )?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for id in &due {
+            tx.execute(
+                "UPDATE conversations SET data=json_set(data,'$.peer_profile_attempt_ms',?1) WHERE id=?2",
+                params![now, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(due)
+    }
+    /// Claims up to `limit` direct chats with no known peer (we spoke first), as
+    /// `(id, platform_id, short_id)`; each is retried at most every [`PEER_PROFILE_RETRY_MS`].
+    /// # Errors
+    /// Reports projection read/write failures.
+    pub fn peerless_conversations(
+        &self,
+        account: &str,
+        limit: u32,
+        now: i64,
+    ) -> Result<Vec<(String, String, u64)>> {
+        let mut db = self.lock()?;
+        let tx = db.transaction()?;
+        let due: Vec<(String, String, String)> = {
+            let mut q = tx.prepare(
+                "SELECT id,platform_id,short_id FROM conversations WHERE account_id=?1 AND peer=''
+                 AND platform_id LIKE '0:1:%'
+                 AND coalesce(json_extract(data,'$.peer_resolve_attempt_ms'),0) <= ?2
+                 ORDER BY updated DESC,id LIMIT ?3",
+            )?;
+            let rows = q.query_map(
+                params![account, now - PEER_PROFILE_RETRY_MS, limit.min(20)],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let mut result = Vec::with_capacity(due.len());
+        for (id, platform, short) in due {
+            tx.execute(
+                "UPDATE conversations SET data=json_set(data,'$.peer_resolve_attempt_ms',?1) WHERE id=?2",
+                params![now, id],
+            )?;
+            if let Ok(short) = short.parse::<u64>() {
+                result.push((id, platform, short));
+            }
+        }
+        tx.commit()?;
+        Ok(result)
+    }
+    /// Records a verified peer for a conversation that has none; never replaces one.
+    /// Returns whether the peer was recorded.
+    /// # Errors
+    /// Rejects invalid peer identities and projection write failures.
+    pub fn set_conversation_peer(
+        &self,
+        account: &str,
+        conversation: &str,
+        peer: &str,
+    ) -> Result<bool> {
+        anyhow::ensure!(valid_peer(peer), "invalid conversation peer");
+        let changed = self.lock()?.execute(
+            "UPDATE conversations SET peer=?1 WHERE account_id=?2 AND id=?3 AND peer=''",
+            params![peer, account, conversation],
+        )?;
+        Ok(changed == 1)
+    }
     /// Updates only verified public peer fields for one account-bound conversation.
     /// # Errors
     /// Rejects response-scope mismatches, empty names or storage failures.
@@ -296,6 +395,12 @@ impl Workbench {
             let (id, data, at, preview, peer) = row?;
             let mut v: Value = serde_json::from_str(&data)?;
             v["id"] = json!(id);
+            if v["peer_nickname"]
+                .as_str()
+                .is_some_and(|name| name == peer || name == PLACEHOLDER_NAME)
+            {
+                v["peer_nickname"] = json!("");
+            }
             v["peer_sec_uid"] = json!(peer);
             v["last_message_at"] = json!(iso(at));
             v["last_message_preview"] = json!(preview);
@@ -357,6 +462,9 @@ impl Workbench {
                 content.len() <= 16 * 1024 && !event.server_message_id.is_empty(),
                 "invalid message projection"
             );
+            if direction == "in" {
+                changed.extend(repair_peer(&tx, account, event)?);
+            }
             let old:Option<(String,String,String,String,String)>=tx.query_row("SELECT c.platform_id,m.direction,m.content,m.source,m.conversation_id FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.account_id=?1 AND m.server_id=?2",params![account,event.server_message_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
             if let Some(old) = old {
                 if old.3 == "legacy" {
@@ -387,7 +495,7 @@ impl Workbench {
                 } else {
                     ""
                 };
-                tx.execute("INSERT INTO conversations(id,account_id,platform_id,short_id,peer,data) VALUES(?1,?2,?3,?4,?5,?6)",params![id,account,event.conversation_id,event.conversation_short_id,peer,json!({"peer_nickname":if peer.is_empty(){"未知联系人"}else{peer},"unread_count":0}).to_string()])?;
+                tx.execute("INSERT INTO conversations(id,account_id,platform_id,short_id,peer,data) VALUES(?1,?2,?3,?4,?5,?6)",params![id,account,event.conversation_id,event.conversation_short_id,peer,json!({"peer_nickname":"","unread_count":0}).to_string()])?;
                 conversation = Some(id);
             }
             let id = conversation.context("conversation missing")?;
@@ -451,6 +559,35 @@ fn prune_bytes(tx: &rusqlite::Transaction<'_>, limit: i64) -> Result<()> {
         anyhow::ensure!(removed > 0, "projection byte counter mismatch");
     }
     Ok(())
+}
+/// A conversation first seen through our own message has no peer yet; the first
+/// reply names it. Runs before message dedup so re-projected history repairs old rows.
+fn repair_peer(
+    tx: &rusqlite::Transaction<'_>,
+    account: &str,
+    event: &InboundEvent,
+) -> Result<Option<String>> {
+    if !valid_peer(&event.sender_sec_uid) {
+        return Ok(None);
+    }
+    let repaired = tx.execute(
+        "UPDATE conversations SET peer=?1 WHERE account_id=?2 AND platform_id=?3 AND peer=''",
+        params![event.sender_sec_uid, account, event.conversation_id],
+    )?;
+    if repaired == 0 {
+        return Ok(None);
+    }
+    Ok(Some(tx.query_row(
+        "SELECT id FROM conversations WHERE account_id=?1 AND platform_id=?2",
+        params![account, event.conversation_id],
+        |r| r.get(0),
+    )?))
+}
+fn valid_peer(sec_uid: &str) -> bool {
+    !sec_uid.is_empty()
+        && sec_uid.len() <= 256
+        && !sec_uid.starts_with("fallback_")
+        && !sec_uid.chars().any(char::is_control)
 }
 fn reserve_conversation(tx: &rusqlite::Transaction<'_>, account: &str) -> Result<()> {
     let count: i64 = tx.query_row(

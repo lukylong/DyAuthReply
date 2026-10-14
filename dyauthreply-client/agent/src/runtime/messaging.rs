@@ -680,6 +680,77 @@ impl ManualService {
             }
         }
     }
+    /// Fills missing peer nicknames/avatars after a receive pass without delaying it.
+    /// Bounded to two lookups per pass; each conversation is retried at most every 6 hours.
+    fn spawn_peer_backfill(&self, account: &str) {
+        let service = self.clone();
+        let account = account.to_owned();
+        tokio::spawn(async move {
+            if let Err(error) = service.resolve_peerless(&account).await {
+                tracing::warn!(account_id = %account, %error, "peerless conversation lookup failed");
+            }
+            let due = match service.inner.workbench.peers_missing_profile(
+                &account,
+                2,
+                crate::workbench::now_ms(),
+            ) {
+                Ok(due) => due,
+                Err(error) => {
+                    tracing::warn!(account_id = %account, %error, "peer profile backfill unavailable");
+                    return;
+                }
+            };
+            for conversation in due {
+                match service.refresh_peer(&account, &conversation).await {
+                    Ok(()) => tracing::info!(account_id = %account, "peer profile backfilled"),
+                    Err(error) => {
+                        tracing::warn!(account_id = %account, %error, "peer profile backfill failed");
+                    }
+                }
+            }
+        });
+    }
+    /// Names the peer of direct chats we started (no inbound message yet) from the
+    /// conversation's member list: it must contain us and exactly one other member.
+    async fn resolve_peerless(&self, account: &str) -> Result<()> {
+        let due =
+            self.inner
+                .workbench
+                .peerless_conversations(account, 2, crate::workbench::now_ms())?;
+        if due.is_empty() {
+            return Ok(());
+        }
+        let session = self.profile_session(account)?;
+        let own = session.credentials.expected_sec_uid.clone();
+        for (conversation, platform, short_id) in due {
+            let context = session.conversation_context(&platform, short_id).await?;
+            let others: Vec<_> = context
+                .participants
+                .iter()
+                .filter(|(_, sec_uid)| *sec_uid != own)
+                .collect();
+            let includes_us = context
+                .participants
+                .iter()
+                .any(|(_, sec_uid)| *sec_uid == own);
+            if includes_us && others.len() == 1 {
+                if self.inner.workbench.set_conversation_peer(
+                    account,
+                    &conversation,
+                    &others[0].1,
+                )? {
+                    tracing::info!(account_id = %account, "conversation peer resolved from member list");
+                }
+            } else {
+                tracing::warn!(
+                    account_id = %account,
+                    members = context.participants.len(),
+                    "conversation member list is not a direct chat with us"
+                );
+            }
+        }
+        Ok(())
+    }
     /// Refreshes one account-scoped conversation peer through authenticated profile lookup.
     /// # Errors
     /// Reports missing scopes, platform failures and verified response mismatches.
@@ -1460,6 +1531,7 @@ impl ManualService {
         })
         .await??;
         log_inbound_summary(work.account_id.as_str(), &summary);
+        self.spawn_peer_backfill(work.account_id.as_str());
         *slot.processing.lock().await = summary;
         Ok(())
     }

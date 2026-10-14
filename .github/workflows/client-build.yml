@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - 'client-v*'
+    # main runs compile and test only (nothing is published) so that tag builds
+    # can restore their Rust caches: Actions caches are scoped to the ref that
+    # saved them, and a tag can only read caches saved on the default branch.
+    # Path filters are ignored for tag pushes.
+    branches:
+      - main
+    paths:
+      - 'dyauthreply-client/**'
+      - 'scripts/client/**'
+      - '.github/workflows/client-build.yml'
   pull_request:
     paths:
       - 'dyauthreply-client/**'
@@ -55,6 +65,9 @@ jobs:
             args+=(--tag "$GITHUB_REF_NAME")
           fi
           node scripts/client/check_release_contract.mjs "${args[@]}"
+
+      - name: Verify pinned quick-auth component is served by mirror and origin
+        run: node scripts/client/pin_quick_auth_component.mjs --available
 
       - name: Require every release credential
         if: startsWith(github.ref, 'refs/tags/client-v')
@@ -122,6 +135,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: dyauthreply-client/agent
+          shared-key: client-agent-quality
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check formatting
         run: cargo fmt --manifest-path dyauthreply-client/agent/Cargo.toml -- --check
@@ -167,7 +182,8 @@ jobs:
 
   build:
     name: Build (${{ matrix.platform_label }})
-    needs: [release-preflight, agent-quality]
+    # Compiling does not wait for the quality gate; publication (manifest) does.
+    needs: release-preflight
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -210,7 +226,11 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: dyauthreply-client/desktop/src-tauri
+          workspaces: |
+            dyauthreply-client/agent -> target
+            dyauthreply-client/desktop/src-tauri -> target
+          shared-key: client-build-${{ matrix.rust_target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install native transport build prerequisites (macOS)
         if: runner.os == 'macOS'
@@ -355,7 +375,7 @@ jobs:
   # 两个平台构建并把签名包同步到 dist 仓后，统一生成多镜像 latest.json 变体并发布。
   manifest:
     name: Publish updater manifests
-    needs: build
+    needs: [build, agent-quality]
     if: startsWith(github.ref, 'refs/tags/client-v')
     runs-on: ubuntu-latest
     permissions:

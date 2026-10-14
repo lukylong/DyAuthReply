@@ -2,8 +2,8 @@
 //! `StartAttempt` -> HTTP once -> classified durable outcome. Not wired to the
 //! legacy UI/worker; callers must obtain the hosted lease and current account facts.
 use super::{
-    classify_delivery, decode_send_message_response, encode_send_message_request,
-    finalize_send_request,
+    classify::classify_live_delivery,
+    decode_send_message_response, encode_send_message_request, finalize_send_request,
     http_plan::{OrderedHeader, SEND_ENDPOINT, SEND_METHOD},
     live_http::ProtocolHttpClient,
     native_signer::NativeSigner,
@@ -203,7 +203,7 @@ impl LiveSender {
             Ok(Ok(response)) => match decode_send_message_response(&response.body) {
                 Ok(decoded) => {
                     let classification =
-                        classify_delivery(Some(response.status), &decoded, expected_id);
+                        classify_live_delivery(Some(response.status), &decoded, expected_id);
                     let delivered = matches!(
                         classification,
                         DeliveryClass::Delivered | DeliveryClass::DeliveredSoft
@@ -729,6 +729,60 @@ mod tests {
                 .is_err()
         );
     }
+    #[tokio::test]
+    async fn raw_check_two_blocks_acknowledged_send_and_persists_restriction() {
+        for business in [0, 8101, 8513, 9999] {
+            for server_id in [0, 987] {
+                let (_dir, store, operation, _control) = setup();
+                let lease = operation.lease.clone();
+                let binding = operation.credentials.binding_digest.clone();
+                let canonical = operation.credentials.canonical_sec_uid.clone();
+                let batch_id = operation.batch_id.clone();
+                let original = store.outbound_batch(&batch_id).unwrap();
+                let mut inner = Vec::new();
+                append_varint_field(&mut inner, 1, server_id).unwrap();
+                append_string_field(&mut inner, 4, &original.segments[0].client_message_id)
+                    .unwrap();
+                append_string_field(
+                    &mut inner,
+                    6,
+                    &format!(r#"{{"status_code":{business},"raw_check_code":2}}"#),
+                )
+                .unwrap();
+                let mut body = Vec::new();
+                append_bytes_field(&mut body, 100, &inner).unwrap();
+                let mut response = Vec::new();
+                append_varint_field(&mut response, 3, 0).unwrap();
+                append_bytes_field(&mut response, 6, &body).unwrap();
+                let (url, server) = mock_http(response).await;
+                let mut sender = sender(store.clone());
+                sender.http.test_endpoint = Some(url);
+                let result = sender.send(operation).await.unwrap();
+                server.await.unwrap();
+                assert_eq!(
+                    result.classification,
+                    DeliveryClass::RiskControlled,
+                    "business={business}, server_id={server_id}"
+                );
+                assert_eq!(result.platform_message_id, None);
+                let saved = store.outbound_batch(&batch_id).unwrap();
+                assert_eq!(saved.segments[0].status, SegmentStatus::Rejected);
+                assert_eq!(saved.segments[0].attempt_count, 1);
+                assert!(saved.segments[0]
+                    .last_error
+                    .as_deref()
+                    .unwrap()
+                    .contains("raw_check=Some(2)"));
+                assert_eq!(
+                    store
+                        .restore_send_observation(&lease, &canonical, &binding)
+                        .unwrap(),
+                    SendCapability::RiskControlled
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn rejection_keeps_selected_numeric_codes_without_sensitive_response_body() {
         let (_dir, store, operation, _control) = setup();

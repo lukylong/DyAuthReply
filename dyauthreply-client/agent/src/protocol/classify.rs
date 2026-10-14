@@ -87,6 +87,38 @@ pub fn classify_delivery(
     DeliveryClass::Delivered
 }
 
+/// Current send-admission policy, separate from the frozen migration classifier.
+/// A decoded `raw_check=2` stops further sends even if the server allocated an
+/// ID. This conservative policy mirrors the live Python transport; it does not
+/// assert that every such historical acknowledgement was undelivered.
+#[must_use]
+pub fn classify_live_delivery(
+    http_status: Option<u16>,
+    result: &SendMessageResponse,
+    expected_client_msg_id: &str,
+) -> DeliveryClass {
+    let historical = classify_delivery(http_status, result, expected_client_msg_id);
+    let valid_risk_marker = result.has_response_body
+        && result.has_inner_response
+        && result.business_payload_present
+        && result.business_payload_valid
+        && result.biz_raw_check_code == 2;
+    let accepted_envelope = result.outer_status_present
+        && result.status_code == 0
+        && matches!(
+            historical,
+            DeliveryClass::Delivered
+                | DeliveryClass::DeliveredSoft
+                | DeliveryClass::BusinessRejected
+                | DeliveryClass::Uncertain
+        );
+    if valid_risk_marker && (http_status == Some(403) || accepted_envelope) {
+        DeliveryClass::RiskControlled
+    } else {
+        historical
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,6 +138,65 @@ mod tests {
             business_payload_present: false,
             business_payload_valid: true,
         }
+    }
+
+    #[test]
+    fn live_policy_raw_check_two_precedes_business_success_and_acknowledgement() {
+        for business in [0, 8101, 8513, 9999] {
+            for server_id in [0, 12345] {
+                for client_id in ["client", "mismatched", ""] {
+                    let mut response = complete_response();
+                    response.business_payload_present = true;
+                    response.biz_status_code = business;
+                    response.biz_raw_check_code = 2;
+                    response.server_msg_id = server_id;
+                    client_id.clone_into(&mut response.client_msg_id);
+                    assert_eq!(
+                        classify_live_delivery(Some(200), &response, "client"),
+                        DeliveryClass::RiskControlled
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn live_policy_retains_auth_transport_and_malformed_response_boundaries() {
+        let mut response = complete_response();
+        response.business_payload_present = true;
+        response.biz_raw_check_code = 2;
+        assert_eq!(
+            classify_live_delivery(Some(401), &response, "client"),
+            DeliveryClass::LoginExpired
+        );
+        assert_eq!(
+            classify_live_delivery(Some(503), &response, "client"),
+            DeliveryClass::Inconclusive
+        );
+        assert_eq!(
+            classify_live_delivery(None, &response, "client"),
+            DeliveryClass::Inconclusive
+        );
+        assert_eq!(
+            classify_live_delivery(Some(403), &response, "client"),
+            DeliveryClass::RiskControlled
+        );
+        response.business_payload_valid = false;
+        assert_eq!(
+            classify_live_delivery(Some(200), &response, "client"),
+            DeliveryClass::Uncertain
+        );
+        response.business_payload_valid = true;
+        response.biz_raw_check_code = 0;
+        assert_eq!(
+            classify_live_delivery(Some(200), &response, "client"),
+            DeliveryClass::Delivered
+        );
+        response.biz_status_code = 8513;
+        assert_eq!(
+            classify_live_delivery(Some(200), &response, "client"),
+            DeliveryClass::DeliveredSoft
+        );
     }
 
     #[test]

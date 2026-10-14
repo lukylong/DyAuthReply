@@ -546,13 +546,13 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.31'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.32'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '修复授权续签异常后账号租约任务退出，账号无需重新登录即可自动恢复收发\n'
-    '修复空闲重启丢失发送能力，以及 WebSocket 重连后未补查断线消息的问题\n'
-    '客户端租约恢复与抖音登录失效分开显示，减少无效的重复快捷登录',
+    'Rust 发送链同步保守风控判定：raw_check_code=2 时停止发送，不将消息 ID 当作送达证明\n'
+    '明确区分发送受限、登录失效和网络异常，避免误报发送成功\n'
+    '本次为发送判定策略更新，不包含卡片发送或绕过平台限制功能',
 )

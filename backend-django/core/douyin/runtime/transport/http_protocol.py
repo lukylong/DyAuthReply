@@ -2119,6 +2119,22 @@ class HttpProtocolTransport(AccountTransport):
                 f"msg={result.status_msg!r}"
             )
 
+        # 显式风控优先于成功状态和消息 ID。服务端分配了 ID 不代表
+        # 消息已送达；保留异常类型，让 worker 切到 receive_only 并停止发送。
+        if result.biz_raw_check_code == 2:
+            detail = _format_send_business_failure(result, log_tag)
+            logger.warning(
+                f"[transport.http] {log_tag} 显式发送风控 account={account.id} "
+                f"biz_status_code={result.biz_status_code} "
+                f"biz_raw_check_code={result.biz_raw_check_code} "
+                f"server_msg_id={result.server_msg_id}"
+            )
+            raise SendRiskControlError(
+                detail,
+                biz_status_code=result.biz_status_code,
+                raw_check_code=result.biz_raw_check_code,
+            )
+
         if result.biz_status_code not in (0, 8101):
             if result.server_msg_id and result.biz_status_code not in _HARD_BIZ_FAIL_CODES:
                 # 8513 等：协议已分配 server_msg_id，消息通常已发出（可能带风控提示）
@@ -2137,10 +2153,7 @@ class HttpProtocolTransport(AccountTransport):
                     f"server_msg_id={result.server_msg_id} client_msg_id={result.client_msg_id}"
                 )
                 detail = _format_send_business_failure(result, log_tag)
-                if (
-                    result.biz_status_code in _HARD_BIZ_FAIL_CODES
-                    or result.biz_raw_check_code == 2
-                ):
+                if result.biz_status_code in _HARD_BIZ_FAIL_CODES:
                     raise SendRiskControlError(
                         detail,
                         biz_status_code=result.biz_status_code,

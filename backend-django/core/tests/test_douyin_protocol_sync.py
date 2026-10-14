@@ -647,6 +647,54 @@ class _FakeSendSignProvider:
 
 
 class SendMessageRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_raw_check_two_precedes_success_and_message_id(self):
+        """显式风控标记不得被正常状态码或服务端消息 ID 掩盖。"""
+        for business_status in (0, 8101, 8513, 9999):
+            for server_message_id in (0, 12345):
+                with self.subTest(
+                    business_status=business_status,
+                    server_message_id=server_message_id,
+                ):
+                    signer = _FakeSendSignProvider()
+                    transport = HttpProtocolTransport(sign_provider=signer)
+                    transport._get_identity_security_token = AsyncMock(
+                        return_value=("IDENTITY", "DEVICE")
+                    )
+                    transport._resolve_send_conversation_context = AsyncMock(
+                        return_value=(987, "conversation-ticket")
+                    )
+                    decoded = SimpleNamespace(
+                        status_code=0,
+                        status_msg="OK",
+                        server_msg_id=server_message_id,
+                        client_msg_id="",
+                        biz_status_code=business_status,
+                        biz_status_text="",
+                        biz_raw_check_code=2,
+                    )
+                    with (
+                        patch(
+                            "core.douyin.runtime.transport.http_protocol.decode_send_message_response",
+                            return_value=decoded,
+                        ),
+                        patch(
+                            "core.douyin.runtime.send_template_cache.save_cached_send_template",
+                        ) as save_template,
+                    ):
+                        with self.assertRaises(SendRiskControlError) as raised:
+                            await transport._post_send_message(
+                                SimpleNamespace(id="account-risk-marker"),
+                                "0:1:test:peer",
+                                "风控停止发送测试",
+                                log_tag="send_reply",
+                            )
+                        self.assertEqual(raised.exception.raw_check_code, 2)
+                        self.assertEqual(
+                            raised.exception.biz_status_code, business_status
+                        )
+                        self.assertEqual(len(signer.calls), 1)
+                        save_template.assert_not_called()
+
     def test_8610_raw_check_two_is_platform_risk_not_cookie_expiry(self):
         result = SimpleNamespace(
             status_code=0,

@@ -473,6 +473,7 @@ impl Workbench {
             }
             let Some(described) = content::describe(&event.content_json, event.text.as_deref())
             else {
+                changed.extend(drop_hidden(&tx, account, &event.server_message_id)?);
                 continue;
             };
             let at = i64::try_from(event.create_time_us / 1000)?;
@@ -484,28 +485,21 @@ impl Workbench {
             } else {
                 "in"
             };
-            let content = described.content;
             anyhow::ensure!(
-                content.len() <= 16 * 1024 && !event.server_message_id.is_empty(),
+                described.content.len() <= 16 * 1024 && !event.server_message_id.is_empty(),
                 "invalid message projection"
             );
             if direction == "in" {
                 changed.extend(repair_peer(&tx, account, event)?);
             }
-            let old:Option<(String,String,String,String,String)>=tx.query_row("SELECT c.platform_id,m.direction,m.content,m.source,m.conversation_id FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.account_id=?1 AND m.server_id=?2",params![account,event.server_message_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
-            if let Some(old) = old {
-                if old.3 == "legacy" {
-                    anyhow::ensure!(old.0 == event.conversation_id, "legacy route conflict");
-                    tx.execute("UPDATE messages SET direction=?1,content=?2,client_id=?3,at_ms=?4,source='native' WHERE account_id=?5 AND server_id=?6",params![direction,content,event.client_message_id,at,account,event.server_message_id])?;
-                    changed.insert(old.4);
-                } else {
-                    anyhow::ensure!(
-                        (old.0, old.1, old.2)
-                            == (event.conversation_id.clone(), direction.into(), content),
-                        "conflicting server message projection"
-                    );
+            let row = Projected::new(&described, direction, at)?;
+            match reproject(&tx, account, event, &row)? {
+                Stored::New => {}
+                Stored::Unchanged => continue,
+                Stored::Changed(conversation) => {
+                    changed.insert(conversation);
+                    continue;
                 }
-                continue;
             }
             let mut conversation: Option<String> = tx
                 .query_row(
@@ -526,16 +520,10 @@ impl Workbench {
                 conversation = Some(id);
             }
             let id = conversation.context("conversation missing")?;
-            let media = described.media.as_ref().map(Value::to_string);
-            let source = described
-                .source
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()?;
-            tx.execute("INSERT INTO messages(id,account_id,conversation_id,server_id,client_id,direction,kind,content,at_ms,media,media_source) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![uuid::Uuid::new_v4().to_string(),account,id,event.server_message_id,event.client_message_id,direction,described.kind,content,at,media,source])?;
+            tx.execute("INSERT INTO messages(id,account_id,conversation_id,server_id,client_id,direction,kind,content,at_ms,media,media_source) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![uuid::Uuid::new_v4().to_string(),account,id,event.server_message_id,event.client_message_id,direction,row.kind,row.content,at,row.media,row.source])?;
             tx.execute(
                 "UPDATE conversations SET updated=?1,preview=?2 WHERE id=?3 AND updated<=?1",
-                params![at, content.chars().take(200).collect::<String>(), id],
+                params![at, row.content.chars().take(200).collect::<String>(), id],
             )?;
             changed.insert(id);
         }
@@ -593,6 +581,113 @@ fn prune_bytes(tx: &rusqlite::Transaction<'_>, limit: i64) -> Result<()> {
     }
     Ok(())
 }
+/// One message as stored in the projection.
+struct Projected<'a> {
+    kind: &'static str,
+    content: &'a str,
+    direction: &'static str,
+    at: i64,
+    media: Option<String>,
+    source: Option<String>,
+}
+
+impl<'a> Projected<'a> {
+    fn new(described: &'a content::Described, direction: &'static str, at: i64) -> Result<Self> {
+        Ok(Self {
+            kind: described.kind,
+            content: &described.content,
+            direction,
+            at,
+            media: described.media.as_ref().map(Value::to_string),
+            source: described
+                .source
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+        })
+    }
+}
+
+enum Stored {
+    New,
+    Unchanged,
+    Changed(String),
+}
+
+/// Handles a message that may already be stored.
+/// Its route (conversation, direction) and any text body are immutable: a change
+/// means corruption. Parser-generated labels and media may be refreshed, so a newer
+/// version re-projecting history neither fails nor keeps an older, poorer label.
+fn reproject(
+    tx: &rusqlite::Transaction<'_>,
+    account: &str,
+    event: &InboundEvent,
+    row: &Projected<'_>,
+) -> Result<Stored> {
+    type Old = (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+    );
+    let old: Option<Old> = tx
+        .query_row(
+            "SELECT c.platform_id,m.direction,m.content,m.source,m.conversation_id,m.kind,m.media FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.account_id=?1 AND m.server_id=?2",
+            params![account, event.server_message_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+        )
+        .optional()?;
+    let Some((platform, direction, content, source, conversation, kind, media)) = old else {
+        return Ok(Stored::New);
+    };
+    if source == "legacy" {
+        anyhow::ensure!(platform == event.conversation_id, "legacy route conflict");
+        tx.execute("UPDATE messages SET direction=?1,content=?2,client_id=?3,at_ms=?4,source='native' WHERE account_id=?5 AND server_id=?6",params![row.direction,row.content,event.client_message_id,row.at,account,event.server_message_id])?;
+        return Ok(Stored::Changed(conversation));
+    }
+    anyhow::ensure!(
+        platform == event.conversation_id && direction == row.direction,
+        "conflicting server message projection"
+    );
+    if content == row.content && (media.is_some() || row.media.is_none()) {
+        return Ok(Stored::Unchanged);
+    }
+    anyhow::ensure!(
+        kind != "text" && row.kind != "text",
+        "conflicting server message projection"
+    );
+    tx.execute(
+        "UPDATE messages SET kind=?1,content=?2,media=?3,media_source=?4 WHERE account_id=?5 AND server_id=?6",
+        params![row.kind, row.content, row.media, row.source, account, event.server_message_id],
+    )?;
+    Ok(Stored::Changed(conversation))
+}
+
+/// Removes a placeholder an older version stored for what is now a hidden packet.
+fn drop_hidden(
+    tx: &rusqlite::Transaction<'_>,
+    account: &str,
+    server_id: &str,
+) -> Result<Option<String>> {
+    let conversation: Option<String> = tx
+        .query_row(
+            "SELECT conversation_id FROM messages WHERE account_id=?1 AND server_id=?2 AND kind<>'text' AND source='native'",
+            params![account, server_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if conversation.is_some() {
+        tx.execute(
+            "DELETE FROM messages WHERE account_id=?1 AND server_id=?2 AND kind<>'text' AND source='native'",
+            params![account, server_id],
+        )?;
+    }
+    Ok(conversation)
+}
+
 /// A conversation first seen through our own message has no peer yet; the first
 /// reply names it. Runs before message dedup so re-projected history repairs old rows.
 fn repair_peer(

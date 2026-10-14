@@ -472,3 +472,69 @@ fn rich_media_is_shown_with_its_preview_and_counted_against_the_byte_budget() {
     // Reopening is idempotent for the added columns and triggers.
     Workbench::open(root.path()).unwrap();
 }
+#[test]
+fn reprojection_refreshes_labels_and_media_but_never_rewrites_text() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Workbench::open(root.path()).unwrap();
+    db.ensure_account("a", "self").unwrap();
+    let mut text = event("7681885293746357950", "peer");
+    text.conversation_id = "0:1:1:2".into();
+    db.project("a", "self", &[text]).unwrap();
+    let image_json = r#"{"resource_url":{"skey":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","large_url_list":["https://p5-ex.douyinpic.com/l"]},"cover_width":1,"cover_height":2}"#;
+    let push_json = "";
+    // Rows an older version stored without media / with a placeholder label.
+    {
+        let conn = db.lock().unwrap();
+        let conversation: String = conn
+            .query_row("SELECT id FROM conversations", [], |r| r.get(0))
+            .unwrap();
+        for (server, content) in [
+            ("7681885293746357951", "[暂不支持的消息类型]"),
+            ("7681885293746357952", "[暂不支持的消息类型]"),
+        ] {
+            conn.execute(
+                "INSERT INTO messages(id,account_id,conversation_id,server_id,direction,kind,content,at_ms) VALUES(?1,'a',?2,?3,'in','other',?4,?5)",
+                rusqlite::params![uuid::Uuid::new_v4().to_string(), conversation, server, content, now_ms()],
+            )
+            .unwrap();
+        }
+    }
+    let rich = |server: &str, json: &str| {
+        let mut e = event(server, "peer");
+        e.conversation_id = "0:1:1:2".into();
+        e.text = None;
+        e.content_json = json.into();
+        e
+    };
+    db.project(
+        "a",
+        "self",
+        &[
+            rich("7681885293746357951", image_json),
+            rich("7681885293746357952", push_json),
+        ],
+    )
+    .unwrap();
+    let id = db.conversations("a", 1, 10, "").unwrap()["items"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let messages = db.messages("a", &id).unwrap();
+    let messages = messages.as_array().unwrap();
+    assert_eq!(messages.len(), 2, "the content-less placeholder is removed");
+    let image = messages
+        .iter()
+        .find(|m| m["content_type"] == "image")
+        .unwrap();
+    assert_eq!(image["media"]["url"], "https://p5-ex.douyinpic.com/l");
+    assert!(db
+        .media_source("a", &id, image["id"].as_str().unwrap())
+        .unwrap()
+        .is_some());
+    // A changed body for a stored text message is still a conflict.
+    let mut altered = event("7681885293746357950", "peer");
+    altered.conversation_id = "0:1:1:2".into();
+    altered.text = Some("different".into());
+    altered.content_json = r#"{"text":"different"}"#.into();
+    assert!(db.project("a", "self", &[altered]).is_err());
+}

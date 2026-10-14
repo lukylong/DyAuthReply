@@ -552,7 +552,7 @@ DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower()
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
+    '修复会话列表和聊天窗口不显示对方昵称、头像的问题（新安装尤其明显）\n'
     'Windows 覆盖安装一次完成：客户端运行中也无需先退出再重装\n'
-    '快捷登录组件改从专属云存储下载，首次准备只需十几秒\n'
-    '包含 0.1.35 的组件固定版本与完整性校验',
+    '快捷登录组件改从专属云存储下载，首次准备只需十几秒',
 )

@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod credential_store;
+pub mod diagnostics;
 pub mod engine_gate;
 pub mod health;
 pub mod identity;

@@ -2,6 +2,7 @@
 pub mod api;
 mod cards;
 mod catalog;
+mod diagnostics;
 mod state;
 use anyhow::{Context, Result};
 use futures_util::StreamExt;

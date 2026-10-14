@@ -8,6 +8,7 @@ import {
   Zap,
   Gauge,
   Download,
+  Activity,
 } from "lucide-vue-next";
 import {
   useClientSettings,
@@ -15,7 +16,12 @@ import {
 } from "../composables/useClientSettings";
 import { useVersionUpdate } from "../composables/useVersionUpdate";
 import CapacityPanel from "../components/CapacityPanel.vue";
-import { openExternalUrl } from "../api/client";
+import {
+  openExternalUrl,
+  getDiagnostics,
+  setDiagnostics,
+  type DiagnosticsState,
+} from "../api/client";
 
 const { settings, resetSettings } = useClientSettings();
 const { checkUpdate, isChecking, updateInfo, checkError } = useVersionUpdate();
@@ -42,7 +48,7 @@ function resetMirrors() {
   mirrorsText.value = DEFAULT_UPDATE_MIRRORS.join("\n");
 }
 
-const activeTab = ref<"capacity" | "version" | "notification" | "runtime">(
+const activeTab = ref<"capacity" | "version" | "notification" | "runtime" | "diagnostics">(
   "capacity",
 );
 
@@ -146,6 +152,42 @@ function handleReset() {
   }
 }
 
+// 运行诊断上报：默认关闭；开启后定期上报脱敏的运行状态与告警，便于远程排查问题
+const diagnostics = ref<DiagnosticsState | null>(null);
+const diagnosticsBusy = ref(false);
+const diagnosticsError = ref("");
+
+async function loadDiagnostics() {
+  try {
+    diagnostics.value = await getDiagnostics();
+    diagnosticsError.value = "";
+  } catch (error) {
+    diagnosticsError.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function onDiagnosticsChange(event: Event) {
+  const enabled = (event.target as HTMLInputElement).checked;
+  diagnosticsBusy.value = true;
+  try {
+    diagnostics.value = await setDiagnostics(enabled);
+    diagnosticsError.value = "";
+  } catch (error) {
+    diagnosticsError.value = error instanceof Error ? error.message : String(error);
+    await loadDiagnostics();
+  } finally {
+    diagnosticsBusy.value = false;
+  }
+}
+
+function formatTime(value: string | null | undefined) {
+  if (!value) return "尚未上报";
+  const at = new Date(value);
+  return Number.isNaN(at.getTime()) ? value : at.toLocaleString();
+}
+
+onMounted(loadDiagnostics);
+
 const updateStatusText = computed(() => {
   if (isChecking.value) return "检查中...";
   if (checkError.value) return `检查失败：${checkError.value}`;
@@ -207,6 +249,14 @@ const updateStatusType = computed<"info" | "error" | "success" | "update">(
             >版本更新<small>检查更新与下载</small></span
           >
         </button>
+        <button
+          :class="{ active: activeTab === 'diagnostics' }"
+          @click="activeTab = 'diagnostics'; loadDiagnostics()"
+        >
+          <Activity :size="18" /><span
+            >运行诊断<small>协助排查问题（默认关闭）</small></span
+          >
+        </button>
         <p class="nav-note">
           承载设置点击保存后生效；其他偏好自动保存。账号、授权和聊天数据不会随偏好重置而删除。
         </p>
@@ -250,6 +300,54 @@ const updateStatusType = computed<"info" | "error" | "success" | "update">(
               ><small>退出前等待已接收任务结束，防止重复回复。</small></span
             ><span class="value-tag success">已启用</span>
           </div>
+        </section>
+        <section v-if="activeTab === 'diagnostics'" class="settings-section">
+          <header>
+            <h2>运行诊断</h2>
+            <p>遇到问题时开启，可让技术支持直接看到客户端的运行状况，更快定位原因。</p>
+          </header>
+          <label class="setting-row"
+            ><span
+              ><b>上报运行诊断数据</b
+              ><small>默认关闭。开启后约每 15 分钟上报一次，关闭后立即停止并丢弃未上报的数据。</small></span
+            ><input
+              type="checkbox"
+              role="switch"
+              :disabled="diagnosticsBusy || !diagnostics || (!diagnostics.available && !diagnostics.enabled)"
+              :checked="diagnostics?.enabled ?? false"
+              @change="onDiagnosticsChange"
+          /></label>
+          <p v-if="diagnostics && !diagnostics.available" class="note">激活授权后才能开启。</p>
+          <div class="setting-row">
+            <span
+              ><b>会上报的内容</b
+              ><small
+                >客户端版本、操作系统；服务运行状态；各托管账号的收发状态（账号以不可逆编号代替）；告警、错误与收消息、自动回复、发送结果等关键事件。</small
+              ></span
+            >
+          </div>
+          <div class="setting-row">
+            <span
+              ><b>不会上报的内容</b
+              ><small
+                >私信内容、对方昵称与头像、抖音账号标识、登录 Cookie 与各类令牌、网址中的路径和参数。</small
+              ></span
+            >
+          </div>
+          <div v-if="diagnostics?.enabled" class="setting-row">
+            <span
+              ><b>上报状态</b
+              ><small
+                >上次上报：{{ formatTime(diagnostics.status.last_upload_at) }}；待上报
+                {{ diagnostics.pending_events }} 条；累计
+                {{ diagnostics.status.uploaded_events }} 条</small
+              ></span
+            >
+          </div>
+          <p v-if="diagnostics?.status.last_error" role="status" class="feedback error">
+            最近一次上报失败：{{ diagnostics.status.last_error }}（会自动重试）
+          </p>
+          <p v-if="diagnosticsError" role="status" class="feedback error">{{ diagnosticsError }}</p>
         </section>
         <section v-if="activeTab === 'notification'" class="settings-section">
           <header>

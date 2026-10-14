@@ -27,14 +27,14 @@ use dy_agent::{
 };
 use tokio::{net::TcpListener, signal};
 use tracing::info;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("dy_agent=info")),
-        )
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("dy_agent=info")))
+        .with(tracing_subscriber::fmt::layer())
+        .with(dy_agent::diagnostics::layer())
         .init();
 
     let command = parse_command()?;
@@ -264,6 +264,12 @@ async fn serve(
     let runtime_for_shutdown = runtime.clone();
     let hosted_for_shutdown = hosted.clone();
     ipc.watch_parent();
+    let diagnostics_upload = start_diagnostics(
+        &config.data_dir,
+        &health,
+        license.as_ref(),
+        messaging.as_ref(),
+    );
     let router = business_router(health, license, messaging, &config.data_dir).merge(ipc.router());
     let server_result = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_live_runtime(
@@ -274,13 +280,7 @@ async fn serve(
         ))
         .await
         .context("Agent health server failed");
-    if let Some(task) = ui_updates {
-        task.abort();
-        let _ = task.await;
-    }
-    if let Some(task) = renewal {
-        task.stop().await?;
-    }
+    stop_background(ui_updates, diagnostics_upload, renewal).await?;
     if let Some(service) = frontier_for_cleanup {
         service.stop_frontier().await?;
     }
@@ -348,6 +348,43 @@ fn desktop_ipc(
     )
 }
 
+/// Loads the opt-in diagnostics switch and starts its (idle while off) uploader.
+fn start_diagnostics(
+    data_dir: &std::path::Path,
+    health: &HealthHandle,
+    license: Option<&Arc<dy_agent::license::NativeLicense>>,
+    messaging: Option<&(Arc<ManualService>, String)>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    dy_agent::diagnostics::shared().load(data_dir);
+    license.map(|manager| {
+        dy_agent::diagnostics::upload::spawn(dy_agent::diagnostics::upload::Sources {
+            health: health.clone(),
+            messaging: messaging.map(|(service, _)| service.clone()),
+            license: manager.clone(),
+        })
+    })
+}
+
+async fn stop_background(
+    ui_updates: Option<tokio::task::JoinHandle<()>>,
+    diagnostics: Option<tokio::task::JoinHandle<()>>,
+    renewal: Option<dy_agent::license::RenewalTask>,
+) -> Result<()> {
+    stop_task(ui_updates).await;
+    stop_task(diagnostics).await;
+    if let Some(task) = renewal {
+        task.stop().await?;
+    }
+    Ok(())
+}
+
+async fn stop_task(task: Option<tokio::task::JoinHandle<()>>) {
+    if let Some(task) = task {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
 fn business_router(
     health: HealthHandle,
     license: Option<Arc<dy_agent::license::NativeLicense>>,
@@ -382,6 +419,10 @@ fn business_router(
             health,
             token.clone(),
             log_dir,
+        ));
+        router = router.merge(dy_agent::diagnostics::upload::router(
+            license.is_some(),
+            token.clone(),
         ));
         router = router.merge(dy_agent::business::api::router(
             service.clone(),

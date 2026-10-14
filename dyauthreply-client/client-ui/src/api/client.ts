@@ -719,6 +719,26 @@ export function messageImageUrl(
   return `${API_PREFIX}/douyin/account/${accountId}/conversation/${conversationId}/message/${messageId}/image`;
 }
 
+export interface DiagnosticsState {
+  enabled: boolean;
+  available: boolean;
+  pending_events: number;
+  status: { last_upload_at: string | null; last_error: string; uploaded_events: number };
+}
+
+/** 运行诊断上报（默认关闭）：读取开关与上报状态。 */
+export function getDiagnostics() {
+  return request<DiagnosticsState>('/diagnostics');
+}
+
+/** 运行诊断上报：开启或关闭；关闭时丢弃尚未上报的数据。 */
+export function setDiagnostics(enabled: boolean) {
+  return request<DiagnosticsState>('/diagnostics', {
+    method: 'PUT',
+    body: JSON.stringify({ enabled }),
+  });
+}
+
 /** 加密图片/视频封面：本地服务解密后的图片字节。本地接口需要鉴权，<img> 无法直连，故取回为 Blob。 */
 export async function fetchMessageImage(
   accountId: string,

@@ -8,9 +8,9 @@ zq-platform (芷青开发平台) 是一个企业级后台管理系统，采用�
 - **后端**: Django 5.2.7 + Django Ninja (REST API)
 - **前端**: Vue 3 + Vite + Element Plus (pnpm monorepo)
 - **核心特性**: 抖音私信自动回复模块（纯 HTTP 协议，无浏览器依赖）
-- **桌面客户端** (`dyauthreply-client/`): Tauri 2 + Vue，面向最终用户的免 Docker 单机版，见下方「桌面客户端」章节
+- **桌面客户端** (`dyauthreply-client/`): Tauri 2 + Vue + **Rust 原生 Agent（`dy-agent`）**，面向最终用户的免 Docker 单机版，见下方「桌面客户端」章节
 
-**重要架构分工**：抖音托管自动回复的**主业务实际运行在桌面客户端**——客户端是自包含的本地实例（本机 SQLite + 本机 Django `127.0.0.1:8765` + 本地 douyin worker），账号/规则管理和实际回复发送都发生在客户端内。`web/` 管理后台 + 公网 `backend-django` 目前主要承担**数据查看**与**授权核心**（license 激活、设备鉴权），不是回复的主执行端。新增“客户端 → 公网”的数据同步应复用 `core/client/license_auth.py` 与 `/api/client-auth/*` 这套基于 `device_fingerprint` / `activation_id` 的鉴权通道，不要新造一套。
+**重要架构分工**：抖音托管自动回复的**主业务实际运行在桌面客户端**——客户端是自包含的本地实例（发布版：Rust `dy-agent` sidecar 监听 `127.0.0.1:18765`，本机 SQLite；**安装包不含 Python/Node**），账号/规则管理和实际回复发送都发生在客户端内。`web/` 管理后台 + 公网 `backend-django` 目前主要承担**数据查看**与**授权核心**（license 激活、设备鉴权），不是回复的主执行端。新增“客户端 → 公网”的数据同步应复用 `core/client/license_auth.py` 与 `/api/client-auth/*` 这套基于 `device_fingerprint` / `activation_id` 的鉴权通道，不要新造一套。
 
 ## 快速启动
 
@@ -108,21 +108,28 @@ pnpm lint
 
 #### 桌面客户端（Tauri，`dyauthreply-client/`）
 ```bash
-# 前置：backend-django 依赖已装（复用同一份 core.douyin 代码），Node.js 20+，可选 Rust（仅打包需要）
+# 前置：Node.js 20+、Rust 工具链（CI 固定 1.98.1，见 .github/workflows/client-build.yml）
 cd dyauthreply-client/client-ui && npm install
 cd ../desktop && npm install
 
-# 终端 A：本地服务（Django API + douyin worker，SQLite，无需 Redis/Postgres/Docker）
-python3 dyauthreply-client/launcher/launcher.py
-# 浏览器访问 http://127.0.0.1:8765/app/
+# 终端 A：本地 Rust Agent（127.0.0.1:18765，等价于 npm run launcher）
+cargo run --locked --manifest-path dyauthreply-client/agent/Cargo.toml --bin dy-agent
 
-# 终端 B：Tauri 桌面壳（会自动拉起 client-ui 开发服务器）
-cd dyauthreply-client/desktop
-npm run tauri dev
+# 终端 B：Tauri 桌面壳（自动拉起 client-ui 开发服务器）
+cd dyauthreply-client && npm run desktop:dev
 
-# 打包（产物在 desktop/src-tauri/target/release/bundle/）
-cd dyauthreply-client/client-ui && npm run build
-cd ../desktop && npm run tauri build
+# 打包前先构建 sidecar（写入 desktop/src-tauri/binaries/ 与 native-manifest.json），release 需要
+# CLIENT_LICENSE_SERVER_URL 与 LICENSE_LEASE_PUBLIC_KEY_B64 环境变量
+npm run agent:build && npm run ui:build && npm run desktop:build
+
+# Agent 质量门（CI 同款）
+cargo fmt --manifest-path agent/Cargo.toml -- --check
+cargo clippy --locked --manifest-path agent/Cargo.toml --all-targets -- -D warnings
+cargo test --locked --manifest-path agent/Cargo.toml                        # 单个: 追加 <test_name>
+cargo run --release --locked --manifest-path agent/Cargo.toml -- --verify-protocol
+
+# 发布契约校验（所有版本号必须一致：client/desktop package.json、tauri.conf.json、Cargo.toml/.lock、settings.py DOWNLOAD_LATEST_VERSION；tag 形如 client-v0.1.32）
+npm run release:check
 ```
 
 ## 测试
@@ -278,26 +285,26 @@ web/
 
 ### 桌面客户端架构（dyauthreply-client）
 
-**定位**: 面向不懂技术的最终用户的免 Docker 单机版，双击 `.app`/`.exe` 即用；与 `web/`、`backend-django` 的现有部署链路**完全隔离**，不共享代码，只通过 HTTP API / 子进程复用后端逻辑。
+**定位**: 面向不懂技术的最终用户的免 Docker 单机版；与 `web/` 的部署链路隔离，不共享代码。
 
 ```
 dyauthreply-client/
-├── desktop/              Tauri 2 工程（Rust 管子进程/托盘/单实例锁）
-│   └── src-tauri/        启动 launcher.py 子进程，WebView 加载 client-ui
-├── client-ui/            独立 Vue 3 + Vite 客户端 UI（与 web-ele 代码不共享，只共享 API 契约）
-│   └── src/views/        HomeView / AccountsView / ChatView / CardsView / RulesView / TemplatesView / LogsView / SettingsView / AdminConsoleView
-├── launcher/              跨平台启动器（Python，被 Tauri 调用，也可独立运行）
-│   ├── launcher.py        启动 Django API（127.0.0.1:8765）+ douyin worker，SQLite 迁移
-│   └── launcher_bundled.py  发布态：内置 Python/Node 运行时的打包版
-└── PLAN.zh-CN.md / QUICKSTART.zh-CN.md   产品规划与本地开发速查（先读 PLAN）
+├── agent/            Rust `dy-agent`（权威运行时）：HTTP API+WS(127.0.0.1:18765)、SQLite、每账号 Actor、
+│                     协议/签名/加密凭证、license 租约、滚动存储、workbench/business API；`src/bin/*` 为探针与仿真工具
+├── desktop/          Tauri 2 壳（src-tauri/src/native_host.rs 管理 sidecar 生命周期，native_ws.rs 转发 WS）
+├── client-ui/        独立 Vue 3 + Vite UI（与 web-ele 不共享代码，只共享 API 契约；Tauri 下直连 18765）
+└── launcher/         **遗留** Python 启动器（旧版 127.0.0.1:8765 + Django `core/client`），仅为迁移/兼容保留
 ```
 
 **关键点**:
-- 本地后端固定监听 `127.0.0.1:8765`，路由前缀 `/api/client/v1/`，仅聚合抖音相关 handler（不暴露 `/api/core/user` 等管理接口），现阶段靠 `127.0.0.1` 绑定 + 本地超级用户免鉴权，无客户端 Token/RBAC
-- 复用 `backend-django/core/douyin/runtime` 的 Worker/协议/凭证代码，而非重写
-- 数据目录：开发态 `DyAuthReply/data/client/`；macOS 正式版 `~/Library/Application Support/DyAuthReply/`；Windows 正式版 `%APPDATA%\DyAuthReply\`（与仓库 `data/standalone/` 路径不同，避免误删开发数据）
+- 路由前缀 `/api/client/v1/`，健康检查 `GET /health`；仅本机 loopback 绑定（非 loopback 地址会被拒绝）
+- 抖音协议有**两份实现必须保持一致**：Python（`backend-django/core/douyin/runtime`，权威 pb2 编码器）与 Rust（`agent/src/protocol`）。共享黄金语料在 `protocol-fixtures/*.json`；改协议/请求组装后同时跑 Python `core.tests.test_douyin_{wire_codec,protocol_corpus,http_request_plan_corpus}` 与 `agent -- --verify-protocol`
+- Python 侧 `backend-django/core/client/` 仍是**公网服务端**的 license/鉴权/公告/更新清单接口（`/api/client-auth/*`），不是客户端本地后端
+- 发布契约（`scripts/client/check_release_contract.mjs`）：`productName`=`D助手`、`identifier`=`com.dyauthreply.client`、数据根目录 `DyAuthReply` 不得变更（否则已装用户会分叉）；`externalBin` 只能是 `binaries/dy-agent`
+- 发布：推送 `client-v*` tag 触发 `client-build.yml`（preflight → agent-quality → 多平台 build → 更新清单 manifest，产物发布到 `DIST_REPO`）
+- 数据目录：开发态 `DyAuthReply/data/client/`；macOS 正式版 `~/Library/Application Support/DyAuthReply/`；Windows 正式版 `%APPDATA%\DyAuthReply\`；开发时可用 `DY_AGENT_DATA_DIR` / `DY_AGENT_BIND` 覆盖
 - 约束：`dyauthreply-client/**` 内不得 `import` 或修改 `web/apps/web-ele/**`
-- 健康检查 `GET /api/client/v1/health`；启动失败时按顺序看 `launcher.log` → `server.log` → `migration_error.log`
+- 更多细节：`dyauthreply-client/agent/README.md`（Agent 能力与验证命令）、`PLAN.zh-CN.md`（产品规划，部分已被 Rust 迁移取代）
 
 ## 开发规范
 
@@ -388,10 +395,9 @@ export namespace DouyinAccountApi {
 4. 如果抖音更新了签名算法，需要更新 `dy_ab.js` 和 `bd-ticket-guard` 脚本
 
 ### 桌面客户端启动失败（Splash 卡住/"服务启动失败"）
-1. 确认没有同时打开多个客户端窗口（会触发单实例锁 `launcher.lock`）
-2. 按优先级查日志：`launcher.log`（后端 sidecar 启动）→ `server.log`（Django API）→ `migration_error.log`（迁移失败详情）
-3. 确认 `8765` 端口未被占用（常见于开发态残留的 `launcher.py` 进程未退出）
-4. Windows 下杀毒软件可能拦截 PyInstaller 解包，需将安装目录加入白名单
+1. 确认没有同时打开多个客户端窗口（单实例锁）；旧版 Python 引擎的 `launcher.lock` 会触发 `engine_gate` 跨引擎互斥
+2. 确认 `18765` 端口未被占用（常见于开发态残留的 `dy-agent` 进程）；`curl http://127.0.0.1:18765/health`
+3. Windows 下杀毒软件可能拦截 sidecar，需将安装目录加入白名单
 
 ## API 文档
 

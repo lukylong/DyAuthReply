@@ -20,6 +20,15 @@ const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
 /// Suffixes of the CDNs Douyin serves IM media from.
+/// Image variants in display preference. The CDN serves `large`/`medium`/`thumb` as
+/// WebP, which every webview renders; `origin` keeps the sender's format (often HEIC
+/// from iPhones, which `WebView2` cannot show), so it is only a fallback.
+const IMAGE_VARIANTS: &[&str] = &[
+    "large_url_list",
+    "origin_url_list",
+    "medium_url_list",
+    "thumb_url_list",
+];
 const ALLOWED_HOST_SUFFIXES: &[&str] = &[
     ".douyinpic.com",
     ".douyinvod.com",
@@ -48,7 +57,7 @@ pub fn extract(obj: &Map<String, Value>, kind: &str) -> (Option<Value>, Option<M
     let mut media = match kind {
         "image" => json!({
             "kind": "image",
-            "url": first_url(resource, &["origin_url_list", "large_url_list", "medium_url_list", "thumb_url_list"]),
+            "url": first_url(resource, IMAGE_VARIANTS),
             "width": number(obj.get("cover_width")),
             "height": number(obj.get("cover_height")),
             "encrypted": skey(resource).is_some(),
@@ -89,15 +98,7 @@ pub fn extract(obj: &Map<String, Value>, kind: &str) -> (Option<Value>, Option<M
         media["inline_pic"] = json!(preview);
     }
     let source = match kind {
-        "image" => source(
-            resource,
-            &[
-                "origin_url_list",
-                "large_url_list",
-                "medium_url_list",
-                "thumb_url_list",
-            ],
-        ),
+        "image" => source(resource, IMAGE_VARIANTS),
         "video" => source(poster, &["origin_url_list", "medium_url_list"]),
         _ => None,
     };
@@ -277,6 +278,24 @@ mod tests {
         assert!(decrypt(&payload, &skey).is_err());
         assert!(decrypt(&payload[..20], &skey).is_err());
         assert!(decrypt(&payload, "zz").is_err());
+    }
+
+    #[test]
+    fn webp_large_variant_is_preferred_over_a_heic_original() {
+        let image: Value = serde_json::from_str(
+            r#"{"resource_url":{"skey":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "origin_url_list":["https://p11-sign.douyinpic.com/o~tplv-x-get:.image"],
+                "large_url_list":["https://p5-ex-gddgtc-sign.douyinpic.com/o~tplv-x-get:large.image"],
+                "thumb_url_list":["https://p11-sign.douyinpic.com/o~tplv-x-get:thumb.image"]},
+                "cover_width":3024,"cover_height":4032}"#,
+        )
+        .unwrap();
+        let (media, source) = extract(image.as_object().unwrap(), "image");
+        let large = "https://p5-ex-gddgtc-sign.douyinpic.com/o~tplv-x-get:large.image";
+        assert_eq!(media.unwrap()["url"], large);
+        let source = source.unwrap();
+        assert_eq!(source.url, large);
+        assert!(allowed_url(&source.url));
     }
 
     #[test]

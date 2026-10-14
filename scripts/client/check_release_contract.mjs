@@ -69,10 +69,19 @@ const hooks = text('dyauthreply-client/desktop/src-tauri/installer-hooks.nsh');
 const retirement = text('dyauthreply-client/desktop/src-tauri/retire-client.ps1');
 const nativeHost = text('dyauthreply-client/desktop/src-tauri/src/native_host.rs');
 const engineGate = text('dyauthreply-client/agent/src/engine_gate.rs');
-for (const required of ['NSIS_HOOK_PREINSTALL', 'retire-client.ps1', 'Abort']) {
+for (const required of ['NSIS_HOOK_PREINSTALL', 'MUI_CUSTOMFUNCTION_GUIINIT', 'retire-client.ps1', 'Abort', '-Probe']) {
   if (!hooks.includes(required)) throw new Error(`Installer hook lost ${required}`);
 }
-for (const required of ['$InstallDir', 'CreationDate', 'launcher.exe', 'dy-agent.exe', 'AddSeconds(75)']) {
+// The hooks are parsed before installer.nsi defines PRODUCTNAME/MAINBINARYNAME, so they
+// pin the identity themselves; it must match what the bundle actually installs.
+const mainBinary = match('dyauthreply-client/desktop/src-tauri/Cargo.toml', /^name\s*=\s*"([^"]+)"/m, 'package name');
+if (!hooks.includes(`!define DY_MAIN_BINARY "${mainBinary}"`) || !hooks.includes(`!define DY_PRODUCT "${tauri.productName}"`)) {
+  throw new Error('Installer hook identity differs from the bundled binary/product');
+}
+if (!readFileSync(join(root, 'dyauthreply-client/desktop/src-tauri/installer-hooks.nsh')).subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf]))) {
+  throw new Error('installer-hooks.nsh must be UTF-8 with BOM (makensis runs without -INPUTCHARSET)');
+}
+for (const required of ['$InstallDir', 'CreationDate', 'launcher.exe', 'dy-agent.exe', 'Wait-Drained 20', 'Stop-Exact', '$Probe']) {
   if (!retirement.includes(required)) throw new Error(`Retirement script lost ${required}`);
 }
 const retirementCode = retirement.split(/\r?\n/).filter((line) => !line.trimStart().startsWith('#')).join('\n');

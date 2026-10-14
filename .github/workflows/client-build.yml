@@ -308,6 +308,24 @@ jobs:
           Remove-Item $legacyPath -Force -ErrorAction SilentlyContinue
           node scripts/client/audit_native_bundle.mjs "$installDir"
           if (-not (Test-Path (Join-Path $installDir 'dyauthreply.exe'))) { throw 'Desktop executable missing' }
+          # Upgrade over a RUNNING client: the installer must stop the GUI and drain or stop
+          # dy-agent itself and finish in one pass (no "exit the client and retry").
+          $mainExe = Join-Path $installDir 'dyauthreply.exe'
+          $agentExe = Join-Path $installDir 'dy-agent.exe'
+          $running = Start-Process -FilePath $mainExe -PassThru
+          $agentSeen = $false
+          for ($i = 0; $i -lt 60 -and -not $agentSeen; $i++) {
+            Start-Sleep -Milliseconds 500
+            $agentSeen = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $agentExe }).Count -gt 0
+          }
+          Write-Output "UPGRADE_SMOKE_AGENT_RUNNING=$agentSeen"
+          $upgrade = Start-Process -FilePath $installer.FullName -ArgumentList @('/P', "/D=$installDir") -PassThru
+          if (-not $upgrade.WaitForExit(180000)) { Stop-Process -Id $upgrade.Id -Force; throw 'Upgrade over a running client hung' }
+          if ($upgrade.ExitCode -ne 0) { throw "Upgrade over a running client failed: $($upgrade.ExitCode)" }
+          $left = @(Get-CimInstance Win32_Process | Where-Object { ($_.ExecutablePath -eq $mainExe -or $_.ExecutablePath -eq $agentExe) -and $_.ProcessId -eq $running.Id })
+          if ($left.Count -ne 0) { throw 'The previously running client survived the upgrade' }
+          if (-not (Test-Path $mainExe) -or -not (Test-Path $agentExe)) { throw 'Upgrade left an incomplete installation' }
+          Write-Output 'WINDOWS_UPGRADE_WHILE_RUNNING_PASS=1'
           $uninstaller = Get-ChildItem $installDir -Filter 'uninstall.exe' | Select-Object -First 1
           if ($uninstaller) {
             $uninstall = Start-Process -FilePath $uninstaller.FullName -ArgumentList '/S' -Wait -PassThru

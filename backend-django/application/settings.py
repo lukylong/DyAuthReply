@@ -546,13 +546,13 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.36'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.37'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '聊天窗口可直接查看图片、视频封面、语音与表情；会话自动补全对方昵称和头像\n'
-    'Windows 覆盖安装一次完成；快捷登录组件改从专属云存储下载，十几秒即可就绪\n'
-    '新增「运行诊断」开关（默认关闭），开启后可协助远程排查问题',
+    '修复点击没有消息的会话时，右侧仍显示上一个会话消息的问题\n'
+    '升级后旧的图片、语音、视频消息可补全显示，不再出现多余的「暂不支持的消息类型」\n'
+    '包含 0.1.36 的媒体显示、昵称头像补全与运行诊断',
 )

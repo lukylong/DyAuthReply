@@ -54,6 +54,8 @@ export default defineConfig({
       '^/api/client/v1/douyin/account/all$': nativeProxy(),
       '^/api/client/v1/douyin/account/[^/]+/(conversations|manual-reply)(\\?|$)': nativeProxy(),
       '^/api/client/v1/douyin/account/[^/]+/conversation/[^/]+/messages$': nativeProxy(),
+      '^/api/client/v1/douyin/account/[^/]+/conversation/[^/]+/message/[^/]+/image$': nativeProxy(),
+      '/api/client/v1/diagnostics': nativeProxy(),
       '/api/client/v1/douyin/worker-command/': nativeProxy(),
       '/ws/client/douyin/': nativeProxy(true),
       '/api/client/v1/douyin/rule': nativeProxy(),

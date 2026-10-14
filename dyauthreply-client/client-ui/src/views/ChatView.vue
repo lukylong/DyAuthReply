@@ -617,8 +617,12 @@ async function loadMessages(silent = false, force = false) {
   if (!silent) loadingMessages.value = true;
   else syncing.value = true;
   const shouldScroll = !silent || stickToBottom.value;
+  const accountId = activeAccountId.value;
+  const conversationId = activeConversationId.value;
   try {
-    const items = await listMessages(activeAccountId.value, activeConversationId.value);
+    const items = await listMessages(accountId, conversationId);
+    // 请求返回前已切换会话：丢弃旧会话的结果，避免覆盖新会话
+    if (accountId !== activeAccountId.value || conversationId !== activeConversationId.value) return;
     const sig = messagesSignature(items);
     if (force || sig !== msgSig) {
       msgSig = sig;
@@ -819,8 +823,10 @@ watch(activeAccountId, () => {
 
 watch(activeConversationId, () => {
   msgSig = '';
+  // 空会话的签名同样为空串，不强制刷新会一直显示上一个会话的消息
+  messages.value = [];
   releaseDecryptedMedia();
-  loadMessages();
+  loadMessages(false, true);
   subscribeRealtime();
 });
 

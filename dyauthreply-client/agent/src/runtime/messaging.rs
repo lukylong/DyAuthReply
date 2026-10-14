@@ -1459,6 +1459,7 @@ impl ManualService {
             Ok(summary)
         })
         .await??;
+        log_inbound_summary(work.account_id.as_str(), &summary);
         *slot.processing.lock().await = summary;
         Ok(())
     }
@@ -1689,6 +1690,7 @@ impl ManualService {
             )
             .send(operation)
             .await?;
+            log_send_outcome(work.account_id.as_str(), &outcome);
             let capability = match outcome.classification {
                 DeliveryClass::Delivered | DeliveryClass::DeliveredSoft => SendCapability::Sendable,
                 DeliveryClass::RiskControlled => SendCapability::RiskControlled,
@@ -1817,6 +1819,27 @@ impl ManualService {
         .await?
     }
 }
+fn log_inbound_summary(account_id: &str, summary: &ReceiveProcessing) {
+    if summary.last_page_inserted > 0 || summary.candidates > 0 || summary.deferred > 0 {
+        tracing::info!(
+            account_id,
+            inserted = summary.last_page_inserted,
+            candidates = summary.candidates,
+            ignored = summary.ignored,
+            deferred = summary.deferred,
+            reconciled_sends = summary.reconciled_sends,
+            "inbound page processed"
+        );
+    }
+}
+fn log_send_outcome(account_id: &str, outcome: &crate::protocol::live_sender::SendOutcome) {
+    tracing::info!(
+        account_id,
+        classification = ?outcome.classification,
+        response_codes = outcome.response_codes.as_deref().unwrap_or(""),
+        "native send completed"
+    );
+}
 fn filter_pending(
     store: &CoreStore,
     lease: &crate::store::LeaseToken,
@@ -1858,7 +1881,13 @@ fn filter_pending(
             summary.deferred += 1;
             continue;
         };
-        let decision = super::inbound_policy::eligibility(&event, own_sec_uid, live_start, now_us);
+        let decision = super::inbound_policy::receipt_eligibility(
+            &event,
+            receipt.received_at_ms,
+            own_sec_uid,
+            live_start,
+            now_us,
+        );
         if decision.is_terminal_ignore() {
             store.consume_inbound(
                 lease,

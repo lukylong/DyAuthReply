@@ -32,7 +32,9 @@ impl SessionEndpoint {
             Self::QueryUser => "https://www.douyin.com/aweme/v1/web/query/user/",
             Self::SelfPage => "https://www.douyin.com/user/self",
             Self::ProfileOther => "https://www.douyin.com/aweme/v1/web/user/profile/other/",
-            Self::Works => "https://www.douyin.com/aweme/v1/web/aweme/post/",
+            // Creator-center list needs only creator cookies; the www post list is
+            // Argus-gated on a UIFID cookie that creator-only logins never receive.
+            Self::Works => "https://creator.douyin.com/janus/douyin/creator/pc/work_list",
             Self::Csrf => "https://www.douyin.com/service/2/abtest_config/",
             Self::Certificate => "https://www.douyin.com/passport/ticket_guard/get_client_cert/",
             Self::Inbox => "https://imapi.douyin.com/v1/message/get_by_user",

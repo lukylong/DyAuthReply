@@ -257,3 +257,74 @@ fn verified_profile_cache_and_peer_refresh_are_account_scoped() {
     assert!(db.set_peer_profile("a", &conversation, &mixed).is_err());
     assert!(db.peer_scope("missing", &conversation).is_err());
 }
+#[test]
+fn group_chat_messages_never_enter_the_direct_message_workbench() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Workbench::open(root.path()).unwrap();
+    db.ensure_account("a", "self").unwrap();
+    let mut group = event("7681885293746357900", "peer");
+    group.message_type = 2;
+    group.conversation_id = "7485123456789012345".into();
+    group.text = Some("group text".into());
+    group.content_json = r#"{"text":"group text","aweType":700}"#.into();
+    db.project("a", "self", &[group]).unwrap();
+    assert_eq!(db.conversations("a", 1, 50, "").unwrap()["total"], 0);
+}
+#[test]
+fn rich_direct_messages_are_labelled_and_control_packets_hidden() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Workbench::open(root.path()).unwrap();
+    db.ensure_account("a", "self").unwrap();
+    let mut share = event("7681885293746357901", "peer");
+    share.text = None;
+    share.content_json = r#"{"itemId":"7","content_title":"秋天","aweType":800}"#.into();
+    let mut control = event("7681885293746357902", "peer");
+    control.sender_uid = String::new();
+    control.text = None;
+    control.content_json = r#"{"command_type":1,"conversation_id":"c"}"#.into();
+    db.project("a", "self", &[share, control]).unwrap();
+    let conversations = db.conversations("a", 1, 50, "").unwrap();
+    let id = conversations["items"][0]["id"].as_str().unwrap();
+    let messages = db.messages("a", id).unwrap();
+    let messages = messages.as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["content"], "[分享视频] 秋天");
+    assert_eq!(messages[0]["content_type"], "card");
+}
+#[test]
+fn reopening_removes_previously_projected_group_conversations_only() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Workbench::open(root.path()).unwrap();
+    db.ensure_account("a", "self").unwrap();
+    let mut direct = event("7681885293746357903", "peer");
+    direct.conversation_id = "0:1:42:43".into();
+    db.project("a", "self", &[direct]).unwrap();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute("INSERT INTO conversations(id,account_id,platform_id,short_id,peer,data) VALUES('g','a','7485123456789012345','1','p','{}')", []).unwrap();
+        conn.execute("INSERT INTO messages(id,account_id,conversation_id,server_id,direction,kind,content,at_ms) VALUES('m','a','g','99','in','unknown','[消息类型 2]',1)", []).unwrap();
+    }
+    drop(db);
+    let reopened = Workbench::open(root.path()).unwrap();
+    let conversations = reopened.conversations("a", 1, 50, "").unwrap();
+    assert_eq!(conversations["total"], 1);
+    let bytes: i64 = reopened
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key='message_bytes'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let actual: i64 = reopened
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT coalesce(sum(length(CAST(content AS BLOB))),0) FROM messages",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(bytes, actual);
+}

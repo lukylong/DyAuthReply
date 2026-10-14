@@ -35,6 +35,13 @@ pub fn eligibility(
     live_start_us: u64,
     now_us: u64,
 ) -> Eligibility {
+    let content = serde_json::from_str::<serde_json::Value>(&event.content_json).ok();
+    let content = content.as_ref().and_then(serde_json::Value::as_object);
+    // Control packets (conversation updates, recalls, read receipts) carry no
+    // sender; judging identity first left them deferred forever in the spool.
+    if content.is_some_and(|c| c.contains_key("read_index") || c.contains_key("command_type")) {
+        return Eligibility::IgnoreSystem;
+    }
     if event.version != 1
         || own_sec_uid.is_empty()
         || event.sender_sec_uid.is_empty()
@@ -62,12 +69,9 @@ pub fn eligibility(
     if now_us.saturating_sub(event.create_time_us) > MAX_REPLY_AGE_US {
         return Eligibility::IgnoreExpired;
     }
-    let Ok(serde_json::Value::Object(content)) = serde_json::from_str(&event.content_json) else {
+    let Some(content) = content else {
         return Eligibility::DeferContent;
     };
-    if content.contains_key("read_index") || content.contains_key("command_type") {
-        return Eligibility::IgnoreSystem;
-    }
     let text = content.get("text").and_then(serde_json::Value::as_str);
     // Rich-media/default trigger parity is a separate rule-engine gate. Preserve
     // those receipts pending rather than silently treating media as no-match.
@@ -78,6 +82,27 @@ pub fn eligibility(
         return Eligibility::DeferContent;
     }
     Eligibility::Candidate
+}
+
+/// Receipt-level decision: a deferral can never outlive the reply window measured
+/// from durable arrival, so unresolvable rows cannot fill the bounded pending spool.
+#[must_use]
+pub fn receipt_eligibility(
+    event: &InboundEvent,
+    received_at_ms: i64,
+    own_sec_uid: &str,
+    live_start_us: u64,
+    now_us: u64,
+) -> Eligibility {
+    let decision = eligibility(event, own_sec_uid, live_start_us, now_us);
+    let received_us = u64::try_from(received_at_ms)
+        .unwrap_or(0)
+        .saturating_mul(1000);
+    let deferred = !decision.is_terminal_ignore() && decision != Eligibility::Candidate;
+    if deferred && now_us.saturating_sub(received_us) > MAX_REPLY_AGE_US {
+        return Eligibility::IgnoreExpired;
+    }
+    decision
 }
 
 #[cfg(test)]
@@ -168,6 +193,52 @@ mod tests {
         assert_eq!(
             eligibility(&e, "self", START, START + 1),
             Eligibility::DeferTimestamp
+        );
+    }
+    #[test]
+    fn senderless_system_packets_are_terminal_not_identity_deferred() {
+        let mut e = event();
+        e.sender_uid.clear();
+        e.sender_sec_uid.clear();
+        e.text = None;
+        e.content_json =
+            r#"{"command_type":1,"conversation_id":"c","need_pull_conv_info":true}"#.into();
+        assert_eq!(
+            eligibility(&e, "self", START, START + 1),
+            Eligibility::IgnoreSystem
+        );
+        e.content_json = r#"{"read_index":9}"#.into();
+        assert_eq!(
+            eligibility(&e, "", START, START + 1),
+            Eligibility::IgnoreSystem
+        );
+    }
+    #[test]
+    fn deferred_receipts_expire_once_older_than_the_reply_window() {
+        let mut e = event();
+        e.sender_uid.clear();
+        let arrived_ms = i64::try_from(START / 1000).unwrap();
+        let fresh = START + 1;
+        let stale = START + MAX_REPLY_AGE_US + 1_000;
+        assert_eq!(
+            receipt_eligibility(&e, arrived_ms, "self", START, fresh),
+            Eligibility::DeferIdentity
+        );
+        assert_eq!(
+            receipt_eligibility(&e, arrived_ms, "self", START, stale),
+            Eligibility::IgnoreExpired
+        );
+        e = event();
+        e.create_time_us = 0;
+        assert_eq!(
+            receipt_eligibility(&e, arrived_ms, "self", START, stale),
+            Eligibility::IgnoreExpired
+        );
+        // A deliverable candidate is never rewritten by receipt age alone.
+        e = event();
+        assert_eq!(
+            receipt_eligibility(&e, arrived_ms, "self", START, fresh),
+            Eligibility::Candidate
         );
     }
     #[test]

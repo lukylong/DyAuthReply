@@ -12,6 +12,7 @@ use std::{
 };
 
 pub mod api;
+mod content;
 mod import;
 #[cfg(test)]
 mod tests;
@@ -74,6 +75,13 @@ impl Workbench {
         db.pragma_update(None, "journal_size_limit", 4 * 1024 * 1024)?;
         db.pragma_update(None, "max_page_count", 32768)?;
         db.execute_batch(SCHEMA)?;
+        // Group chats were projected before direct-message filtering existed;
+        // their platform IDs are bare digits, unlike `0:1:uid:uid` single chats.
+        db.execute_batch(
+            "DELETE FROM messages WHERE conversation_id IN
+                 (SELECT id FROM conversations WHERE platform_id NOT GLOB '*[^0-9]*');
+             DELETE FROM conversations WHERE platform_id NOT GLOB '*[^0-9]*';",
+        )?;
         db.pragma_update(None, "user_version", 1)?;
         Ok(Self {
             db: Mutex::new(db),
@@ -324,15 +332,17 @@ impl Workbench {
                     && event.conversation_id.len() <= 256,
                 "invalid projection event"
             );
-            // Control/system packets are not visible conversation messages.
-            let body: Value = serde_json::from_str(&event.content_json).unwrap_or(Value::Null);
-            if body.get("read_index").is_some()
-                || body.get("command_type").is_some()
+            // Only direct messages belong here; control packets are not visible messages.
+            if !content::is_direct_message(event.message_type)
                 || event.conversation_id.is_empty()
                 || event.create_time_us == 0
             {
                 continue;
             }
+            let Some(described) = content::describe(&event.content_json, event.text.as_deref())
+            else {
+                continue;
+            };
             let at = i64::try_from(event.create_time_us / 1000)?;
             if at < now - RETENTION_MS || at > now + 300_000 {
                 continue;
@@ -342,10 +352,7 @@ impl Workbench {
             } else {
                 "in"
             };
-            let content = event
-                .text
-                .clone()
-                .unwrap_or_else(|| format!("[消息类型 {}]", event.message_type));
+            let content = described.content;
             anyhow::ensure!(
                 content.len() <= 16 * 1024 && !event.server_message_id.is_empty(),
                 "invalid message projection"
@@ -384,7 +391,7 @@ impl Workbench {
                 conversation = Some(id);
             }
             let id = conversation.context("conversation missing")?;
-            tx.execute("INSERT INTO messages(id,account_id,conversation_id,server_id,client_id,direction,kind,content,at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![uuid::Uuid::new_v4().to_string(),account,id,event.server_message_id,event.client_message_id,direction,if event.text.is_some(){"text"}else{"unknown"},content,at])?;
+            tx.execute("INSERT INTO messages(id,account_id,conversation_id,server_id,client_id,direction,kind,content,at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![uuid::Uuid::new_v4().to_string(),account,id,event.server_message_id,event.client_message_id,direction,described.kind,content,at])?;
             tx.execute(
                 "UPDATE conversations SET updated=?1,preview=?2 WHERE id=?3 AND updated<=?1",
                 params![at, content.chars().take(200).collect::<String>(), id],

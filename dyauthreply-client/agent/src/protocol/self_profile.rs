@@ -5,14 +5,13 @@ use crate::protocol::{
     http_plan::{percent_encode_rfc3986, OrderedHeader},
     live_http::SessionEndpoint,
 };
-use md5::{Digest, Md5};
 use rand::Rng;
 use serde::Serialize;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
     sync::OnceLock,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 #[derive(Clone, Serialize)]
 pub struct VerifiedSelf {
@@ -48,78 +47,6 @@ pub struct WorksPage {
     pub has_more: bool,
 }
 
-const WEB_SIGN_CONST: &str = "A96D855A08C0A9707F8BEF0D9A527E4E";
-
-fn decode_query_component(value: &str) -> Option<String> {
-    let bytes = value.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut offset = 0;
-    while offset < bytes.len() {
-        match bytes[offset] {
-            b'+' => {
-                decoded.push(b' ');
-                offset += 1;
-            }
-            b'%' if offset + 2 < bytes.len() => {
-                let pair = std::str::from_utf8(&bytes[offset + 1..offset + 3]).ok()?;
-                decoded.push(u8::from_str_radix(pair, 16).ok()?);
-                offset += 3;
-            }
-            b'%' => return None,
-            byte => {
-                decoded.push(byte);
-                offset += 1;
-            }
-        }
-    }
-    String::from_utf8(decoded).ok()
-}
-
-fn encode_js_component(value: &str) -> String {
-    use std::fmt::Write;
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.as_bytes() {
-        if byte.is_ascii_alphanumeric() || b"-_.!~*'()".contains(byte) {
-            encoded.push(char::from(*byte));
-        } else {
-            let _ = write!(encoded, "%{byte:02X}");
-        }
-    }
-    encoded
-}
-
-fn secsdk_web_sign_query(query: &str, timestamp: u64, fallback_uifid: &str) -> Option<String> {
-    let mut canonical = Vec::new();
-    let mut has_uifid = false;
-    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let key = decode_query_component(key)?;
-        if matches!(key.as_str(), "timestamp" | "x-secsdk-web-signature") {
-            continue;
-        }
-        let value = decode_query_component(value)?;
-        has_uifid |= key == "uifid";
-        canonical.push(format!(
-            "{}={}",
-            encode_js_component(&key),
-            encode_js_component(&value)
-        ));
-    }
-    if !has_uifid && !fallback_uifid.is_empty() {
-        canonical.push(format!("uifid={}", encode_js_component(fallback_uifid)));
-    }
-    canonical.push(format!("timestamp={timestamp}"));
-    let signed_query = canonical.join("&");
-    let signed_uifid = canonical
-        .iter()
-        .find_map(|pair| pair.strip_prefix("uifid="))
-        .and_then(decode_query_component)
-        .unwrap_or_else(|| fallback_uifid.to_owned());
-    let plain = format!("{signed_uifid}_{timestamp}_{WEB_SIGN_CONST}_{signed_query}");
-    let signature = format!("{:x}", Md5::digest(plain.as_bytes()));
-    Some(format!("{signed_query}&x-secsdk-web-signature={signature}"))
-}
-
 impl NativeAccountSession {
     /// Returns the current verified profile. Force bypasses only the five-minute
     /// in-memory profile cache; authenticated identity checks still apply.
@@ -135,9 +62,11 @@ impl NativeAccountSession {
         self.verify_self().await
     }
 
-    /// Reads one bounded public works page for this verified account without persistence.
+    /// Reads one bounded page of this verified account's own works without persistence.
+    /// Uses the creator-center list: it needs only creator cookies, unlike the www post
+    /// list whose Argus gate rejects sessions lacking a www-only UIFID cookie.
     /// # Errors
-    /// Rejects invalid cursors/counts, transport/signing failures and malformed pages.
+    /// Rejects invalid cursors/counts, transport failures, foreign rows and malformed pages.
     pub async fn works(
         &mut self,
         cursor: &str,
@@ -152,76 +81,18 @@ impl NativeAccountSession {
             return Err(AccountRequestError::Decode { step: STEP });
         }
         let profile = self.verify_self().await?;
-        let fp = Fingerprint::new(&self.credentials.user_agent);
-        let mut params = vec![
-            ("device_platform", "webapp".into()),
-            ("aid", "6383".into()),
-            ("channel", "channel_pc_web".into()),
-            ("sec_user_id", profile.sec_uid.clone()),
-            ("max_cursor", cursor.into()),
-            ("locate_query", "false".into()),
-            ("show_live_replay_strategy", "1".into()),
-            (
-                "need_time_list",
-                if cursor == "0" { "1" } else { "0" }.into(),
-            ),
-            ("time_list_query", "0".into()),
-            ("whale_cut_token", String::new()),
-            ("cut_version", "1".into()),
-            ("count", count.to_string()),
-            ("publish_video_strategy_type", "2".into()),
-            ("from_user_page", "0".into()),
-        ];
-        params.extend(
-            fp.params()
-                .into_iter()
-                .skip(4)
-                .map(|(key, value)| match key {
-                    "version_code" => (key, "290100".into()),
-                    "version_name" => (key, "29.1.0".into()),
-                    _ => (key, value),
-                }),
+        let query = format!(
+            "status=0&count={count}&max_cursor={cursor}&scene=star_atlas\
+             &device_platform=android&aid=1128"
         );
-        params.push((
-            "webid",
-            (0..19)
-                .map(|_| char::from(b'0' + rand::thread_rng().gen_range(0..10)))
-                .collect(),
-        ));
-        let uifid = self.credentials.cookie("www.douyin.com", "UIFID");
-        if !uifid.is_empty() {
-            params.push(("uifid", uifid.clone()));
-        }
-        params.push(("msToken", self.credentials.query_ms_token.clone()));
-        let query = params
-            .into_iter()
-            .map(|(key, value)| format!("{key}={}", percent_encode_rfc3986(&value)))
-            .collect::<Vec<_>>()
-            .join("&");
-        let query = self.signed_query(query, STEP).await?;
-        let verify = percent_encode_rfc3986(self.credentials.web_fingerprint());
-        let query = format!("{query}&verifyFp={verify}&fp={verify}");
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| AccountRequestError::Decode { step: STEP })?
-            .as_secs();
-        let query = secsdk_web_sign_query(&query, timestamp, &uifid)
-            .ok_or(AccountRequestError::Decode { step: STEP })?;
-        let mut headers = self.headers("www.douyin.com");
+        let mut headers = self.headers("creator.douyin.com");
         headers.extend([
             OrderedHeader::new(
                 "referer",
-                format!(
-                    "https://www.douyin.com/user/{}",
-                    percent_encode_rfc3986(&profile.sec_uid)
-                ),
+                "https://creator.douyin.com/creator-micro/content/manage",
             ),
             OrderedHeader::new("accept", "application/json, text/plain, */*"),
-            OrderedHeader::new("sec-ch-ua", fp.client_hint()),
-            OrderedHeader::new("sec-ch-ua-mobile", "?0"),
-            OrderedHeader::new("sec-ch-ua-platform", fp.header_platform),
             OrderedHeader::new("accept-language", "zh-CN,zh;q=0.9"),
-            OrderedHeader::new("priority", "u=1, i"),
             OrderedHeader::new("sec-fetch-dest", "empty"),
             OrderedHeader::new("sec-fetch-mode", "cors"),
             OrderedHeader::new("sec-fetch-site", "same-origin"),
@@ -230,7 +101,7 @@ impl NativeAccountSession {
             .request(SessionEndpoint::Works, &query, &headers, b"", STEP)
             .await?;
         let payload = checked_json(&response, STEP)?;
-        parse_works(&payload)
+        parse_works(&payload, &profile)
     }
 
     /// Reads a public peer profile with this account's authenticated session.
@@ -567,7 +438,7 @@ fn unsigned(value: Option<&Value>) -> u64 {
     }
 }
 
-fn parse_works(payload: &Value) -> Result<WorksPage, AccountRequestError> {
+fn parse_works(payload: &Value, owner: &VerifiedSelf) -> Result<WorksPage, AccountRequestError> {
     const STEP: &str = "self_works";
     if payload.get("status_code").and_then(Value::as_i64) != Some(0)
         && payload.get("aweme_list").is_none()
@@ -593,6 +464,7 @@ fn parse_works(payload: &Value) -> Result<WorksPage, AccountRequestError> {
                     && value.bytes().all(|byte| byte.is_ascii_digit())
             })
             .ok_or(AccountRequestError::Decode { step: STEP })?;
+        check_work_owner(row, owner)?;
         let description = row["desc"]
             .as_str()
             .filter(|value| value.len() <= 4096)
@@ -608,21 +480,21 @@ fn parse_works(payload: &Value) -> Result<WorksPage, AccountRequestError> {
             cover
         };
         let statistics = &row["statistics"];
+        let image = row["aweme_type"].as_i64() == Some(68) || row["is_pic_word"] == true;
         items.push(WorkItem {
             aweme_id: aweme_id.into(),
             desc: description,
             cover,
-            work_type: if row["aweme_type"].as_i64() == Some(68) {
-                "image"
-            } else {
-                "video"
-            },
+            work_type: if image { "image" } else { "video" },
             like_count: unsigned(statistics.get("digg_count")),
             comment_count: unsigned(statistics.get("comment_count")),
             collect_count: unsigned(statistics.get("collect_count")),
             share_count: unsigned(statistics.get("share_count")),
             create_time: unsigned(row.get("create_time")),
-            share_url: format!("https://www.douyin.com/video/{aweme_id}"),
+            share_url: format!(
+                "https://www.douyin.com/{}/{aweme_id}",
+                if image { "note" } else { "video" }
+            ),
         });
     }
     let max_cursor = identifier(&payload["max_cursor"])
@@ -636,6 +508,23 @@ fn parse_works(payload: &Value) -> Result<WorksPage, AccountRequestError> {
             .or_else(|| payload["has_more"].as_i64().map(|value| value != 0))
             .unwrap_or(false),
     })
+}
+/// Every row must name this account as author; a creator list never serves peers.
+fn check_work_owner(row: &Value, owner: &VerifiedSelf) -> Result<(), AccountRequestError> {
+    let sec_uid = row.pointer("/author/sec_uid").and_then(Value::as_str);
+    let user_id = row
+        .get("author_user_id")
+        .or_else(|| row.pointer("/author/uid"))
+        .and_then(identifier);
+    if sec_uid.is_none() && user_id.is_none() {
+        return Err(AccountRequestError::Decode { step: "self_works" });
+    }
+    if sec_uid.is_some_and(|value| value != owner.sec_uid)
+        || user_id.is_some_and(|value| value != owner.user_id)
+    {
+        return Err(AccountRequestError::AccountMismatch);
+    }
+    Ok(())
 }
 fn identifier(value: &Value) -> Option<String> {
     match value {
@@ -847,26 +736,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protected_works_query_matches_python_secsdk_reference() {
-        let query = "aid=6383&uifid=UF%2B1&a_bogus=AB&verifyFp=FP&fp=FP";
-        assert_eq!(
-            secsdk_web_sign_query(query, 1_700_000_000, "UF+1").unwrap(),
-            "aid=6383&uifid=UF%2B1&a_bogus=AB&verifyFp=FP&fp=FP\
-             &timestamp=1700000000\
-             &x-secsdk-web-signature=77996339d7adaef2cea23a9dcf2f2c0c"
-        );
-    }
-
-    #[test]
-    fn protected_query_replaces_old_signature_and_adds_missing_uifid() {
-        let signed =
-            secsdk_web_sign_query("aid=6383&timestamp=1&x-secsdk-web-signature=old", 2, "UF+1")
-                .unwrap();
-        assert!(signed.starts_with("aid=6383&uifid=UF%2B1&timestamp=2&"));
-        assert_eq!(signed.matches("x-secsdk-web-signature=").count(), 1);
-    }
-
-    #[test]
     fn uid_and_sec_uid_must_belong_to_same_authenticated_user_object() {
         let html = r#"<script>self.__next_f.push([1,"1:{\"user\":{\"uid\":\"123\",\"secUid\":\"self\",\"nickname\":\"name\"},\"other\":{\"uid\":\"456\",\"secUid\":\"peer\"}}"])</script>"#;
         assert_eq!(parse_hydration(html, "123").unwrap().sec_uid, "self");
@@ -933,30 +802,80 @@ mod tests {
             Err(AccountRequestError::AccountMismatch)
         ));
     }
+    fn owner() -> VerifiedSelf {
+        VerifiedSelf {
+            user_id: "42".into(),
+            sec_uid: "self".into(),
+            nickname: String::new(),
+            avatar: String::new(),
+            unique_id: String::new(),
+            follower_count: 0,
+            following_count: 0,
+            aweme_count: 0,
+            total_favorited: 0,
+        }
+    }
     #[test]
     fn works_page_handles_video_and_image_covers_without_persisting_raw_rows() {
         let payload = serde_json::json!({
             "status_code":0,"max_cursor":99,"has_more":1,
             "aweme_list":[
-                {"aweme_id":"100","desc":"video","aweme_type":0,
+                {"aweme_id":"100","desc":"video","aweme_type":0,"author":{"sec_uid":"self"},
                  "video":{"cover":{"url_list":["https://example.com/video.jpg"]}},
                  "statistics":{"digg_count":1,"comment_count":"2","collect_count":3,"share_count":4},
                  "create_time":5},
-                {"aweme_id":"101","desc":"image","aweme_type":68,
+                {"aweme_id":"101","desc":"image","aweme_type":68,"author_user_id":42,
                  "images":[{"url_list":["https://example.com/image.jpg"]}],
                  "statistics":{},"create_time":"6"}
             ]
         });
-        let page = parse_works(&payload).unwrap();
+        let page = parse_works(&payload, &owner()).unwrap();
         assert_eq!(page.items.len(), 2);
         assert_eq!(page.items[0].cover, "https://example.com/video.jpg");
         assert_eq!(page.items[0].comment_count, 2);
+        assert_eq!(page.items[0].share_url, "https://www.douyin.com/video/100");
         assert_eq!(page.items[1].cover, "https://example.com/image.jpg");
         assert_eq!(page.items[1].work_type, "image");
+        assert_eq!(page.items[1].share_url, "https://www.douyin.com/note/101");
         assert_eq!(page.max_cursor, "99");
         assert!(page.has_more);
         let mut excessive = payload;
         excessive["aweme_list"] = Value::Array(vec![Value::Null; 31]);
-        assert!(parse_works(&excessive).is_err());
+        assert!(parse_works(&excessive, &owner()).is_err());
+    }
+    #[test]
+    fn creator_picture_word_rows_are_images_even_with_video_cover() {
+        let payload = serde_json::json!({"status_code":0,"max_cursor":0,"has_more":false,
+            "aweme_list":[{"aweme_id":"7","aweme_type":2,"is_pic_word":true,
+                "author":{"sec_uid":"self"},"author_user_id":42,
+                "video":{"cover":{"url_list":["https://example.com/c.webp"]}},
+                "statistics":{"digg_count":5,"collect_count":1}}]});
+        let page = parse_works(&payload, &owner()).unwrap();
+        assert_eq!(page.items[0].work_type, "image");
+        assert_eq!(page.items[0].cover, "https://example.com/c.webp");
+        assert_eq!(page.items[0].like_count, 5);
+    }
+    #[test]
+    fn works_rows_from_another_or_unknown_author_fail_closed() {
+        let page = |row: Value| {
+            parse_works(
+                &serde_json::json!({"status_code":0,"aweme_list":[row]}),
+                &owner(),
+            )
+        };
+        assert!(matches!(
+            page(serde_json::json!({"aweme_id":"1","author":{"sec_uid":"peer"}})),
+            Err(AccountRequestError::AccountMismatch)
+        ));
+        assert!(matches!(
+            page(
+                serde_json::json!({"aweme_id":"1","author":{"sec_uid":"self"},"author_user_id":"9"})
+            ),
+            Err(AccountRequestError::AccountMismatch)
+        ));
+        assert!(matches!(
+            page(serde_json::json!({"aweme_id":"1"})),
+            Err(AccountRequestError::Decode { .. })
+        ));
     }
 }

@@ -6,7 +6,7 @@ use super::{
 use crate::{
     runtime::{
         inbound::InboundEvent,
-        inbound_policy::{eligibility, Eligibility},
+        inbound_policy::{receipt_eligibility, Eligibility},
         rules::{MatchInput, ReplyPlan, RuleEngine},
     },
     store::{
@@ -195,12 +195,47 @@ struct PlanPass<'a> {
     cutoff: u64,
     now: i64,
 }
+fn log_planned(account_id: &str, rule_id: &str, planned: &Planned) {
+    match planned {
+        Planned::Queued(batch_id) => {
+            tracing::info!(account_id, rule_id, batch_id, "auto-reply queued");
+        }
+        Planned::Dropped => {
+            tracing::info!(
+                account_id,
+                rule_id,
+                "auto-reply dropped by cooldown or quota"
+            );
+        }
+        Planned::Blocked => {
+            tracing::info!(account_id, rule_id, "auto-reply deferred by reply guard");
+        }
+    }
+}
 enum Planned {
     Queued(String),
     Dropped,
     Blocked,
 }
 impl PlanPass<'_> {
+    /// Terminal non-candidates are consumed; deferrals stay pending until they expire.
+    fn settle_ineligible(&self, receipt: &InboundReceipt, decision: Eligibility) -> Result<()> {
+        if decision == Eligibility::IgnoreSystem {
+            // Control packets are not conversation messages; keep them out of the reply log.
+            self.store.consume_inbound(self.lease, key(receipt), None)?;
+        } else if decision.is_terminal_ignore() {
+            self.store.consume_inbound_audited(
+                self.lease,
+                key(receipt),
+                crate::store::DecisionAudit {
+                    result: "skipped",
+                    reason: "启用前或已过期消息，不补发",
+                    rule_id: None,
+                },
+            )?;
+        }
+        Ok(())
+    }
     fn run(&self) -> Result<Vec<String>> {
         let mut batches = Vec::new();
         for receipt in self.store.pending_inbound_receipts(self.lease, 128)? {
@@ -210,24 +245,15 @@ impl PlanPass<'_> {
             let Ok(event) = serde_json::from_slice::<InboundEvent>(payload) else {
                 continue;
             };
-            let decision = eligibility(
+            let decision = receipt_eligibility(
                 &event,
+                receipt.received_at_ms,
                 self.own,
                 self.cutoff,
                 u64::try_from(self.now)? * 1000,
             );
             if decision != Eligibility::Candidate {
-                if decision.is_terminal_ignore() {
-                    self.store.consume_inbound_audited(
-                        self.lease,
-                        key(&receipt),
-                        crate::store::DecisionAudit {
-                            result: "skipped",
-                            reason: "启用前或已过期消息，不补发",
-                            rule_id: None,
-                        },
-                    )?;
-                }
+                self.settle_ineligible(&receipt, decision)?;
                 continue;
             }
             if self.policy.silent(self.engine.timezone_name(), self.now)? {
@@ -295,7 +321,10 @@ impl PlanPass<'_> {
                 )?;
                 continue;
             };
-            match self.claim(&receipt, event, plan)? {
+            let rule_id = plan.rule_id.clone();
+            let planned = self.claim(&receipt, event, plan)?;
+            log_planned(&self.lease.account_id, &rule_id, &planned);
+            match planned {
                 Planned::Queued(id) => batches.push(id),
                 Planned::Dropped => {}
                 Planned::Blocked => break,

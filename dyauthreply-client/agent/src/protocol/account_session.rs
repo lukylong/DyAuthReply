@@ -509,6 +509,13 @@ impl NativeAccountSession {
 
 fn checked_json(response: &HttpResult, step: &'static str) -> Result<Value, AccountRequestError> {
     if !(200..300).contains(&response.status) {
+        // Platform rejections explain themselves only in the body (e.g. Argus 403).
+        let preview: String = String::from_utf8_lossy(&response.body)
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(160)
+            .collect();
+        tracing::warn!(step, status = response.status, body = %preview, "platform request rejected");
         return Err(AccountRequestError::Http {
             step,
             status: response.status,

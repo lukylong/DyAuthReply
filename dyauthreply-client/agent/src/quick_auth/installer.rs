@@ -355,11 +355,11 @@ mod tests {
     use super::*;
     use zip::write::SimpleFileOptions;
 
-    /// Live check of the real mirror-first download path (≈200 MB). Run with
+    /// Live check of the real first-source download path (≈200 MB). Run with
     /// `cargo test --lib live_pinned_component_installs -- --ignored --nocapture`.
     #[tokio::test]
     #[ignore = "downloads the real pinned browser archive"]
-    async fn live_pinned_component_installs_from_mirror_and_resolves() {
+    async fn live_pinned_component_installs_from_first_source_and_resolves() {
         let root = tempfile::tempdir().unwrap();
         let started = std::time::Instant::now();
         let resolved = install_latest(root.path(), Arc::new(|_, _| {}))
@@ -375,9 +375,11 @@ mod tests {
             manifest.source_url,
             started.elapsed()
         );
-        assert!(manifest
-            .source_url
-            .starts_with("https://cdn.npmmirror.com/"));
+        let (platform, _) = platform_contract().unwrap();
+        assert_eq!(
+            manifest.source_url,
+            sources::pinned(platform).unwrap().sources[0]
+        );
         assert!(resolved.executable.is_file());
         let again = install_latest(root.path(), Arc::new(|_, _| {}))
             .await

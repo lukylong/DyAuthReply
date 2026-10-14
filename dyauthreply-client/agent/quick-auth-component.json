@@ -1,6 +1,7 @@
 {
   "version": "155.0.8059.79",
   "sources": [
+    "https://gz-1349751149.cos.ap-guangzhou.myqcloud.com/app/chrome-for-testing/{version}/{platform}/chrome-{platform}.zip",
     "https://cdn.npmmirror.com/binaries/chrome-for-testing/{version}/{platform}/chrome-{platform}.zip",
     "https://storage.googleapis.com/chrome-for-testing-public/{version}/{platform}/chrome-{platform}.zip"
   ],

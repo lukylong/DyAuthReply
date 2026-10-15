@@ -598,15 +598,15 @@ onMounted(async () => {
         </span>
         <p v-if="hasUnavailableLease(acc)" class="account-alert risk-alert">
           <TriangleAlert :size="14" />
-          <span>{{ acc.last_probe_error || '等待客户端授权续签与租约恢复，不代表抖音登录失效' }}</span>
+          <span :title="acc.last_probe_error || '等待客户端授权续签与租约恢复，不代表抖音登录失效'">{{ acc.last_probe_error || '等待客户端授权续签与租约恢复，不代表抖音登录失效' }}</span>
         </p>
         <p v-else-if="acc.credential_state === 'receive_only'" class="account-alert risk-alert">
           <TriangleAlert :size="14" />
-          <span>{{ acc.last_probe_error || '当前仅可接收消息，请更新发送凭证' }}</span>
+          <span :title="acc.last_probe_error || '当前仅可接收消息，请更新发送凭证'">{{ acc.last_probe_error || '当前仅可接收消息，请更新发送凭证' }}</span>
         </p>
         <p v-else-if="acc.credential_state === 'invalid' || acc.status === 2" class="account-alert invalid-alert">
           <TriangleAlert :size="14" />
-          <span>{{ acc.last_probe_error || '登录状态已失效，请更新凭证' }}</span>
+          <span :title="acc.last_probe_error || '登录状态已失效，请更新凭证'">{{ acc.last_probe_error || '登录状态已失效，请更新凭证' }}</span>
         </p>
 
         <div class="card-divider"></div>
@@ -1099,6 +1099,16 @@ onMounted(async () => {
   margin-top: 1px;
 }
 
+/* Keep a verbose probe message to two lines so one card never towers over its
+   row; the full text stays available through the span's title tooltip. */
+.account-alert span {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .risk-alert {
   color: var(--warning);
   background: var(--warning-soft);
@@ -1112,6 +1122,10 @@ onMounted(async () => {
 .card-divider {
   height: 1px;
   background: var(--border-subtle);
+  /* Push the divider + footer to the card's bottom edge so every card's
+     "今日回复 + 开关" row lines up across the row, regardless of whether a
+     card shows a status alert above. */
+  margin-top: auto;
 }
 
 .card-bottom {
@@ -1119,6 +1133,7 @@ onMounted(async () => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-height: 24px;
 }
 
 .reply-count {

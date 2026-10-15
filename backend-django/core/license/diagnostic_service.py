@@ -9,6 +9,7 @@ import json
 from datetime import timedelta
 from typing import Any, Dict, List
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Count, Q
 from django.utils import timezone
@@ -45,6 +46,14 @@ def _clean_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
     return {key: _clean_value(value) for key, value in fields.items() if key in EVENT_FIELDS}
 
 
+def _server_time(value):
+    """Client times are UTC with an offset; store them in the server's convention
+    (this project runs with USE_TZ=False, i.e. naive local time)."""
+    if settings.USE_TZ:
+        return value if timezone.is_aware(value) else timezone.make_aware(value)
+    return timezone.make_naive(value) if timezone.is_aware(value) else value
+
+
 @transaction.atomic
 def ingest(activation: LicenseActivation, data) -> Dict[str, Any]:
     device: ClientDevice = activation.client_device
@@ -67,12 +76,13 @@ def ingest(activation: LicenseActivation, data) -> Dict[str, Any]:
     events: List[ClientDiagnosticEvent] = []
     for item in data.events:
         level = item.level.upper()
-        if level not in LEVELS or not (earliest <= item.at <= latest):
+        occurred_at = _server_time(item.at)
+        if level not in LEVELS or not (earliest <= occurred_at <= latest):
             continue
         events.append(
             ClientDiagnosticEvent(
                 device=device,
-                occurred_at=item.at,
+                occurred_at=occurred_at,
                 level=level,
                 target=item.target[:128],
                 message=item.message[:512],

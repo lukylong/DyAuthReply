@@ -1,5 +1,6 @@
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
 
 from django.test import Client, TestCase
 from django.utils import timezone
@@ -10,6 +11,11 @@ from core.license.license_model import ClientDevice, LicenseActivation, LicenseK
 from core.license.license_service import generate_license_code, hash_activation_token, hash_license_code
 
 URL = "/api/client-auth/telemetry/ingest"
+
+
+def client_time(delta=timedelta()):
+    """Exactly what the agent sends: UTC RFC 3339 with an explicit offset."""
+    return (datetime.now(dt_timezone.utc) + delta).isoformat()
 
 
 class ClientDiagnosticsIngestTests(TestCase):
@@ -42,15 +48,15 @@ class ClientDiagnosticsIngestTests(TestCase):
             },
             "events": [
                 {
-                    "at": timezone.now().isoformat(),
+                    "at": client_time(),
                     "level": "WARN",
                     "target": "dy_agent::protocol::account_session",
                     "message": "platform request rejected",
                     "fields": {"step": "self_works", "status": 403, "text": "私信正文", "cookie": "sessionid=x"},
                 },
-                {"at": timezone.now().isoformat(), "level": "DEBUG", "target": "t", "message": "dropped", "fields": {}},
+                {"at": client_time(), "level": "DEBUG", "target": "t", "message": "dropped", "fields": {}},
                 {
-                    "at": (timezone.now() - timedelta(days=40)).isoformat(),
+                    "at": client_time(-timedelta(days=40)),
                     "level": "ERROR",
                     "target": "t",
                     "message": "too old",
@@ -70,6 +76,8 @@ class ClientDiagnosticsIngestTests(TestCase):
         self.assertEqual(response.json()["accepted"], 1)
         event = ClientDiagnosticEvent.objects.get(device=self.device)
         self.assertEqual(event.fields, {"step": "self_works", "status": 403})
+        # Stored in the server's own time convention, within a minute of now.
+        self.assertLess(abs((event.occurred_at - timezone.now()).total_seconds()), 60)
         self.assertEqual(event.app_version, "0.1.36")
         state = ClientDiagnosticState.objects.get(device=self.device)
         self.assertEqual((state.os, state.arch, state.report_count), ("windows", "x86_64", 1))

@@ -48,8 +48,8 @@ impl FrontierStatus {
     }
 }
 pub(super) struct FrontierOwner {
-    commands: watch::Sender<Option<u64>>,
-    join: JoinHandle<()>,
+    pub(super) commands: watch::Sender<Option<u64>>,
+    pub(super) join: JoinHandle<()>,
 }
 impl ManualService {
     pub(super) async fn maintain_frontier(&self, work: &WorkEnvelope) -> Result<()> {
@@ -60,11 +60,7 @@ impl ManualService {
         {
             return Ok(());
         }
-        let slot = self
-            .inner
-            .accounts
-            .get(&work.account_id)
-            .context("account missing")?;
+        let slot = self.slot(&work.account_id)?;
         let mut owner = slot.frontier.lock().await;
         if owner.as_ref().is_some_and(|o| !o.join.is_finished()) {
             self.recover_frontier_gap(work).await;
@@ -159,7 +155,7 @@ impl ManualService {
             .frontier_stopping
             .store(true, std::sync::atomic::Ordering::Release);
         let mut joins = Vec::new();
-        for slot in self.inner.accounts.values() {
+        for (_, slot) in self.slots() {
             if let Some(owner) = slot.frontier.lock().await.take() {
                 owner.commands.send_replace(None);
                 joins.push(owner.join);
@@ -186,7 +182,9 @@ impl ManualService {
         mut commands: watch::Receiver<Option<u64>>,
         mut socket: WebSocket,
     ) {
-        let slot = &self.inner.accounts[&work.account_id];
+        let Ok(slot) = self.slot(&work.account_id) else {
+            return;
+        };
         {
             let mut status = slot.frontier_status.lock().await;
             status.connected();
@@ -222,7 +220,10 @@ impl ManualService {
         }
     }
     async fn recover_frontier_gap(&self, work: &WorkEnvelope) {
-        let status = &self.inner.accounts[&work.account_id].frontier_status;
+        let Ok(slot) = self.slot(&work.account_id) else {
+            return;
+        };
+        let status = &slot.frontier_status;
         let pending = status.lock().await.reconcile_pending;
         if pending && self.reconcile(work.account_id.to_string()).await.is_ok() {
             status.lock().await.reconcile_pending = false;
@@ -276,7 +277,7 @@ impl ManualService {
                         Message::Pong(bytes)=>{
                             if pending.is_some_and(|nonce|bytes.as_ref()==nonce.to_le_bytes()){
                                 pending=None;
-                                let mut status=self.inner.accounts[&work.account_id].frontier_status.lock().await;
+                                let slot=self.slot(&work.account_id)?;let mut status=slot.frontier_status.lock().await;
                                 status.healthy=true;
                                 if self.inner.runtime.monotonic_now_ms().saturating_sub(connected_at)>=20_000 {status.consecutive_failures=0;status.retry_at_monotonic_ms=0;}
                                 drop(status);
@@ -307,12 +308,12 @@ impl ManualService {
         .await??;
         let count = frame.messages.len();
         if let Some(status) = frame.control_status {
-            self.inner.accounts[&work.account_id]
+            self.slot(&work.account_id)?
                 .frontier_status
                 .lock()
                 .await
                 .last_control_kind = frame.control_kind;
-            self.inner.accounts[&work.account_id]
+            self.slot(&work.account_id)?
                 .frontier_status
                 .lock()
                 .await
@@ -328,9 +329,7 @@ impl ManualService {
             u64::try_from(grant.token.fence_epoch)? == work.lease_epoch,
             "stale Frontier lease"
         );
-        let own = self.inner.accounts[&work.account_id]
-            .canonical_sec_uid
-            .clone();
+        let own = self.slot(&work.account_id)?.canonical_sec_uid.clone();
         let store = self.inner.store.clone();
         let generation = i64::try_from(work.credential_generation)?;
         let projection = self.workbench();
@@ -345,23 +344,18 @@ impl ManualService {
             )
         })
         .await??;
-        *self.inner.accounts[&work.account_id]
-            .processing
-            .lock()
-            .await = summary;
+        *self.slot(&work.account_id)?.processing.lock().await = summary;
         if let Some(ack) = frame.ack {
             send(socket, Message::Binary(ack.into())).await?;
-            self.inner.accounts[&work.account_id]
+            self.slot(&work.account_id)?
                 .frontier_status
                 .lock()
                 .await
                 .acknowledgements += 1;
         }
         let sequence = {
-            let mut status = self.inner.accounts[&work.account_id]
-                .frontier_status
-                .lock()
-                .await;
+            let slot = self.slot(&work.account_id)?;
+            let mut status = slot.frontier_status.lock().await;
             status.frames += 1;
             status.messages += u64::try_from(count)?;
             status.frames

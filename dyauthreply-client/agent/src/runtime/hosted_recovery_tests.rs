@@ -284,3 +284,122 @@ async fn wait_ownership(controller: &HostedController, wanted: bool) -> bool {
     }
     false
 }
+
+async fn wait_for(controller: &HostedController, account: &str, wanted: bool) -> bool {
+    for _ in 0..640 {
+        if controller.authorization(account).is_some() == wanted {
+            return true;
+        }
+        if controller.status().stopped {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn accounts_are_added_and_removed_without_disturbing_other_leases() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(CoreStore::open(root.path()).unwrap());
+    let runtime = runtime(root.path(), store.clone());
+    let count = Arc::new(Authority::default());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route("/api/client-auth/agent/leases/sync", post(authority))
+        .with_state(count.clone());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let id = Uuid::new_v4();
+    let path = root.path().join("auth.json");
+    snapshot(&path, id, &server, "fresh-synthetic", "active");
+    let fixture: Value =
+        serde_json::from_str(include_str!("../../tests/fixtures/account_lease.json")).unwrap();
+    let controller = HostedController::start(
+        HostedSettings {
+            server: server.clone(),
+            public_key_pem: fixture["public_key"].as_str().unwrap().into(),
+            activation_id: id,
+            activation_token: "fresh-synthetic".into(),
+            accounts: vec![AccountLeaseOperation {
+                platform: "douyin".into(),
+                platform_account_id: "synthetic".into(),
+                local_account_id: "synthetic".into(),
+                action: LeaseAction::Acquire,
+                expected_epoch: 0,
+            }],
+            auth_state_file: Some(path.clone()),
+        },
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        runtime.clone(),
+        store,
+    )
+    .await
+    .unwrap();
+    let first_owned = wait_for(&controller, "synthetic", true).await;
+    let first_epoch = controller
+        .authorization("synthetic")
+        .map(|v| v.token.fence_epoch);
+
+    // Hot add: register the actor, then request ownership.
+    let added = AccountId::new("added").unwrap();
+    runtime
+        .upsert_account(AccountSpec {
+            account_id: added.clone(),
+            actor_generation: 1,
+            state: AccountRuntimeState {
+                ownership: OwnershipState::Acquiring,
+                credential_generation: 1,
+                ..AccountRuntimeState::default()
+            },
+        })
+        .await
+        .unwrap();
+    controller.add_account("added", "added");
+    let added_owned = wait_for(&controller, "added", true).await;
+    let first_epoch_after_add = controller
+        .authorization("synthetic")
+        .map(|v| v.token.fence_epoch);
+    let added_runtime_owned = runtime
+        .account_control(&added)
+        .await
+        .is_some_and(|c| c.borrow().state.ownership == OwnershipState::Owned);
+
+    // Hot remove: the removed account is released, the other keeps its lease.
+    runtime
+        .remove_account(&AccountId::new("synthetic").unwrap())
+        .await
+        .unwrap();
+    controller.remove_account("synthetic");
+    let removed = wait_for(&controller, "synthetic", false).await;
+    for _ in 0..200 {
+        if count.releases.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let releases = count.releases.load(Ordering::SeqCst);
+    // Survive at least one more renewal cycle after the removal.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let added_still_owned = controller.authorization("added").is_some();
+    let alive = !controller.status().stopped;
+    let cleanup = controller.shutdown().await;
+    runtime.drain().await.unwrap();
+    task.abort();
+    let _ = task.await;
+    assert!(first_owned && added_owned && added_runtime_owned);
+    assert_eq!(
+        first_epoch, first_epoch_after_add,
+        "adding an account must not re-acquire the others"
+    );
+    assert!(removed, "removed account kept its authorization");
+    assert_eq!(releases, 1, "removed account lease was not released");
+    assert!(
+        added_still_owned && alive,
+        "removal disturbed the other account"
+    );
+    cleanup.unwrap();
+}

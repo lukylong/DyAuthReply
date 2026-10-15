@@ -36,8 +36,10 @@ use uuid::Uuid;
 pub mod api;
 mod automation;
 mod frontier;
+mod hot;
 pub use automation::AutomationPolicy;
 pub use frontier::FrontierStatus;
+pub use hot::HotChange;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -236,6 +238,44 @@ struct AccountSlot {
     http: ProtocolHttpClient,
 }
 
+impl AccountSlot {
+    fn new(
+        credentials: AccountCredentials,
+        credential_generation: u64,
+        http: ProtocolHttpClient,
+        signer: NativeSigner,
+    ) -> Self {
+        Self {
+            credential_generation,
+            canonical_sec_uid: credentials.expected_sec_uid.clone(),
+            frontier: Mutex::new(None),
+            frontier_status: Mutex::new(FrontierStatus::default()),
+            session: Mutex::new(NativeAccountSession::new(credentials, http.clone(), signer)),
+            submission: Mutex::new(()),
+            processing: Mutex::new(ReceiveProcessing::default()),
+            last_automatic_command: Mutex::new(None),
+            restored_binding: Mutex::new(None),
+            identity_error: Mutex::new(None),
+            profile_read: Mutex::new(()),
+            works_cache: Mutex::new(BTreeMap::new()),
+            http,
+        }
+    }
+}
+
+/// One TLS profile per browser version, all sharing one network admission budget.
+fn shared_http(
+    profiles: &mut BTreeMap<String, ProtocolHttpClient>,
+    budget: &ProtocolHttpClient,
+    user_agent: &str,
+) -> Result<ProtocolHttpClient> {
+    let candidate = ProtocolHttpClient::for_user_agent(8, user_agent)?.sharing_budget(budget);
+    Ok(profiles
+        .entry(candidate.profile_name().to_owned())
+        .or_insert(candidate)
+        .clone())
+}
+
 fn retry_transient_works_error(error: &AccountRequestError) -> bool {
     matches!(
         error,
@@ -256,7 +296,10 @@ struct Inner {
     workbench: Arc<crate::workbench::Workbench>,
     frontier_decode: Arc<tokio::sync::Semaphore>,
     frontier_stopping: std::sync::atomic::AtomicBool,
-    accounts: BTreeMap<AccountId, AccountSlot>,
+    /// Live account slots. Accounts can be added, replaced (new credentials) or
+    /// removed while running; readers clone the `Arc` and never hold the lock
+    /// across an await, so in-flight work keeps the slot it started with.
+    accounts: std::sync::RwLock<BTreeMap<AccountId, Arc<AccountSlot>>>,
     runtime: RuntimeHandle,
     store: Arc<CoreStore>,
     signer: NativeSigner,
@@ -265,6 +308,12 @@ struct Inner {
     configuration_gate: tokio::sync::RwLock<()>,
     rule_path: Option<PathBuf>,
     rule_slots: Arc<tokio::sync::Semaphore>,
+    /// Accounts can be loaded while running only from the native registry.
+    hot_reload: bool,
+    http_budget: ProtocolHttpClient,
+    http_profiles: std::sync::Mutex<BTreeMap<String, ProtocolHttpClient>>,
+    /// Serializes hot account changes against each other.
+    account_changes: Mutex<()>,
 }
 #[derive(Clone)]
 pub struct ManualService {
@@ -335,38 +384,13 @@ impl ManualService {
                     && !credentials.expected_sec_uid.is_empty(),
                 "account/hosted scope mismatch"
             );
-            let candidate = ProtocolHttpClient::for_user_agent(8, &credentials.user_agent)?
-                .sharing_budget(&budget);
-            let http = profiles
-                .entry(candidate.profile_name().to_owned())
-                .or_insert(candidate)
-                .clone();
+            let http = shared_http(&mut profiles, &budget, &credentials.user_agent)?;
+            let generation = generations.get(id.as_str()).copied().unwrap_or(1);
             anyhow::ensure!(
                 accounts
                     .insert(
                         id.clone(),
-                        AccountSlot {
-                            credential_generation: generations
-                                .get(id.as_str())
-                                .copied()
-                                .unwrap_or(1),
-                            canonical_sec_uid: credentials.expected_sec_uid.clone(),
-                            frontier: Mutex::new(None),
-                            frontier_status: Mutex::new(FrontierStatus::default()),
-                            session: Mutex::new(NativeAccountSession::new(
-                                credentials,
-                                http.clone(),
-                                signer.clone()
-                            )),
-                            submission: Mutex::new(()),
-                            processing: Mutex::new(ReceiveProcessing::default()),
-                            last_automatic_command: Mutex::new(None),
-                            restored_binding: Mutex::new(None),
-                            identity_error: Mutex::new(None),
-                            profile_read: Mutex::new(()),
-                            works_cache: Mutex::new(BTreeMap::new()),
-                            http
-                        }
+                        AccountSlot::new(credentials, generation, http, signer.clone())
                     )
                     .is_none(),
                 "duplicate messaging account"
@@ -388,7 +412,12 @@ impl ManualService {
                 audit,
                 frontier_decode: Arc::new(tokio::sync::Semaphore::new(4)),
                 frontier_stopping: std::sync::atomic::AtomicBool::new(false),
-                accounts,
+                accounts: std::sync::RwLock::new(
+                    accounts
+                        .into_iter()
+                        .map(|(id, slot)| (id, Arc::new(slot)))
+                        .collect(),
+                ),
                 business,
                 configuration_gate: tokio::sync::RwLock::new(()),
                 runtime,
@@ -397,6 +426,10 @@ impl ManualService {
                 controller: OnceLock::new(),
                 rule_path: settings.rule_config_file.clone(),
                 rule_slots: Arc::new(tokio::sync::Semaphore::new(4)),
+                hot_reload: settings.registry_root.is_some(),
+                http_budget: budget,
+                http_profiles: std::sync::Mutex::new(profiles),
+                account_changes: Mutex::new(()),
             }),
         }))
     }
@@ -414,7 +447,9 @@ impl ManualService {
     }
     #[must_use]
     pub fn loaded_generation(&self, id: &str) -> Option<u64> {
-        self.inner.accounts.get(id).map(|s| s.credential_generation)
+        self.accounts_read()
+            .get(id)
+            .map(|s| s.credential_generation)
     }
     #[must_use]
     pub fn runtime_marker(&self) -> &str {
@@ -449,7 +484,7 @@ impl ManualService {
     /// # Errors
     /// Quiesces this account's manual admission and refuses removal of unresolved sends.
     pub async fn retire_account(&self, id: &str) -> Result<()> {
-        if let Some(slot) = self.inner.accounts.get(id) {
+        if let Ok(slot) = self.slot(id) {
             let _submission = slot.submission.lock().await;
             let _configuration = self.inner.configuration_gate.write().await;
             anyhow::ensure!(
@@ -484,7 +519,7 @@ impl ManualService {
     /// # Errors
     /// Registers dormant actors using persistent credential generations before ownership can be acquired.
     pub async fn register_accounts(&self) -> Result<()> {
-        for (id, slot) in &self.inner.accounts {
+        for (id, slot) in self.slots() {
             self.inner
                 .runtime
                 .upsert_account(super::supervisor::AccountSpec {
@@ -523,10 +558,45 @@ impl ManualService {
     }
     #[must_use]
     pub fn has_account(&self, id: &str) -> bool {
-        self.inner.accounts.contains_key(id)
+        self.accounts_read().contains_key(id)
+    }
+    fn accounts_read(
+        &self,
+    ) -> std::sync::RwLockReadGuard<'_, BTreeMap<AccountId, Arc<AccountSlot>>> {
+        self.inner
+            .accounts
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    fn accounts_write(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, BTreeMap<AccountId, Arc<AccountSlot>>> {
+        self.inner
+            .accounts
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    fn slot<Q>(&self, id: &Q) -> Result<Arc<AccountSlot>>
+    where
+        AccountId: std::borrow::Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.accounts_read()
+            .get(id)
+            .cloned()
+            .context("account not loaded")
+    }
+    fn account_ids(&self) -> Vec<AccountId> {
+        self.accounts_read().keys().cloned().collect()
+    }
+    fn slots(&self) -> Vec<(AccountId, Arc<AccountSlot>)> {
+        self.accounts_read()
+            .iter()
+            .map(|(id, slot)| (id.clone(), slot.clone()))
+            .collect()
     }
     fn profile_session(&self, id: &str) -> Result<NativeAccountSession> {
-        let slot = self.inner.accounts.get(id).context("account not loaded")?;
+        let slot = self.slot(id).context("account not loaded")?;
         let record = self
             .inner
             .registry
@@ -566,7 +636,7 @@ impl ManualService {
                 }
             }
         }
-        let slot = self.inner.accounts.get(id).context("account not loaded")?;
+        let slot = self.slot(id).context("account not loaded")?;
         let _read = slot.profile_read.lock().await;
         if !force {
             if let Some((value, at)) = self.inner.workbench.profile_snapshot(id)? {
@@ -613,7 +683,7 @@ impl ManualService {
     ) -> Result<crate::protocol::WorksPage> {
         const CACHE_TTL: Duration = Duration::from_secs(60);
         const STALE_TTL: Duration = Duration::from_secs(600);
-        let slot = self.inner.accounts.get(id).context("account not loaded")?;
+        let slot = self.slot(id).context("account not loaded")?;
         let key = format!("{cursor}:{count}");
         if let Some(page) = {
             let cache = slot.works_cache.lock().await;
@@ -755,11 +825,7 @@ impl ManualService {
     /// # Errors
     /// Reports missing scopes, platform failures and verified response mismatches.
     pub async fn refresh_peer(&self, account: &str, conversation: &str) -> Result<()> {
-        let slot = self
-            .inner
-            .accounts
-            .get(account)
-            .context("account not loaded")?;
+        let slot = self.slot(account).context("account not loaded")?;
         let _read = slot.profile_read.lock().await;
         let peer = self.inner.workbench.peer_scope(account, conversation)?;
         let session = self.profile_session(account)?;
@@ -772,9 +838,8 @@ impl ManualService {
     /// Returns bounded unresolved command/receipt counts under current verified leases.
     pub async fn administrative_counts(&self) -> Result<(usize, usize)> {
         let leases = self
-            .inner
-            .accounts
-            .keys()
+            .account_ids()
+            .into_iter()
             .filter_map(|id| {
                 self.inner
                     .controller
@@ -809,8 +874,8 @@ impl ManualService {
         let (pending_before, _) = self.administrative_counts().await?;
         self.change_business(crate::business::Edit::EmergencyStop)
             .await?;
-        for id in self.inner.accounts.keys() {
-            let Some(control) = self.inner.runtime.account_control(id).await else {
+        for id in self.account_ids() {
+            let Some(control) = self.inner.runtime.account_control(&id).await else {
                 continue;
             };
             let state = *control.borrow();
@@ -851,7 +916,7 @@ impl ManualService {
             stopped.state.lifecycle = crate::state::LifecycleState::Draining;
             self.inner
                 .runtime
-                .update_account_control(id, stopped)
+                .update_account_control(&id, stopped)
                 .await?;
         }
         self.stop_frontier().await?;
@@ -863,7 +928,7 @@ impl ManualService {
         Ok(serde_json::json!({
             "ok":true,
             "message":"所有账号协议会话已停止；待核验发送证据已保留",
-            "accounts_stopped":self.inner.accounts.len(),
+            "accounts_stopped":self.accounts_read().len(),
             "commands_cleared":cleared,
             "messages_marked_processed":0,
             "stopped_at":stopped_at,
@@ -927,7 +992,8 @@ impl ManualService {
         let id = batch.id.clone();
         let times =
             tokio::task::spawn_blocking(move || store.outbound_delivery_times(&id)).await??;
-        let own = self.inner.accounts[batch.account_id.as_str()]
+        let own = self
+            .slot(batch.account_id.as_str())?
             .canonical_sec_uid
             .clone();
         let events: Vec<_> = batch
@@ -965,8 +1031,8 @@ impl ManualService {
             .controller
             .set(controller)
             .map_err(|_| anyhow::anyhow!("controller already bound"))?;
-        for id in self.inner.accounts.keys() {
-            self.inner.runtime.activate_manual_account(id).await?;
+        for id in self.account_ids() {
+            self.inner.runtime.activate_manual_account(&id).await?;
         }
         Ok(())
     }
@@ -995,11 +1061,7 @@ impl ManualService {
     pub async fn submit(&self, input: ManualRequest) -> Result<CommandStatus> {
         let route = input.route()?;
         let id = AccountId::new(input.account_id.clone())?;
-        let slot = self
-            .inner
-            .accounts
-            .get(&id)
-            .context("账号未加载到 Rust 服务")?;
+        let slot = self.slot(&id).context("账号未加载到 Rust 服务")?;
         let _serial = slot.submission.lock().await;
         let grant = self.lease(id.as_str())?;
         anyhow::ensure!(
@@ -1078,7 +1140,7 @@ impl ManualService {
         let store = self.inner.store.clone();
         let batch = tokio::task::spawn_blocking(move || store.outbound_batch(&id)).await??;
         anyhow::ensure!(
-            self.inner.accounts.contains_key(batch.account_id.as_str()),
+            self.accounts_read().contains_key(batch.account_id.as_str()),
             "command account not loaded"
         );
         self.project_outbound(&batch).await?;
@@ -1094,7 +1156,7 @@ impl ManualService {
         input: super::rules::MatchInput,
     ) -> Result<Option<super::rules::ReplyPlan>> {
         anyhow::ensure!(
-            self.inner.accounts.contains_key(input.account_id.as_str()),
+            self.accounts_read().contains_key(input.account_id.as_str()),
             "rule preview account not loaded"
         );
         let engine = self.inner.business.snapshot()?.engine.clone();
@@ -1165,15 +1227,15 @@ impl ManualService {
         let result =
             tokio::task::spawn_blocking(move || business.change(|doc| edit.apply(doc))).await??;
         let snapshot = self.inner.business.snapshot()?;
-        for (id, slot) in &self.inner.accounts {
+        for (id, slot) in self.slots() {
             let enabled = snapshot
                 .policies
                 .get(id.as_str())
                 .is_some_and(|p| p.enabled);
             if !enabled {
-                self.inner.runtime.pause_automatic_account(id).await?;
+                self.inner.runtime.pause_automatic_account(&id).await?;
             } else if slot.restored_binding.lock().await.is_some() {
-                self.inner.runtime.activate_automatic_account(id).await?;
+                self.inner.runtime.activate_automatic_account(&id).await?;
             }
         }
         self.retire_old_automatic(snapshot.document.revision)
@@ -1183,14 +1245,14 @@ impl ManualService {
     }
 
     async fn retire_old_automatic(&self, revision: u64) -> Result<()> {
-        for id in self.inner.accounts.keys() {
+        for id in self.account_ids() {
             let Some(controller) = self.inner.controller.get() else {
                 continue;
             };
             let Some(grant) = controller.authorization(id.as_str()) else {
                 continue;
             };
-            let Some(control) = self.inner.runtime.account_control(id).await else {
+            let Some(control) = self.inner.runtime.account_control(&id).await else {
                 continue;
             };
             let state = *control.borrow();
@@ -1225,25 +1287,20 @@ impl ManualService {
 
     /// Returns one bounded in-memory status snapshot, without platform probes.
     pub async fn account_statuses(&self) -> Vec<AccountStatus> {
-        let mut result = Vec::with_capacity(self.inner.accounts.len());
-        for id in self.inner.accounts.keys() {
-            if let Some(control) = self.inner.runtime.account_control(id).await {
+        let mut result = Vec::with_capacity(self.accounts_read().len());
+        for id in self.account_ids() {
+            let Ok(slot) = self.slot(&id) else {
+                continue;
+            };
+            if let Some(control) = self.inner.runtime.account_control(&id).await {
                 let state = control.borrow().state;
                 result.push(AccountStatus {
-                    frontier: self.inner.accounts[id].frontier_status.lock().await.clone(),
+                    frontier: slot.frontier_status.lock().await.clone(),
                     account_id: id.to_string(),
-                    identity_error: self.inner.accounts[id].identity_error.lock().await.clone(),
-                    identity_verified: self.inner.accounts[id]
-                        .restored_binding
-                        .lock()
-                        .await
-                        .is_some(),
-                    last_automatic_command_id: self.inner.accounts[id]
-                        .last_automatic_command
-                        .lock()
-                        .await
-                        .clone(),
-                    inbound_processing: self.inner.accounts[id].processing.lock().await.clone(),
+                    identity_error: slot.identity_error.lock().await.clone(),
+                    identity_verified: slot.restored_binding.lock().await.is_some(),
+                    last_automatic_command_id: slot.last_automatic_command.lock().await.clone(),
+                    inbound_processing: slot.processing.lock().await.clone(),
                     label: state.display_status().label(),
                     state,
                 });
@@ -1256,7 +1313,7 @@ impl ManualService {
     /// Rejects unloaded accounts, missing leases, stale state and full queues.
     pub async fn reconcile(&self, account: String) -> Result<()> {
         let id = AccountId::new(account)?;
-        anyhow::ensure!(self.inner.accounts.contains_key(&id), "account not loaded");
+        anyhow::ensure!(self.accounts_read().contains_key(&id), "account not loaded");
         let control = self
             .inner
             .runtime
@@ -1296,7 +1353,8 @@ impl ManualService {
         control: tokio::sync::watch::Receiver<AccountControl>,
     ) -> Result<()> {
         let result = self.fetch_and_commit(work, control).await;
-        let healthy = self.inner.accounts[&work.account_id]
+        let healthy = self
+            .slot(&work.account_id)?
             .frontier_status
             .lock()
             .await
@@ -1326,14 +1384,8 @@ impl ManualService {
         let profile = match session.verify_self().await {
             Ok(profile) => profile,
             Err(error) => {
-                *self.inner.accounts[&work.account_id]
-                    .restored_binding
-                    .lock()
-                    .await = None;
-                *self.inner.accounts[&work.account_id]
-                    .identity_error
-                    .lock()
-                    .await = Some(
+                *self.slot(&work.account_id)?.restored_binding.lock().await = None;
+                *self.slot(&work.account_id)?.identity_error.lock().await = Some(
                     match &error {
                         AccountRequestError::AccountMismatch => "cookie_account_mismatch",
                         AccountRequestError::Http { status: 401, .. } => "authentication_expired",
@@ -1364,15 +1416,10 @@ impl ManualService {
                 return Err(error.into());
             }
         };
-        *self.inner.accounts[&work.account_id]
-            .identity_error
-            .lock()
-            .await = None;
+        *self.slot(&work.account_id)?.identity_error.lock().await = None;
         let digest = session.credentials.binding_digest();
-        let mut restored = self.inner.accounts[&work.account_id]
-            .restored_binding
-            .lock()
-            .await;
+        let slot = self.slot(&work.account_id)?;
+        let mut restored = slot.restored_binding.lock().await;
         // A risk restriction expires after a window; re-read it while it is active
         // so the account returns to a guarded re-check without a new login.
         let risk_active = self
@@ -1449,11 +1496,7 @@ impl ManualService {
         work: &WorkEnvelope,
         control: tokio::sync::watch::Receiver<AccountControl>,
     ) -> Result<()> {
-        let slot = self
-            .inner
-            .accounts
-            .get(&work.account_id)
-            .context("account not loaded")?;
+        let slot = self.slot(&work.account_id).context("account not loaded")?;
         let generation = i64::try_from(work.credential_generation)?;
         let initial = self
             .inner
@@ -1705,11 +1748,7 @@ impl ManualService {
         control: tokio::sync::watch::Receiver<AccountControl>,
     ) -> Result<()> {
         let _configuration = self.inner.configuration_gate.read().await;
-        let slot = self
-            .inner
-            .accounts
-            .get(&work.account_id)
-            .context("account not loaded")?;
+        let slot = self.slot(&work.account_id).context("account not loaded")?;
         let store = self.inner.store.clone();
         let id = work.durable_id.clone();
         let batch = tokio::task::spawn_blocking(move || store.outbound_batch(&id)).await??;

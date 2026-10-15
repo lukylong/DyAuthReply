@@ -7,7 +7,7 @@ use crate::{
         account_session::NativeAccountSession, credentials::AccountCredentials,
         live_http::ProtocolHttpClient,
     },
-    runtime::messaging::{ManualService, MessagingSettings},
+    runtime::messaging::{HotChange, ManualService, MessagingSettings},
 };
 use anyhow::{Context, Result};
 use axum::{
@@ -295,9 +295,22 @@ async fn import(app: App, target: Option<String>, input: Input) -> Result<Value>
         },
     )?;
     app.service.store_imported_profile(&record, &policy)?;
+    let reload = hot_reload_required(&app, &record.id, changed).await;
     Ok(
-        json!({"success":true,"id":record.id,"nickname":record.nickname,"sec_uid":record.sec_uid,"status":0,"credential_state":"unknown","generation":record.generation,"_runtime_reload":changed||app.service.loaded_generation(&record.id)!=Some(record.generation),"message":"账号身份已验证，发送能力以实际回执为准"}),
+        json!({"success":true,"id":record.id,"nickname":record.nickname,"sec_uid":record.sec_uid,"status":0,"credential_state":"unknown","generation":record.generation,"_runtime_reload":reload,"message":"账号身份已验证，发送能力以实际回执为准"}),
     )
+}
+/// Loads the stored account into the running service; only a configuration that
+/// cannot change while running falls back to restarting the whole service.
+async fn hot_reload_required(app: &App, id: &str, changed: bool) -> bool {
+    match app.service.hot_load_account(id).await {
+        Ok(HotChange::RestartRequired) => changed || app.service.loaded_generation(id).is_none(),
+        Ok(_) => false,
+        Err(error) => {
+            tracing::warn!(account_id = id, %error, "hot account load failed; restarting service");
+            true
+        }
+    }
 }
 async fn verify_identity(
     app: &App,
@@ -389,7 +402,14 @@ async fn delete(State(app): State<App>, RoutePath(id): RoutePath<String>) -> Res
             "请先关闭自动回复再移除账号"
         );
         app.service.retire_account(&id).await?;
-        Ok(json!({"success":true,"id":id,"_runtime_reload":true}))
+        let reload = match app.service.hot_unload_account(&id).await {
+            Ok(change) => change == HotChange::RestartRequired,
+            Err(error) => {
+                tracing::warn!(account_id = %id, %error, "hot account removal failed; restarting service");
+                true
+            }
+        };
+        Ok(json!({"success":true,"id":id,"_runtime_reload":reload}))
     }
     .await;
     response(result)

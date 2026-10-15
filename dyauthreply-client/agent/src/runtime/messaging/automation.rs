@@ -117,7 +117,8 @@ impl ManualService {
         let grant = self.authorized(work.account_id.as_str(), WorkKind::AutomaticReply)?;
         let engine = config.engine.clone();
         let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())?;
-        let own = self.inner.accounts[&work.account_id]
+        let own = self
+            .slot(&work.account_id)?
             .session
             .lock()
             .await
@@ -144,7 +145,8 @@ impl ManualService {
         })
         .await??;
         for batch in batches {
-            *self.inner.accounts[&work.account_id]
+            *self
+                .slot(&work.account_id)?
                 .last_automatic_command
                 .lock()
                 .await = Some(batch.clone());

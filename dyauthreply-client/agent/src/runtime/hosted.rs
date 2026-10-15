@@ -97,6 +97,19 @@ pub struct HostedController {
     status: watch::Receiver<HostedStatus>,
     join: Mutex<Option<JoinHandle<Result<()>>>>,
     authorizations: Arc<RwLock<BTreeMap<String, LeaseAuthorization>>>,
+    changes: Arc<DesiredChanges>,
+}
+
+/// Account set changes requested while running (hot add/remove). The driver
+/// applies them between requests, never while a signed request is in flight.
+#[derive(Default)]
+struct DesiredChanges {
+    queue: std::sync::Mutex<Vec<DesiredChange>>,
+    wake: tokio::sync::Notify,
+}
+enum DesiredChange {
+    Add(AccountLeaseOperation),
+    Remove(String),
 }
 
 /// Produced only by the signed controller; never deserialized from IPC input.
@@ -170,7 +183,9 @@ impl HostedController {
         let (stop, stop_rx) = watch::channel(false);
         let (status_tx, status) = watch::channel(HostedStatus::default());
         let authorizations = Arc::new(RwLock::new(BTreeMap::new()));
+        let changes = Arc::new(DesiredChanges::default());
         let mut driver = Driver {
+            changes: changes.clone(),
             auth_state_file: settings.auth_state_file,
             authority_url: settings.server.trim_end_matches('/').to_owned(),
             authorizations: authorizations.clone(),
@@ -202,7 +217,38 @@ impl HostedController {
             status,
             join: Mutex::new(Some(join)),
             authorizations,
+            changes,
         }))
+    }
+
+    /// Requests ownership of an account registered with the runtime after start.
+    /// The next sync acquires it; nothing else about other accounts changes.
+    pub fn add_account(&self, local_account_id: &str, platform_account_id: &str) {
+        self.push(DesiredChange::Add(AccountLeaseOperation {
+            platform: "douyin".into(),
+            platform_account_id: platform_account_id.into(),
+            local_account_id: local_account_id.into(),
+            action: LeaseAction::Acquire,
+            expected_epoch: 0,
+        }));
+    }
+
+    /// Stops renewing an account and releases its lease on the next sync.
+    pub fn remove_account(&self, local_account_id: &str) {
+        self.authorizations
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(local_account_id);
+        self.push(DesiredChange::Remove(local_account_id.into()));
+    }
+
+    fn push(&self, change: DesiredChange) {
+        self.changes
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(change);
+        self.changes.wake.notify_one();
     }
 
     #[must_use]
@@ -235,6 +281,7 @@ impl HostedController {
 
 type SyncTask = JoinHandle<std::result::Result<VerifiedGrantBatch, ControlError>>;
 struct Driver {
+    changes: Arc<DesiredChanges>,
     auth_state_file: Option<PathBuf>,
     authority_url: String,
     authorizations: Arc<RwLock<BTreeMap<String, LeaseAuthorization>>>,
@@ -276,7 +323,13 @@ impl Driver {
                 }
                 self.next_sync = Instant::now();
             }
-            if self.pending.is_none() && Instant::now() >= self.next_sync {
+            if self.pending.is_none() && !self.awaiting_auth {
+                self.apply_desired_changes().await?;
+            }
+            if self.pending.is_none()
+                && Instant::now() >= self.next_sync
+                && !self.request.accounts.is_empty()
+            {
                 if self.request_started.elapsed() >= MAX_REQUEST_AGE {
                     self.refresh_request_identity()?;
                 }
@@ -304,6 +357,7 @@ impl Driver {
                 changed = ticks.changed() => {
                     if changed.is_err() || *ticks.borrow_and_update() == u64::MAX { bail!("central timer stopped"); }
                 }
+                () = self.changes.wake.notified(), if self.pending.is_none() => {}
                 outcome = async { self.pending.as_mut().expect("pending branch enabled").await }, if self.pending.is_some() => {
                     self.pending = None;
                     match outcome.context("hosted HTTP task failed")? {
@@ -338,6 +392,34 @@ impl Driver {
                 }
             }
         }
+    }
+
+    /// Applies hot add/remove requests. Only called with no request in flight,
+    /// so a signed request body never changes under a retry.
+    async fn apply_desired_changes(&mut self) -> Result<()> {
+        let changes = std::mem::take(
+            &mut *self
+                .changes
+                .queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let (removed, releases) = merge_changes(&mut self.desired_accounts, &self.leases, changes)?;
+        for id in removed {
+            self.latest_epochs.remove(&id);
+            self.release_local(&id).await?;
+        }
+        self.advance_request()?;
+        self.request.accounts.extend(releases);
+        self.next_sync = Instant::now();
+        tracing::info!(
+            desired_accounts = self.desired_accounts.len(),
+            "hosted account set changed without restart"
+        );
+        Ok(())
     }
 
     fn advance_request(&mut self) -> Result<()> {
@@ -432,6 +514,9 @@ impl Driver {
         );
         for grant in batch.results() {
             let id = AccountId::new(&grant.local_account_id)?;
+            if self.drop_unwanted_grant(&id).await? {
+                continue;
+            }
             let ownership = if grant.status == GrantStatus::Owned {
                 // Persist the takeover boundary before publishing Owned. The
                 // first scheduled receive may be delayed by bounded worker load.
@@ -503,6 +588,20 @@ impl Driver {
             "hosted ownership synchronized; platform workers remain separately gated"
         );
         Ok(())
+    }
+
+    /// A grant for an account removed while its request was in flight only drops
+    /// the local grant; a pending release (or the server TTL) frees the remote lease.
+    async fn drop_unwanted_grant(&mut self, id: &AccountId) -> Result<bool> {
+        let desired = self
+            .desired_accounts
+            .iter()
+            .any(|a| a.local_account_id == id.as_str());
+        if desired && self.runtime.account_control(id).await.is_some() {
+            return Ok(false);
+        }
+        self.release_local(id.as_str()).await?;
+        Ok(true)
     }
 
     async fn release_local(&mut self, id: &str) -> Result<()> {
@@ -590,6 +689,42 @@ fn retryable(error: &ControlError) -> bool {
             | ControlError::Http(408 | 409 | 429 | 500..=599)
             | ControlError::Time
     )
+}
+
+/// Applies hot add/remove requests to the desired set. Returns removed account
+/// IDs and the release operations for those that currently hold a lease.
+fn merge_changes(
+    desired: &mut Vec<AccountLeaseOperation>,
+    leases: &BTreeMap<String, AccountLease>,
+    changes: Vec<DesiredChange>,
+) -> Result<(Vec<String>, Vec<AccountLeaseOperation>)> {
+    let mut removed = Vec::new();
+    let mut releases = Vec::new();
+    for change in changes {
+        match change {
+            DesiredChange::Add(operation) => {
+                if !desired
+                    .iter()
+                    .any(|a| a.local_account_id == operation.local_account_id)
+                {
+                    desired.push(operation);
+                }
+            }
+            DesiredChange::Remove(id) => {
+                let item = desired.iter().find(|a| a.local_account_id == id);
+                if let (Some(lease), Some(item)) = (leases.get(&id), item) {
+                    releases.push(AccountLeaseOperation {
+                        action: LeaseAction::Release,
+                        expected_epoch: u64::try_from(lease.fence_epoch)?,
+                        ..item.clone()
+                    });
+                }
+                desired.retain(|a| a.local_account_id != id);
+                removed.push(id);
+            }
+        }
+    }
+    Ok((removed, releases))
 }
 
 fn next_operations(
@@ -727,6 +862,81 @@ mod tests {
         assert!(after_release
             .iter()
             .all(|a| a.action == LeaseAction::Acquire && a.expected_epoch == 0));
+    }
+    fn operation(id: &str) -> AccountLeaseOperation {
+        AccountLeaseOperation {
+            platform: "douyin".into(),
+            platform_account_id: format!("sec-{id}"),
+            local_account_id: id.into(),
+            action: LeaseAction::Acquire,
+            expected_epoch: 0,
+        }
+    }
+    fn lease(id: &str, epoch: i64) -> AccountLease {
+        AccountLease {
+            account_id: id.into(),
+            owner_instance_id: "instance".into(),
+            owner_boot_id: "boot".into(),
+            fence_epoch: epoch,
+            lease_until_ms: 100,
+            status: crate::store::LeaseStatus::Active,
+            last_observed_at_ms: 1,
+        }
+    }
+    #[test]
+    fn hot_changes_add_acquire_and_release_only_the_changed_accounts() {
+        let mut desired = vec![operation("kept"), operation("gone")];
+        let leases = BTreeMap::from([
+            ("kept".into(), lease("kept", 3)),
+            ("gone".into(), lease("gone", 5)),
+        ]);
+        let (removed, releases) = merge_changes(
+            &mut desired,
+            &leases,
+            vec![
+                DesiredChange::Add(operation("new")),
+                DesiredChange::Add(operation("new")),
+                DesiredChange::Remove("gone".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(removed, ["gone"]);
+        assert_eq!(releases.len(), 1);
+        assert_eq!(
+            (
+                releases[0].local_account_id.as_str(),
+                releases[0].action,
+                releases[0].expected_epoch
+            ),
+            ("gone", LeaseAction::Release, 5)
+        );
+        let mut remaining = leases;
+        remaining.remove("gone");
+        let next = next_operations(&desired, &remaining).unwrap();
+        let summary: Vec<_> = next
+            .iter()
+            .map(|a| (a.local_account_id.as_str(), a.action))
+            .collect();
+        // The untouched account keeps renewing its lease; only the new one acquires.
+        assert_eq!(
+            summary,
+            [("kept", LeaseAction::Renew), ("new", LeaseAction::Acquire)]
+        );
+    }
+    #[test]
+    fn removing_an_account_without_a_lease_needs_no_release() {
+        let mut desired = vec![operation("pending")];
+        let (removed, releases) = merge_changes(
+            &mut desired,
+            &BTreeMap::new(),
+            vec![DesiredChange::Remove("pending".into())],
+        )
+        .unwrap();
+        assert_eq!(removed, ["pending"]);
+        assert!(releases.is_empty() && desired.is_empty());
+        assert!(next_operations(&desired, &BTreeMap::new())
+            .unwrap()
+            .is_empty());
     }
     #[test]
     fn retry_policy_preserves_ambiguity_but_rejects_auth_and_signature_failure() {

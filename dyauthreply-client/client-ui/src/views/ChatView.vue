@@ -357,17 +357,26 @@ function insertEmoji(emoji: string) {
   showEmoji.value = false;
 }
 
+function platformReason(s: string): string {
+  const m = /(?:biz_msg|msg)=([^,\]]+)/.exec(s);
+  return m?.[1]?.trim() ? `（抖音提示：${m[1].trim()}）` : '';
+}
+
 function humanizeSendError(raw?: string | null): string {
   if (!raw) return '未知错误';
   const s = raw.trim();
-  if (s.includes('7911') || s.includes('机房')) return '风控拦截(7911)，请换网络或稍后重试';
+  if (s.startsWith('发送未受理：')) return s.slice('发送未受理：'.length);
+  if (s.includes('RiskControlled') || s.includes('7911') || s.includes('机房')) {
+    const code = /business=Some\((\d+)\)/.exec(s)?.[1];
+    return `抖音风控拒绝发送${code ? `(${code})` : ''}${platformReason(s)}，该账号已暂停发送，约 30 分钟内自动复查`;
+  }
   if (s.includes('8101')) return '发送被限制(8101)';
   if (s.includes('登录失效') || s.includes('401') || s.includes('LoginExpired')) {
     return '登录失效，请重新导入登录态';
   }
   if (s.includes('超时')) return '等待回执超时';
   if (s.includes('signer') || s.includes('签名')) return '签名引擎未就绪';
-  return s.length > 56 ? `${s.slice(0, 56)}…` : s;
+  return s.length > 80 ? `${s.slice(0, 80)}…` : s;
 }
 
 function pendingToMessage(p: PendingOutbound): DisplayMessage {
@@ -786,7 +795,7 @@ async function sendText(text: string, requestId?: string) {
         return;
       }
       markPendingFailed(localId, outcome.error || '发送失败');
-      toast.value = outcome.error || '发送失败';
+      toast.value = humanizeSendError(outcome.error || '发送失败');
       return;
     }
     removePending(localId);

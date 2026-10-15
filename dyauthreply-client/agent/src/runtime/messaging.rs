@@ -1017,7 +1017,11 @@ impl ManualService {
             .await
             .context("账号调度器未启动")?;
         let state = *control.borrow();
-        anyhow::ensure!(state.allows(WorkKind::ManualSend), "账号当前状态禁止发送");
+        anyhow::ensure!(
+            state.allows(WorkKind::ManualSend),
+            "{}",
+            send_block_reason(&state.state)
+        );
         let store = self.inner.store.clone();
         let token = grant.token;
         let response_id = serde_json::to_string(&route)?;
@@ -1369,7 +1373,15 @@ impl ManualService {
             .restored_binding
             .lock()
             .await;
-        if restored.as_ref() != Some(&digest) {
+        // A risk restriction expires after a window; re-read it while it is active
+        // so the account returns to a guarded re-check without a new login.
+        let risk_active = self
+            .inner
+            .runtime
+            .account_control(&work.account_id)
+            .await
+            .is_some_and(|c| c.borrow().state.send == SendCapability::RiskControlled);
+        if restored.as_ref() != Some(&digest) || risk_active {
             let grant = self
                 .inner
                 .controller
@@ -1905,12 +1917,53 @@ fn log_inbound_summary(account_id: &str, summary: &ReceiveProcessing) {
     }
 }
 fn log_send_outcome(account_id: &str, outcome: &crate::protocol::live_sender::SendOutcome) {
-    tracing::info!(
-        account_id,
-        classification = ?outcome.classification,
-        response_codes = outcome.response_codes.as_deref().unwrap_or(""),
-        "native send completed"
-    );
+    let codes = outcome.response_codes.as_deref().unwrap_or("");
+    match outcome.classification {
+        DeliveryClass::Delivered | DeliveryClass::DeliveredSoft => tracing::info!(
+            account_id,
+            classification = ?outcome.classification,
+            response_codes = codes,
+            "native send completed"
+        ),
+        DeliveryClass::RiskControlled => tracing::warn!(
+            account_id,
+            classification = ?outcome.classification,
+            response_codes = codes,
+            recheck_minutes = crate::store::RISK_RECHECK_MS / 60_000,
+            "platform risk control rejected the send; sending paused until recheck"
+        ),
+        _ => tracing::warn!(
+            account_id,
+            classification = ?outcome.classification,
+            response_codes = codes,
+            "native send was not delivered"
+        ),
+    }
+}
+
+/// Why the account cannot send right now, in words a user can act on.
+fn send_block_reason(state: &crate::state::AccountRuntimeState) -> String {
+    use crate::state::{LifecycleState, OwnershipState};
+    if !matches!(
+        state.lifecycle,
+        LifecycleState::Running | LifecycleState::PausedAuto
+    ) {
+        return "账号未在运行，请稍后再试".into();
+    }
+    if !matches!(state.ownership, OwnershipState::Owned) {
+        return "账号正在获取托管授权，请稍后再试".into();
+    }
+    match state.send {
+        SendCapability::RiskControlled => format!(
+            "抖音风控暂停了该账号的发送，约 {} 分钟内自动复查；可先在手机抖音确认账号能否正常私信",
+            crate::store::RISK_RECHECK_MS / 60_000
+        ),
+        SendCapability::AuthExpired => "账号登录已失效，请重新登录该账号".into(),
+        SendCapability::ReceiveOnly => {
+            "该账号登录信息缺少发送所需数据，仅能接收消息，请重新登录".into()
+        }
+        SendCapability::Unknown | SendCapability::Sendable => "账号当前状态禁止发送".into(),
+    }
 }
 fn filter_pending(
     store: &CoreStore,

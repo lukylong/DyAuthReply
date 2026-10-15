@@ -212,13 +212,14 @@ impl LiveSender {
                         classification,
                         platform_message_id: delivered.then(|| decoded.server_msg_id.to_string()),
                         response_codes: Some(format!(
-                            "http={},outer={:?},business={:?},raw_check={:?}",
+                            "http={},outer={:?},business={:?},raw_check={:?}{}",
                             response.status,
                             decoded.outer_status_present.then_some(decoded.status_code),
                             (decoded.business_payload_present && decoded.business_payload_valid)
                                 .then_some(decoded.biz_status_code),
                             (decoded.business_payload_present && decoded.business_payload_valid)
-                                .then_some(decoded.biz_raw_check_code)
+                                .then_some(decoded.biz_raw_check_code),
+                            platform_text(&decoded)
                         )),
                     }
                 }
@@ -315,6 +316,34 @@ fn send_allowed(operation: &SendOperation) -> bool {
         && operation.credentials.account_id == operation.lease.account_id
         && operation.credentials.credential_generation == control.state.credential_generation
         && i64::try_from(control.state.lease_epoch).ok() == Some(operation.lease.fence_epoch)
+}
+
+/// The platform's own explanation of a rejection (never message content), bounded
+/// and single-line so it is safe for logs, diagnostics and the UI.
+fn platform_text(decoded: &crate::protocol::im::SendMessageResponse) -> String {
+    let clean = |text: &str| -> String {
+        text.chars()
+            .filter(|c| !c.is_control())
+            .take(80)
+            .collect::<String>()
+            .trim()
+            .to_owned()
+    };
+    let mut parts = Vec::new();
+    for (key, text) in [
+        ("msg", &decoded.status_msg),
+        ("biz_msg", &decoded.biz_status_text),
+    ] {
+        let text = clean(text);
+        if !text.is_empty() && !parts.iter().any(|p: &String| p.ends_with(&text)) {
+            parts.push(format!("{key}={text}"));
+        }
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(",{}", parts.join(","))
+    }
 }
 
 #[cfg(test)]
@@ -422,6 +451,30 @@ async fn signed_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_text_is_bounded_single_line_and_deduplicated() {
+        let mut decoded = crate::protocol::im::SendMessageResponse {
+            status_code: 0,
+            status_msg: "OK".into(),
+            server_msg_id: 0,
+            client_msg_id: String::new(),
+            biz_status_code: 7911,
+            biz_status_text: format!("发送失败\n{}", "限".repeat(200)),
+            biz_raw_check_code: 2,
+            outer_status_present: true,
+            has_response_body: true,
+            has_inner_response: true,
+            business_payload_present: true,
+            business_payload_valid: true,
+        };
+        let text = platform_text(&decoded);
+        assert!(text.starts_with(",msg=OK,biz_msg=发送失败限"));
+        assert!(!text.contains('\n') && text.chars().count() < 100);
+        decoded.status_msg = String::new();
+        decoded.biz_status_text = String::new();
+        assert_eq!(platform_text(&decoded), "");
+    }
     use crate::{
         protocol::wire::{append_bytes_field, append_string_field, append_varint_field},
         state::{

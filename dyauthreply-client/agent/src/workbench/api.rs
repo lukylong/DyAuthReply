@@ -334,7 +334,21 @@ async fn submit(
     };
     match app.service.submit(ManualRequest{request_id:input.request_id,account_id:account,conversation_id,conversation_short_id,text:input.text}).await {
         Ok(s)=>(StatusCode::ACCEPTED,Json(json!({"success":true,"command_id":s.command_id,"client_message_id":s.client_message_id,"message":s.message}))).into_response(),
-        Err(_)=>error(StatusCode::CONFLICT,"发送未受理：请检查账号状态，重试时保留同一请求")
+        Err(e)=>error(StatusCode::CONFLICT,&refusal_message(&e))
+    }
+}
+/// User-facing refusal reasons are written in Chinese; internal errors stay generic.
+fn refusal_message(error: &anyhow::Error) -> String {
+    let reason = error.to_string();
+    if reason
+        .chars()
+        .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+        && reason.chars().count() <= 120
+    {
+        format!("发送未受理：{reason}")
+    } else {
+        tracing::warn!(error = %reason, "manual send refused");
+        "发送未受理：请检查账号状态，重试时保留同一请求".into()
     }
 }
 async fn command(State(app): State<App>, Path(id): Path<String>) -> Response {

@@ -4,6 +4,10 @@ use super::{
 };
 use crate::state::SendCapability;
 const BROWSER_IDENTITY_V2_META_KEY: &str = "browser_identity_binding";
+/// A platform risk rejection is often temporary (e.g. a fresh login environment).
+/// After this window the account returns to `Unknown`, so the next real send
+/// re-checks it instead of the restriction lasting until the user logs in again.
+pub const RISK_RECHECK_MS: i64 = 30 * 60 * 1000;
 #[derive(Clone, Copy)]
 pub struct SendObservation<'a> {
     pub canonical_sec_uid: &'a str,
@@ -86,6 +90,13 @@ pub(super) fn restore(
                 )?;
                 return Ok(SendCapability::Unknown);
             }
+            if cap == "risk_controlled" && now.saturating_sub(at) >= RISK_RECHECK_MS {
+                c.execute(
+                    "UPDATE account_protocol_state SET capability='unknown',observed_at_ms=0,fence_epoch=?2 WHERE account_id=?1 AND capability='risk_controlled'",
+                    params![lease.account_id, lease.fence_epoch],
+                )?;
+                return Ok(SendCapability::Unknown);
+            }
             return Ok(match cap.as_str() {
                 "risk_controlled" => SendCapability::RiskControlled,
                 "receive_only" => SendCapability::ReceiveOnly,
@@ -142,6 +153,39 @@ mod tests {
             .token();
         (dir, store, lease)
     }
+    #[test]
+    fn risk_restriction_expires_into_a_recheck_after_the_window() {
+        let (_dir, store, lease) = fixture();
+        let c = store.lock_connection().unwrap();
+        let a = "a".repeat(64);
+        restore(&c, &lease, "self", &a, 1000).unwrap();
+        record(
+            &c,
+            &lease,
+            SendObservation {
+                canonical_sec_uid: "self",
+                credential_digest: &a,
+                capability: SendCapability::RiskControlled,
+            },
+            1000,
+        )
+        .unwrap();
+        let just_before = 1000 + RISK_RECHECK_MS - 1;
+        assert_eq!(
+            restore(&c, &lease, "self", &a, just_before).unwrap(),
+            SendCapability::RiskControlled
+        );
+        assert_eq!(
+            restore(&c, &lease, "self", &a, 1000 + RISK_RECHECK_MS).unwrap(),
+            SendCapability::Unknown
+        );
+        // The expiry is durable: a later restore does not resurrect the restriction.
+        assert_eq!(
+            restore(&c, &lease, "self", &a, 1000).unwrap(),
+            SendCapability::Unknown
+        );
+    }
+
     #[test]
     fn credential_rotation_clears_stale_risk_but_same_binding_retains_it() {
         let (_dir, store, lease) = fixture();
@@ -243,7 +287,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            restore(&c, &lease, "self", &digest, 7_200_000).unwrap(),
+            restore(&c, &lease, "self", &digest, 3_600_001 + RISK_RECHECK_MS - 1).unwrap(),
             SendCapability::RiskControlled
         );
         assert_eq!(

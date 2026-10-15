@@ -240,13 +240,7 @@ async fn import(app: App, target: Option<String>, input: Input) -> Result<Value>
         !document.user_agent.is_empty(),
         "请同时导入浏览器 User-Agent，或使用扩展一键导入串"
     );
-    let credentials = AccountCredentials::from_state(document.clone())?;
-    let http = ProtocolHttpClient::for_user_agent(2, &credentials.user_agent)?;
-    let mut session = NativeAccountSession::new(credentials, http, app.service.import_signer());
-    let verified = tokio::time::timeout(std::time::Duration::from_secs(30), session.verify_self())
-        .await
-        .context("账号身份校验超时，未保存凭证")?
-        .context("账号身份校验失败，未保存凭证")?;
+    let verified = verify_identity(&app, &document).await?;
     if let Some(base) = &base {
         anyhow::ensure!(
             base.expected_sec_uid == verified.sec_uid,
@@ -289,6 +283,7 @@ async fn import(app: App, target: Option<String>, input: Input) -> Result<Value>
         "本机托管账号已达当前承载上限，请查看设置中的承载评估"
     );
     let policy = account_policy(&input, document.account_id.clone())?;
+    log_import(&document.account_id, &input, &document.user_agent);
     let (record, changed) = registry.put(
         &document,
         &verified.nickname,
@@ -303,6 +298,58 @@ async fn import(app: App, target: Option<String>, input: Input) -> Result<Value>
     Ok(
         json!({"success":true,"id":record.id,"nickname":record.nickname,"sec_uid":record.sec_uid,"status":0,"credential_state":"unknown","generation":record.generation,"_runtime_reload":changed||app.service.loaded_generation(&record.id)!=Some(record.generation),"message":"账号身份已验证，发送能力以实际回执为准"}),
     )
+}
+async fn verify_identity(
+    app: &App,
+    document: &crate::protocol::credentials::CredentialImport,
+) -> Result<crate::protocol::VerifiedSelf> {
+    let credentials = AccountCredentials::from_state(document.clone())?;
+    let http = ProtocolHttpClient::for_user_agent(2, &credentials.user_agent)?;
+    let mut session = NativeAccountSession::new(credentials, http, app.service.import_signer());
+    tokio::time::timeout(std::time::Duration::from_secs(30), session.verify_self())
+        .await
+        .context("账号身份校验超时，未保存凭证")?
+        .context("账号身份校验失败，未保存凭证")
+}
+/// Records how an account entered the client. A login made in a browser on another
+/// OS (e.g. imported from a Windows PC into this Mac) sends from an environment the
+/// platform has not seen with that session, a known trigger for send risk control.
+fn log_import(account_id: &str, input: &Input, user_agent: &str) {
+    let source = if input.bundle.trim().is_empty() {
+        "fields"
+    } else {
+        "bundle"
+    };
+    let browser_os = if user_agent.contains("Windows") {
+        "windows"
+    } else if user_agent.contains("Macintosh") {
+        "macos"
+    } else {
+        "other"
+    };
+    let browser = user_agent
+        .split("Chrome/")
+        .nth(1)
+        .and_then(|v| v.split('.').next())
+        .unwrap_or("-");
+    if browser_os == std::env::consts::OS {
+        tracing::info!(
+            account_id,
+            source,
+            browser_os,
+            browser,
+            "account credentials imported"
+        );
+    } else {
+        tracing::warn!(
+            account_id,
+            source,
+            browser_os,
+            host_os = std::env::consts::OS,
+            browser,
+            "account credentials come from a browser on another OS; sends may hit platform risk control"
+        );
+    }
 }
 fn account_policy(
     input: &Input,

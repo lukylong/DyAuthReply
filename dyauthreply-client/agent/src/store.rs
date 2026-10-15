@@ -37,7 +37,7 @@ const SCHEMA_V3: u32 = 3;
 const SCHEMA_V4: u32 = 4;
 #[path = "store_protocol_state.rs"]
 mod protocol_state;
-pub use protocol_state::SendObservation;
+pub use protocol_state::{SendObservation, RISK_RECHECK_MS};
 #[path = "store_send_receipts.rs"]
 mod send_receipts;
 pub use send_receipts::{ReceiptReconciliation, SentReceiptEvidence};

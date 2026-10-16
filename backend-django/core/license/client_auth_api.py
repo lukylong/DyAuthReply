@@ -43,13 +43,13 @@ def app_version(request):
     自托管下载时，版本号取自已同步完成的安装包标记（download_sync），保证宣布的版本
     一定已经可以下载；尚未同步过则回退到 settings。
     """
-    from core.license.download_sync import local_release
+    from core.license.download_sync import advertised_release
 
-    synced = local_release() if settings.DOWNLOAD_PUBLIC_BASE_URL else None
+    release = advertised_release()
     return {
-        "version": (synced or {}).get("version") or settings.DOWNLOAD_LATEST_VERSION,
+        "version": release["version"],
         "mandatory": settings.DOWNLOAD_FORCE_UPDATE,
-        "notes": (synced or {}).get("notes") or settings.DOWNLOAD_RELEASE_NOTES,
+        "notes": release["notes"],
         "macos_url": settings.DOWNLOAD_MACOS_URL,
         "windows_url": settings.DOWNLOAD_WINDOWS_URL,
         "release_page": settings.DOWNLOAD_RELEASE_PAGE,

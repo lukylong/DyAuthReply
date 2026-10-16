@@ -8,8 +8,9 @@ before CI finished advertised a new version and served the old installer.
 
 Now the web process polls the public dist release (via China mirrors, direct
 fallback), downloads every installer, checks sizes, and only then writes
-``release.json`` in ``DOWNLOAD_LOCAL_DIR``. ``app-version`` reads that marker, so
-the advertised version can never run ahead of the files.
+``release.json`` in ``DOWNLOAD_LOCAL_DIR``. Everything public (``app-version``, the
+landing page, versioned download names) reads it through ``advertised_release``,
+so the advertised version can never run ahead of the files or lag behind them.
 """
 from __future__ import annotations
 
@@ -67,6 +68,16 @@ def local_release(local_dir: Optional[Path] = None) -> Optional[dict]:
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) and data.get("version") else None
+
+
+def advertised_release() -> dict:
+    """Version and notes to show publicly: the synced installers' when self-hosted,
+    so a client release needs no server deploy; otherwise the settings fallback."""
+    synced = (local_release() if settings.DOWNLOAD_PUBLIC_BASE_URL else None) or {}
+    return {
+        "version": synced.get("version") or settings.DOWNLOAD_LATEST_VERSION,
+        "notes": synced.get("notes") or settings.DOWNLOAD_RELEASE_NOTES,
+    }
 
 
 def _fetch_json(client: httpx.Client, bases: list[str], name: str) -> Optional[dict]:

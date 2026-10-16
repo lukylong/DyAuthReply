@@ -35,12 +35,16 @@ from django.shortcuts import render
 _SAFE_DOWNLOAD_NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
 
 from application.main import api
+from core.license.download_sync import advertised_release
 
 
 def download_landing(request):
-    """根路径 / 的公开下载落地页：安装包/插件下载 + 使用文档。无需登录。"""
+    """根路径 / 的公开下载落地页：安装包/插件下载 + 使用文档。无需登录。
+
+    版本号与 app-version 同源（已同步完成的安装包标记），发版后无需重新部署服务端。
+    """
     return render(request, 'landing.html', {
-        'version': settings.DOWNLOAD_LATEST_VERSION,
+        'version': advertised_release()['version'],
         'macos_url': settings.DOWNLOAD_MACOS_URL,
         'windows_url': settings.DOWNLOAD_WINDOWS_URL,
         'extension_url': settings.DOWNLOAD_EXTENSION_URL,
@@ -55,7 +59,7 @@ def _versioned_download_name(name):
     物理文件名保持稳定（维持滚动 latest 链接不变），仅在响应头里改下载名。
     插件 zip 版本独立于客户端，不加版本号。
     """
-    version = (getattr(settings, 'DOWNLOAD_LATEST_VERSION', '') or '').strip()
+    version = (advertised_release()['version'] or '').strip()
     if not version:
         return None
     client_files = {settings.DOWNLOAD_MACOS_FILE, settings.DOWNLOAD_WINDOWS_FILE}

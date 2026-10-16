@@ -88,3 +88,22 @@ class DownloadSyncTests(TestCase):
         self.assertEqual(calls, ["latest.json"])
         marker = json.loads((Path(self.dir.name) / "release.json").read_text())
         self.assertEqual(marker["version"], "0.1.36")
+
+    def test_landing_page_and_download_names_follow_the_synced_release(self):
+        """Releasing must not need a server deploy: everything public shows the
+        version whose installers are in place, not the one written in settings."""
+        def landing_version():
+            return Client().get("/").context["version"]
+
+        def download_name(name):
+            response = Client().get(f"/downloads/{name}")
+            return response["Content-Disposition"]
+
+        with patched(transport()):
+            download_sync.sync_release(source_base=BASE)
+        self.assertEqual(landing_version(), "0.1.36")
+        self.assertIn('filename="win-v0.1.36.exe"', download_name("win.exe"))
+        self.assertIn('filename="mac-v0.1.36.dmg"', download_name("mac.dmg"))
+
+    def test_without_a_synced_release_settings_still_name_the_version(self):
+        self.assertEqual(Client().get("/").context["version"], "0.1.35")

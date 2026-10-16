@@ -39,14 +39,16 @@ fn await_live_health(child: &mut Child, address: SocketAddr) -> HealthResponse {
             stream
                 .set_read_timeout(Some(Duration::from_secs(1)))
                 .expect("health read timeout");
-            stream
-                .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-                .expect("write health request");
+            // The listener is bound before startup finishes, so a connection can sit
+            // in the backlog past the read timeout on a slow runner: not ready yet.
             let mut response = String::new();
-            stream
-                .read_to_string(&mut response)
-                .expect("read health response");
-            if let Some((headers, body)) = response.split_once("\r\n\r\n") {
+            let answered = stream
+                .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .and_then(|()| stream.read_to_string(&mut response))
+                .is_ok();
+            if let Some((headers, body)) =
+                answered.then(|| response.split_once("\r\n\r\n")).flatten()
+            {
                 assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
                 return serde_json::from_str(body).expect("valid live health JSON");
             }

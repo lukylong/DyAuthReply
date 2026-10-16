@@ -319,6 +319,7 @@ function accountStatusLabel(acc: DouyinAccount) {
       ? '账号正常，可接收和发送消息'
       : '账号正常，登录身份和接收链路已验证';
   }
+  if (acc.identity_error) return acc.last_probe_error || '身份校验异常';
   return statusLabel(acc.status);
 }
 
@@ -343,6 +344,7 @@ function accountCredentialLabel(acc: DouyinAccount) {
   }
   if (isAccountHealthy(acc)) return '账号正常';
   if (acc.credential_state === 'sendable') return '可发送';
+  if (acc.identity_error) return '校验异常';
   return '检测中';
 }
 
@@ -607,6 +609,11 @@ onMounted(async () => {
         <p v-else-if="acc.credential_state === 'invalid' || acc.status === 2" class="account-alert invalid-alert">
           <TriangleAlert :size="14" />
           <span :title="acc.last_probe_error || '登录状态已失效，请更新凭证'">{{ acc.last_probe_error || '登录状态已失效，请更新凭证' }}</span>
+        </p>
+
+        <p v-else-if="acc.identity_error" class="account-alert risk-alert">
+          <TriangleAlert :size="14" />
+          <span :title="acc.last_probe_error || '身份校验异常，正在重试'">{{ acc.last_probe_error || '身份校验异常，正在重试' }}</span>
         </p>
 
         <div class="card-divider"></div>

@@ -546,13 +546,14 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.38'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.39'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '抖音风控拒绝发送后不再一直「仅接收」：30 分钟后自动重新检测，发送失败会说明具体原因\n'
-    '添加、重新登录、删除账号不再重启服务，其他账号保持在线\n'
-    '运行诊断：重启或更新后未上报的数据不再丢失',
+    '修复部分登录失效账号长期显示「检测中」：识别消息会话失效，展示具体原因并停止无效收发重试\n'
+    '临时网络或资料异常与登录失效分开提示，保留正常重试\n'
+    '新增及更新登录凭证时，同时校验账号身份和消息接口，避免只验证主页即保存不可用会话\n'
+    '已被平台拒绝的登录会话仍需重新登录，本次更新不会自动恢复失效凭证',
 )

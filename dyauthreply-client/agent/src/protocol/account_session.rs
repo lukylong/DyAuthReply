@@ -28,6 +28,8 @@ pub enum AccountRequestError {
     Signing { step: &'static str },
     #[error("HTTP {status} at {step}")]
     Http { step: &'static str, status: u16 },
+    #[error("authentication expired at {step}: IM session rejected (code {code})")]
+    AuthenticationExpired { step: &'static str, code: i64 },
     #[error("business result at {step}: {code:?}")]
     Business {
         step: &'static str,
@@ -35,6 +37,29 @@ pub enum AccountRequestError {
     },
     #[error("malformed response at {step}")]
     Decode { step: &'static str },
+}
+
+impl AccountRequestError {
+    #[must_use]
+    pub const fn is_authentication_expired(&self) -> bool {
+        matches!(
+            self,
+            Self::AuthenticationExpired { .. } | Self::Http { status: 401, .. }
+        )
+    }
+
+    #[must_use]
+    pub const fn identity_failure_code(&self) -> &'static str {
+        if self.is_authentication_expired() {
+            return "authentication_expired";
+        }
+        match self {
+            Self::AccountMismatch => "cookie_account_mismatch",
+            Self::Transport { .. } => "identity_transport_failed",
+            Self::Decode { .. } => "identity_response_invalid",
+            _ => "identity_verification_failed",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -56,6 +81,7 @@ pub struct NativeAccountSession {
     identity: Option<(IdentityCredentials, Instant)>,
     dtrait: Option<DtraitSession>,
     self_profile: Option<(VerifiedSelf, Instant, String)>,
+    identity_failure_probe: Option<(Instant, Option<AccountRequestError>)>,
 }
 
 impl NativeAccountSession {
@@ -74,6 +100,7 @@ impl NativeAccountSession {
             identity: None,
             dtrait: None,
             self_profile: None,
+            identity_failure_probe: None,
         }
     }
     #[must_use]
@@ -503,7 +530,65 @@ impl NativeAccountSession {
                 status: response.status,
             });
         }
-        decode_get_by_user(&response.body).map_err(|_| AccountRequestError::Decode { step: STEP })
+        let page = decode_get_by_user(&response.body)
+            .map_err(|_| AccountRequestError::Decode { step: STEP })?;
+        if page.status_code != 0 {
+            let message = page.status_message.trim();
+            // Match explicit authentication evidence, never every business code 1
+            // or arbitrary text that happens to mention a session.
+            if page.status_code == 1
+                && (message.eq_ignore_ascii_case("unexepcted session length")
+                    || message.eq_ignore_ascii_case("unexpected session length"))
+            {
+                return Err(AccountRequestError::AuthenticationExpired {
+                    step: STEP,
+                    code: page.status_code,
+                });
+            }
+            return Err(AccountRequestError::Business {
+                step: STEP,
+                code: Some(page.status_code),
+            });
+        }
+        if !page.wrapper_present {
+            return Err(AccountRequestError::Decode { step: STEP });
+        }
+        Ok(page)
+    }
+
+    /// Diagnoses a failed profile without authorizing receive/send or advancing
+    /// a cursor. A session-local cooldown bounds repeated runtime probes.
+    async fn diagnose_identity_failure(
+        &mut self,
+        original: AccountRequestError,
+    ) -> AccountRequestError {
+        if original.is_authentication_expired()
+            || matches!(
+                original,
+                AccountRequestError::AccountMismatch | AccountRequestError::Signing { .. }
+            )
+        {
+            return original;
+        }
+        if let Some((at, auth_error)) = &self.identity_failure_probe {
+            if at.elapsed() < Duration::from_secs(60) {
+                return auth_error.clone().unwrap_or(original);
+            }
+        }
+        let Ok(cursor) = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|d| u64::try_from(d.as_micros()).ok())
+            .ok_or(())
+        else {
+            return original;
+        };
+        let result = self.inbox(cursor, 1).await;
+        let auth_error = result
+            .err()
+            .filter(AccountRequestError::is_authentication_expired);
+        self.identity_failure_probe = Some((Instant::now(), auth_error.clone()));
+        auth_error.unwrap_or(original)
     }
 }
 
@@ -533,3 +618,7 @@ fn unix_seconds() -> Result<u64, AccountRequestError> {
 pub fn identity_query(trace: &str) -> String {
     format!("passport_jssdk_version=4.2.3&passport_jssdk_type=lite&is_from_ttaccountsdk=1&aid=6383&language=zh&scene=web_im&auto_retry_req=0&skip_verify=false&identity_token_force_get_tag=0&biz_trace_id={trace}&id_token_version=1.2.10")
 }
+
+#[cfg(test)]
+#[path = "account_session_auth_tests.rs"]
+mod auth_tests;

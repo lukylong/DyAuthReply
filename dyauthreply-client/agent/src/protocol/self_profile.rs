@@ -125,6 +125,34 @@ impl NativeAccountSession {
     /// # Errors
     /// Rejects authentication/transport/parse failures and an account-cookie mismatch.
     pub async fn verify_self(&mut self) -> Result<VerifiedSelf, AccountRequestError> {
+        match self.verify_self_profile().await {
+            Ok(profile) => {
+                self.identity_failure_probe = None;
+                Ok(profile)
+            }
+            Err(error) => {
+                self.self_profile = None;
+                Err(self.diagnose_identity_failure(error).await)
+            }
+        }
+    }
+
+    /// Verifies both account binding and IM authentication before replacing a
+    /// credential generation. A successful profile alone does not prove IM login.
+    /// # Errors
+    /// Rejects identity mismatches and unhealthy IM responses without persisting credentials.
+    pub async fn verify_for_import(&mut self) -> Result<VerifiedSelf, AccountRequestError> {
+        let profile = self.verify_self().await?;
+        let cursor = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|d| u64::try_from(d.as_micros()).ok())
+            .ok_or(AccountRequestError::Signing { step: "clock" })?;
+        self.inbox(cursor, 1).await?;
+        Ok(profile)
+    }
+
+    async fn verify_self_profile(&mut self) -> Result<VerifiedSelf, AccountRequestError> {
         const STEP: &str = "self_query";
         if let Some((profile, at, binding)) = &self.self_profile {
             if at.elapsed() < Duration::from_secs(300)

@@ -182,6 +182,7 @@ export interface DouyinAccount {
   credential_state?: string;
   last_probe_error?: string | null;
   identity_verified?: boolean;
+  identity_error?: string | null;
   runtime_label?: string;
   runtime_state?: {
     inbound?: string;

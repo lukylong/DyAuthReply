@@ -327,6 +327,9 @@ fn protocol_http_budget() -> Result<ProtocolHttpClient> {
 fn preparation_failure(error: &AccountRequestError) -> String {
     let reason = match error {
         AccountRequestError::AccountMismatch => "登录账号身份不匹配".to_owned(),
+        AccountRequestError::AuthenticationExpired { .. } => {
+            "抖音消息会话已失效，请使用快捷恢复登录".to_owned()
+        }
         AccountRequestError::Transport { step } => format!("{step} 网络失败"),
         AccountRequestError::Signing { step } => format!("{step} 签名材料未就绪"),
         AccountRequestError::Http { step, status } => format!("{step} HTTP {status}"),
@@ -1385,14 +1388,14 @@ impl ManualService {
             Ok(profile) => profile,
             Err(error) => {
                 *self.slot(&work.account_id)?.restored_binding.lock().await = None;
-                *self.slot(&work.account_id)?.identity_error.lock().await = Some(
-                    match &error {
-                        AccountRequestError::AccountMismatch => "cookie_account_mismatch",
-                        AccountRequestError::Http { status: 401, .. } => "authentication_expired",
-                        _ => "identity_verification_failed",
-                    }
-                    .into(),
-                );
+                let slot = self.slot(&work.account_id)?;
+                let reason = error.identity_failure_code();
+                let mut previous = slot.identity_error.lock().await;
+                if previous.as_deref() != Some(reason) {
+                    tracing::warn!(account_id = %work.account_id, error = %error, "account identity verification failed");
+                }
+                *previous = Some(reason.into());
+                drop(previous);
                 let current = self
                     .inner
                     .runtime
@@ -1400,7 +1403,7 @@ impl ManualService {
                     .await
                     .context("account missing during identity failure")?;
                 let old = current.borrow().state.send;
-                let failed = if matches!(error, AccountRequestError::Http { status: 401, .. }) {
+                let failed = if error.is_authentication_expired() {
                     Some(SendCapability::AuthExpired)
                 } else if old == SendCapability::Sendable {
                     Some(SendCapability::Unknown)
@@ -1477,7 +1480,11 @@ impl ManualService {
         match session.inbox(cursor, 50).await {
             Ok(page) => Ok(page),
             Err(error) => {
-                if matches!(error, AccountRequestError::Http { status: 401, .. }) {
+                if error.is_authentication_expired() {
+                    let slot = self.slot(&work.account_id)?;
+                    *slot.restored_binding.lock().await = None;
+                    *slot.identity_error.lock().await = Some("authentication_expired".into());
+                    tracing::warn!(account_id = %work.account_id, error = %error, "IM session expired; login recovery required");
                     self.inner
                         .runtime
                         .update_send_capability(
@@ -1645,7 +1652,16 @@ impl ManualService {
             segment,
             control,
         } = ctx;
-        self.initialize_identity(work, session).await?;
+        if let Err(error) = self.initialize_identity(work, session).await {
+            if let Some(auth) = error
+                .downcast_ref::<AccountRequestError>()
+                .filter(|error| error.is_authentication_expired())
+            {
+                self.cancel_tail(work, &preparation_failure(auth)).await?;
+                return Ok(None);
+            }
+            return Err(error);
+        }
         let preparation = async {
             let identity = session.identity().await?;
             let conversation = session
@@ -1658,7 +1674,11 @@ impl ManualService {
         let (identity, conversation, credentials) = match preparation {
             Ok(v) => v,
             Err(error) => {
-                if matches!(error, AccountRequestError::Http { status: 401, .. }) {
+                if error.is_authentication_expired() {
+                    let slot = self.slot(&work.account_id)?;
+                    *slot.restored_binding.lock().await = None;
+                    *slot.identity_error.lock().await = Some("authentication_expired".into());
+                    tracing::warn!(account_id = %work.account_id, error = %error, "IM session expired; login recovery required");
                     self.inner
                         .runtime
                         .update_send_capability(

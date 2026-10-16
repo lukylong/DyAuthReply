@@ -106,6 +106,33 @@ fn account_view(
     data["identity_verified"] = json!(identity_verified);
     data
 }
+fn apply_identity_diagnostic(
+    value: &mut Value,
+    state: crate::state::AccountRuntimeState,
+    reason: Option<&str>,
+) {
+    value["identity_error"] = json!(reason);
+    if matches!(
+        state.ownership,
+        crate::state::OwnershipState::Lost | crate::state::OwnershipState::Expired
+    ) {
+        return;
+    }
+    let message = match reason {
+        Some("authentication_expired") => {
+            "抖音消息会话已失效，请点击快捷恢复登录；程序重连不会更新失效的登录凭证"
+        }
+        Some("cookie_account_mismatch") => "登录身份与当前账号不匹配，请重新登录当前账号",
+        Some("identity_response_invalid") => "抖音身份资料响应异常，正在重试；尚未确认登录失效",
+        Some("identity_transport_failed") => "身份校验网络异常，正在重试",
+        Some("identity_verification_failed") => "登录身份校验未通过，请稍后重试或更新登录",
+        _ => return,
+    };
+    if state.send != SendCapability::RiskControlled {
+        value["last_probe_error"] = json!(message);
+    }
+}
+
 async fn accounts(State(app): State<App>) -> Response {
     let statuses = app.service.account_statuses().await;
     let config = match app.service.business_snapshot() {
@@ -123,6 +150,7 @@ async fn accounts(State(app): State<App>) -> Response {
                     s.identity_verified,
                     s.label,
                 );
+                apply_identity_diagnostic(&mut value, s.state, s.identity_error.as_deref());
                 if let Some(policy) = config.policies.get(&s.account_id) {
                     value["runtime_auto_reply_enabled"] = value["auto_reply_enabled"].clone();
                     value["auto_reply_enabled"] = json!(policy.enabled);
@@ -412,6 +440,34 @@ async fn run_socket(
 mod tests {
     use super::*;
     use crate::state::{LifecycleState, OwnershipState};
+    #[test]
+    fn session_recovery_diagnostics_are_actionable_and_do_not_fake_expiry() {
+        let mut state = crate::state::AccountRuntimeState {
+            lifecycle: LifecycleState::Running,
+            ownership: OwnershipState::Owned,
+            ..Default::default()
+        };
+        let mut value = account_view(json!({}), state, false, "");
+        apply_identity_diagnostic(&mut value, state, Some("identity_response_invalid"));
+        assert_eq!(value["credential_state"], "unknown");
+        assert!(value["last_probe_error"]
+            .as_str()
+            .unwrap()
+            .contains("尚未确认登录失效"));
+        state.send = SendCapability::AuthExpired;
+        let mut value = account_view(json!({}), state, false, "");
+        apply_identity_diagnostic(&mut value, state, Some("authentication_expired"));
+        assert_eq!(value["status"], 2);
+        assert!(value["last_probe_error"]
+            .as_str()
+            .unwrap()
+            .contains("快捷恢复登录"));
+        state.ownership = OwnershipState::Lost;
+        let mut value = account_view(json!({}), state, false, "");
+        apply_identity_diagnostic(&mut value, state, Some("authentication_expired"));
+        assert!(value["last_probe_error"].as_str().unwrap().contains("租约"));
+    }
+
     #[test]
     fn receive_health_never_proves_sendability_or_erases_risk() {
         let mut state = crate::state::AccountRuntimeState {

@@ -97,11 +97,13 @@ impl Importer {
         let http = ProtocolHttpClient::for_user_agent(2, &credentials.user_agent)?;
         let mut session =
             NativeAccountSession::new(credentials, http, self.app.service.import_signer());
-        let verified =
-            tokio::time::timeout(std::time::Duration::from_secs(30), session.verify_self())
-                .await
-                .context("账号身份校验超时")?
-                .context("账号身份校验失败")?;
+        let verified = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            session.verify_for_import(),
+        )
+        .await
+        .context("账号身份校验超时")?
+        .context("账号身份校验失败")?;
         if let Some(base) = base {
             anyhow::ensure!(
                 base.expected_sec_uid == verified.sec_uid,
@@ -319,10 +321,13 @@ async fn verify_identity(
     let credentials = AccountCredentials::from_state(document.clone())?;
     let http = ProtocolHttpClient::for_user_agent(2, &credentials.user_agent)?;
     let mut session = NativeAccountSession::new(credentials, http, app.service.import_signer());
-    tokio::time::timeout(std::time::Duration::from_secs(30), session.verify_self())
-        .await
-        .context("账号身份校验超时，未保存凭证")?
-        .context("账号身份校验失败，未保存凭证")
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        session.verify_for_import(),
+    )
+    .await
+    .context("账号身份校验超时，未保存凭证")?
+    .context("账号身份校验失败，未保存凭证")
 }
 /// Records how an account entered the client. A login made in a browser on another
 /// OS (e.g. imported from a Windows PC into this Mac) sends from an environment the

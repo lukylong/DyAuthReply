@@ -251,6 +251,17 @@ impl ProtocolHttpClient {
         } else {
             format!("{}?{query}", endpoint.url())
         };
+        #[cfg(test)]
+        let url = self.test_endpoint.as_ref().map_or_else(
+            || url.clone(),
+            |base| {
+                let path = endpoint
+                    .url()
+                    .split_once(".com")
+                    .map_or("/", |(_, path)| path);
+                format!("{base}{path}?{query}")
+            },
+        );
         let mut request = self
             .client
             .request(endpoint.method(), url)

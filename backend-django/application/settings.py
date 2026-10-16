@@ -546,13 +546,13 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.37'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.38'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '修复点击没有消息的会话时，右侧仍显示上一个会话消息的问题\n'
-    '升级后旧的图片、语音、视频消息可补全显示，不再出现多余的「暂不支持的消息类型」\n'
-    '包含 0.1.36 的媒体显示、昵称头像补全与运行诊断',
+    '抖音风控拒绝发送后不再一直「仅接收」：30 分钟后自动重新检测，发送失败会说明具体原因\n'
+    '添加、重新登录、删除账号不再重启服务，其他账号保持在线\n'
+    '运行诊断：重启或更新后未上报的数据不再丢失',
 )

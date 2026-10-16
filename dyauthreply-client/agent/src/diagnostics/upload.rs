@@ -16,6 +16,8 @@ use std::{sync::Arc, time::Duration};
 
 const FIRST_DELAY: Duration = Duration::from_secs(60);
 const INTERVAL: Duration = Duration::from_mins(15);
+/// A crash or forced kill loses at most this much; a clean exit saves in `main`.
+const PERSIST_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct Sources {
@@ -63,23 +65,37 @@ pub async fn snapshot(sources: &Sources) -> Value {
     })
 }
 
-/// Starts the uploader; it idles while diagnostics are off.
+/// Starts the uploader; it idles while diagnostics are off. It also keeps the
+/// saved copy of unsent events current.
 #[must_use]
 pub fn spawn(sources: Sources) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        tokio::time::sleep(FIRST_DELAY).await;
+        let mut save = tokio::time::interval(PERSIST_INTERVAL);
+        save.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let upload = tokio::time::sleep(FIRST_DELAY);
+        tokio::pin!(upload);
         loop {
-            if shared().enabled() {
-                upload_once(&sources).await;
+            tokio::select! {
+                _ = save.tick() => save_unsent().await,
+                () = &mut upload => {
+                    if shared().enabled() {
+                        upload_once(&sources).await;
+                    }
+                    upload.as_mut().reset(tokio::time::Instant::now() + INTERVAL);
+                }
             }
-            tokio::time::sleep(INTERVAL).await;
         }
     })
 }
 
+/// Failures are kept in the status: logging them would feed the buffer.
+async fn save_unsent() {
+    let _ = tokio::task::spawn_blocking(|| shared().persist()).await;
+}
+
 async fn upload_once(sources: &Sources) {
     let state = shared();
-    let events = state.take();
+    let events = state.begin_upload();
     let count = events.len() as u64;
     let payload = json!({
         "app_version": app_version(),
@@ -88,14 +104,19 @@ async fn upload_once(sources: &Sources) {
         "snapshot": snapshot(sources).await,
         "events": events,
     });
-    match sources.license.upload_diagnostics(payload).await {
-        Ok(_) => state.record(|status| {
-            status.last_upload_at = Some(super::now_rfc3339());
-            status.last_error.clear();
-            status.uploaded_events += count;
-        }),
+    let result = sources.license.upload_diagnostics(payload).await;
+    state.finish_upload(result.is_ok());
+    match result {
+        Ok(_) => {
+            state.record(|status| {
+                status.last_upload_at = Some(super::now_rfc3339());
+                status.last_error.clear();
+                status.uploaded_events += count;
+            });
+            // Accepted events must not be sent again after a restart.
+            save_unsent().await;
+        }
         Err(error) => {
-            state.restore(events);
             let message = super::redact(&error.to_string());
             state.record(|status| status.last_error = message);
         }

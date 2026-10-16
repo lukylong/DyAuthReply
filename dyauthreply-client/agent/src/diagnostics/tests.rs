@@ -93,3 +93,108 @@ fn switch_persists_across_loads() {
     reloaded.load(dir.path());
     assert!(reloaded.enabled());
 }
+
+fn enabled_in(dir: &Path) -> Shared {
+    let shared = Shared::new();
+    shared.load(dir);
+    shared.set_enabled(true).unwrap();
+    shared
+}
+
+fn emit(shared: Shared, messages: &[&'static str]) -> Arc<Shared> {
+    let shared = Arc::new(shared);
+    capture(&shared, || {
+        for message in messages {
+            tracing::warn!(target: "dy_agent::x", step = "send", "{message}");
+        }
+    });
+    shared
+}
+
+fn reload(dir: &Path) -> Shared {
+    let shared = Shared::new();
+    shared.load(dir);
+    shared
+}
+
+#[test]
+fn unsent_events_survive_a_restart_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let shared = emit(enabled_in(dir.path()), &["first", "second"]);
+    shared.persist().unwrap();
+    let restarted = reload(dir.path());
+    assert_eq!(restarted.pending(), 2);
+    let events = restarted.take();
+    assert_eq!(
+        events
+            .iter()
+            .map(|e| (e.level, e.message.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("WARN", "first"), ("WARN", "second")]
+    );
+    assert_eq!(events[0].fields["step"], "send");
+}
+
+#[test]
+fn accepted_uploads_are_not_sent_again_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let shared = emit(enabled_in(dir.path()), &["sent"]);
+    shared.persist().unwrap();
+    assert_eq!(shared.begin_upload().len(), 1);
+    shared.finish_upload(true);
+    shared.persist().unwrap();
+    assert_eq!(reload(dir.path()).pending(), 0);
+}
+
+#[test]
+fn a_batch_interrupted_mid_upload_is_kept_ahead_of_newer_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let shared = emit(enabled_in(dir.path()), &["in flight"]);
+    let batch = shared.begin_upload();
+    assert_eq!(batch.len(), 1);
+    capture(&shared, || tracing::warn!(target: "dy_agent::x", "newer"));
+    assert_eq!(shared.pending(), 2);
+    shared.persist().unwrap();
+    let messages: Vec<_> = reload(dir.path())
+        .take()
+        .into_iter()
+        .map(|e| e.message)
+        .collect();
+    assert_eq!(messages, ["in flight", "newer"]);
+}
+
+#[test]
+fn a_failed_upload_goes_back_in_front_of_newer_events() {
+    let shared = Arc::new(Shared::new());
+    shared.enabled.store(true, Ordering::Release);
+    capture(&shared, || tracing::warn!(target: "dy_agent::x", "older"));
+    let _ = shared.begin_upload();
+    capture(&shared, || tracing::warn!(target: "dy_agent::x", "newer"));
+    shared.finish_upload(false);
+    let messages: Vec<_> = shared.take().into_iter().map(|e| e.message).collect();
+    assert_eq!(messages, ["older", "newer"]);
+}
+
+#[test]
+fn disabling_deletes_the_saved_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let shared = emit(enabled_in(dir.path()), &["private"]);
+    shared.persist().unwrap();
+    assert!(dir.path().join(PENDING_FILE).exists());
+    shared.set_enabled(false).unwrap();
+    assert!(!dir.path().join(PENDING_FILE).exists());
+    shared.set_enabled(true).unwrap();
+    assert_eq!(reload(dir.path()).pending(), 0);
+}
+
+#[test]
+fn a_corrupt_saved_file_is_ignored_and_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    enabled_in(dir.path());
+    std::fs::write(dir.path().join(PENDING_FILE), b"{not json").unwrap();
+    let shared = emit(reload(dir.path()), &["fresh"]);
+    assert!(shared.enabled());
+    assert_eq!(shared.pending(), 1);
+    shared.persist().unwrap();
+    assert_eq!(reload(dir.path()).pending(), 1);
+}

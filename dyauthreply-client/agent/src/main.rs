@@ -56,6 +56,9 @@ async fn main() -> Result<()> {
 
     let config = AgentConfig::from_env()?;
     let (identity, _instance_lock) = identity::initialize(&config.data_dir)?;
+    // Before startup logs anything, so its warnings are captured too; the
+    // instance lock is held, so no other run is saving the same events.
+    dy_agent::diagnostics::shared().load(&config.data_dir);
     let (store, segment_store, storage_health) = initialize_storage(&config)?;
     let schema_version = store.schema_version()?;
     if schema_version != CORE_SCHEMA_VERSION {
@@ -264,12 +267,7 @@ async fn serve(
     let runtime_for_shutdown = runtime.clone();
     let hosted_for_shutdown = hosted.clone();
     ipc.watch_parent();
-    let diagnostics_upload = start_diagnostics(
-        &config.data_dir,
-        &health,
-        license.as_ref(),
-        messaging.as_ref(),
-    );
+    let diagnostics_upload = start_diagnostics(&health, license.as_ref(), messaging.as_ref());
     let router = business_router(health, license, messaging, &config.data_dir).merge(ipc.router());
     let server_result = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_live_runtime(
@@ -295,6 +293,10 @@ async fn serve(
     // ownership while a blocking writer can still touch the database.
     while let Err(error) = runtime.drain().await {
         tracing::error!(%error, "runtime remains draining; retaining installation lock");
+    }
+    // The uploader has stopped; keep whatever it had not sent for the next start.
+    if let Err(error) = dy_agent::diagnostics::shared().persist() {
+        tracing::error!(%error, "unsent diagnostics could not be saved");
     }
     server_result
 }
@@ -348,14 +350,13 @@ fn desktop_ipc(
     )
 }
 
-/// Loads the opt-in diagnostics switch and starts its (idle while off) uploader.
+/// Starts the opt-in diagnostics uploader (idle while off); the switch is loaded
+/// at startup.
 fn start_diagnostics(
-    data_dir: &std::path::Path,
     health: &HealthHandle,
     license: Option<&Arc<dy_agent::license::NativeLicense>>,
     messaging: Option<&(Arc<ManualService>, String)>,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    dy_agent::diagnostics::shared().load(data_dir);
     license.map(|manager| {
         dy_agent::diagnostics::upload::spawn(dy_agent::diagnostics::upload::Sources {
             health: health.clone(),

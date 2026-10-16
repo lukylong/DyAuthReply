@@ -1,8 +1,9 @@
 //! Opt-in runtime diagnostics (off by default). When the user enables it, warnings,
 //! errors and a fixed set of business milestones are captured from tracing,
-//! redacted through a field allow-list, buffered (bounded) and uploaded by
-//! [`upload`]. Never captured: message text, nicknames, `sec_uid`s, cookies, tokens,
-//! URL paths/parameters. Account IDs are hashed.
+//! redacted through a field allow-list, buffered (bounded, saved across restarts by
+//! [`persist`]) and uploaded by [`upload`]. Never captured: message text, nicknames,
+//! `sec_uid`s, cookies, tokens, URL paths/parameters. Account IDs are hashed.
+mod persist;
 pub mod upload;
 
 use regex::Regex;
@@ -23,6 +24,8 @@ use tracing_subscriber::{layer::Context, Layer};
 
 pub const MAX_BUFFERED_EVENTS: usize = 500;
 const MAX_VALUE_CHARS: usize = 300;
+const SWITCH_FILE: &str = "diagnostics.json";
+const PENDING_FILE: &str = "diagnostics-pending.json";
 /// INFO events worth reporting; everything else at INFO stays local.
 const INFO_MESSAGES: &[&str] = &[
     "dy-agent runtime is ready",
@@ -70,13 +73,21 @@ pub struct UploadStatus {
     pub last_upload_at: Option<String>,
     pub last_error: String,
     pub uploaded_events: u64,
+    /// Why unsent events could not be saved for the next start; empty when saved.
+    pub persist_error: String,
 }
 
 pub struct Shared {
     enabled: AtomicBool,
     buffer: Mutex<VecDeque<DiagnosticEvent>>,
+    /// The batch being uploaded; it stays saved until the server accepts it.
+    in_flight: Mutex<Vec<DiagnosticEvent>>,
+    /// Unsent events changed since they were last saved.
+    dirty: AtomicBool,
+    persist_lock: Mutex<()>,
     status: Mutex<UploadStatus>,
     state_file: OnceLock<PathBuf>,
+    pending_file: OnceLock<PathBuf>,
 }
 
 static SHARED: LazyLock<Arc<Shared>> = LazyLock::new(|| Arc::new(Shared::new()));
@@ -104,19 +115,31 @@ impl Shared {
         Self {
             enabled: AtomicBool::new(false),
             buffer: Mutex::new(VecDeque::new()),
+            in_flight: Mutex::new(Vec::new()),
+            dirty: AtomicBool::new(false),
+            persist_lock: Mutex::new(()),
             status: Mutex::new(UploadStatus::default()),
             state_file: OnceLock::new(),
+            pending_file: OnceLock::new(),
         }
     }
-    /// Loads the persisted switch; absence or corruption means disabled.
+    /// Loads the persisted switch and, while enabled, the events an earlier run
+    /// had not uploaded; absence or corruption means disabled / nothing saved.
     pub fn load(&self, data_dir: &Path) {
-        let path = data_dir.join("diagnostics.json");
+        let path = data_dir.join(SWITCH_FILE);
         let enabled = std::fs::read(&path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .is_some_and(|value| value["enabled"] == true);
         let _ = self.state_file.set(path);
+        let pending = data_dir.join(PENDING_FILE);
         self.enabled.store(enabled, Ordering::Release);
+        if enabled {
+            self.restore(persist::read(&pending));
+        } else {
+            self.note_persist(&persist::remove(&pending));
+        }
+        let _ = self.pending_file.set(pending);
     }
     #[must_use]
     pub fn enabled(&self) -> bool {
@@ -133,10 +156,13 @@ impl Shared {
         }
         self.enabled.store(enabled, Ordering::Release);
         if !enabled {
-            self.buffer
-                .lock()
-                .map_err(|_| anyhow::anyhow!("诊断缓冲区锁异常"))?
-                .clear();
+            let lock_error = || anyhow::anyhow!("诊断缓冲区锁异常");
+            self.buffer.lock().map_err(|_| lock_error())?.clear();
+            self.in_flight.lock().map_err(|_| lock_error())?.clear();
+            let _saving = self.persist_lock.lock().map_err(|_| lock_error())?;
+            if let Some(path) = self.pending_file.get() {
+                persist::remove(path)?;
+            }
         }
         Ok(())
     }
@@ -146,18 +172,24 @@ impl Shared {
                 buffer.pop_front();
             }
             buffer.push_back(event);
+            self.dirty.store(true, Ordering::Release);
         }
     }
     #[must_use]
     pub fn take(&self) -> Vec<DiagnosticEvent> {
-        self.buffer
+        let events: Vec<_> = self
+            .buffer
             .lock()
             .map(|mut buffer| buffer.drain(..).collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if !events.is_empty() {
+            self.dirty.store(true, Ordering::Release);
+        }
+        events
     }
     /// Puts back a batch that failed to upload, oldest first, keeping the bound.
     pub fn restore(&self, events: Vec<DiagnosticEvent>) {
-        if !self.enabled() {
+        if !self.enabled() || events.is_empty() {
             return;
         }
         if let Ok(mut buffer) = self.buffer.lock() {
@@ -167,11 +199,81 @@ impl Shared {
                 }
                 buffer.push_front(event);
             }
+            self.dirty.store(true, Ordering::Release);
         }
     }
+    /// Moves the buffered events into the in-flight batch and returns it. The
+    /// batch stays saved until [`Self::finish_upload`] settles it.
+    #[must_use]
+    pub fn begin_upload(&self) -> Vec<DiagnosticEvent> {
+        let (Ok(mut in_flight), Ok(mut buffer)) = (self.in_flight.lock(), self.buffer.lock())
+        else {
+            return Vec::new();
+        };
+        in_flight.extend(buffer.drain(..));
+        in_flight.clone()
+    }
+    /// Forgets a batch the server accepted, or puts a rejected one back in front
+    /// of the events captured meanwhile.
+    pub fn finish_upload(&self, accepted: bool) {
+        let batch = self
+            .in_flight
+            .lock()
+            .map(|mut batch| std::mem::take(&mut *batch))
+            .unwrap_or_default();
+        if !accepted {
+            self.restore(batch);
+        } else if !batch.is_empty() {
+            self.dirty.store(true, Ordering::Release);
+        }
+    }
+    /// Saves the events the server has not accepted, so a restart or crash does
+    /// not lose them. Does nothing when they have not changed since the last save.
+    /// # Errors
+    /// Reports an unwritable data directory (also kept in the status, because
+    /// logging it would feed the buffer).
+    pub fn persist(&self) -> anyhow::Result<()> {
+        let Some(path) = self.pending_file.get() else {
+            return Ok(());
+        };
+        let _saving = self
+            .persist_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("诊断保存锁异常"))?;
+        if !self.dirty.swap(false, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let result = self
+            .unsent()
+            .and_then(|events| persist::write(path, &events));
+        if result.is_err() {
+            self.dirty.store(true, Ordering::Release);
+        }
+        self.note_persist(&result);
+        result
+    }
+    fn unsent(&self) -> anyhow::Result<Vec<DiagnosticEvent>> {
+        if !self.enabled() {
+            return Ok(Vec::new());
+        }
+        let lock_error = || anyhow::anyhow!("诊断缓冲区锁异常");
+        let in_flight = self.in_flight.lock().map_err(|_| lock_error())?;
+        let buffer = self.buffer.lock().map_err(|_| lock_error())?;
+        Ok(in_flight.iter().chain(buffer.iter()).cloned().collect())
+    }
+    fn note_persist(&self, result: &anyhow::Result<()>) {
+        let message = result
+            .as_ref()
+            .err()
+            .map(|error| redact(&error.to_string()))
+            .unwrap_or_default();
+        self.record(|status| status.persist_error = message);
+    }
+    /// Events not yet accepted by the server, including a batch being uploaded.
     #[must_use]
     pub fn pending(&self) -> usize {
-        self.buffer.lock().map_or(0, |b| b.len())
+        let in_flight = self.in_flight.lock().map_or(0, |b| b.len());
+        in_flight + self.buffer.lock().map_or(0, |b| b.len())
     }
     #[must_use]
     pub fn status(&self) -> UploadStatus {

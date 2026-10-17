@@ -695,6 +695,10 @@ function captureTabScope() {
   };
 }
 
+// A full load of the recommendation feed can sit on "加载中" without UIFID in a
+// freshly logged-in profile; the in-app switch from /jingxuan does not.
+const SELECTED_URL='https://www.douyin.com/jingxuan';
+
 function navigateToRecommendation() {
   if (location.origin !== 'https://www.douyin.com') return 'wrong_origin';
   if (!location.pathname.startsWith('/jingxuan')) return 'already';
@@ -801,11 +805,16 @@ async function grab() {
       if(page.origin!=='www.douyin.com')throw new Error('主站跳转到登录或验证页面，请完成主站登录后重试');
       if(!DyCapture.cookie(headers['www.douyin.com'],'UIFID') && page.pathname?.startsWith('/jingxuan') ){
         const now=Date.now();
-        if(now-recommendationLastAttempt>=3000){
-          if(recommendationAttempts>=3)throw new Error('主站推荐切换未完成（已尝试3次），请检查页面加载或验证后重试');
-        const [{result}={}]=await executeBounded({target:{tabId:main.id},world:'MAIN',func:navigateToRecommendation});
-        if(result==='clicked'){recommendationAttempts++;recommendationLastAttempt=now;}
-        else if(!['not_ready','already'].includes(result))throw new Error('主站推荐入口未就绪，请回到主站后重试');
+        // Keep switching in-app automatically; every third attempt starts from a
+        // fresh /jingxuan document of the owned tab instead of asking the user.
+        if(now-recommendationLastAttempt>=(recommendationAttempts<3?3000:10000)){
+          recommendationLastAttempt=now;
+          let result='reloaded';
+          if(recommendationAttempts%3===2)await boundedRead(()=>chrome.tabs.update(main.id,{url:SELECTED_URL}),'主站精选页刷新失败或超时');
+          else [{result}={}]=await executeBounded({target:{tabId:main.id},world:'MAIN',func:navigateToRecommendation});
+          if(!['clicked','not_ready','already','reloaded'].includes(result))throw new Error('主站推荐入口未就绪，请回到主站后重试');
+          if(result!=='already')recommendationAttempts++;
+          captureProgress(`主站停留在精选页，正在自动切换到推荐页（已尝试 ${recommendationAttempts} 次）…`);
         }
       }
       const token=seen.token?.value || DyCapture.cookie(headers['www.douyin.com'],'msToken') || DyCapture.cookie(headers['www.douyin.com'],'msToken_ss');

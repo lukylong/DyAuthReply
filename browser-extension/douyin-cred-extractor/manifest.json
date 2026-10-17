@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "抖音登录态提取器 (DyAuthReply)",
-  "version": "2.3.3",
+  "version": "2.3.4",
   "description": "一键抓取抖音分域 Cookie / bd-ticket / dtrait / keys，用于 DyAuthReply 导入登录态",
   "incognito": "split",
   "permissions": [

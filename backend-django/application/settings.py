@@ -499,7 +499,7 @@ DOWNLOAD_RELEASE_PAGE = os.environ.get(
 DOWNLOAD_MACOS_FILE = os.environ.get('DOWNLOAD_MACOS_FILE', 'DAssistant-macos-aarch64.dmg')
 DOWNLOAD_WINDOWS_FILE = os.environ.get('DOWNLOAD_WINDOWS_FILE', 'DAssistant-windows-x64-setup.exe')
 DOWNLOAD_EXTENSION_FILE = os.environ.get('DOWNLOAD_EXTENSION_FILE', 'douyin-cred-extractor.zip')
-DOWNLOAD_EXTENSION_VERSION = os.environ.get('DOWNLOAD_EXTENSION_VERSION') or '2.3.3'
+DOWNLOAD_EXTENSION_VERSION = os.environ.get('DOWNLOAD_EXTENSION_VERSION') or '2.3.4'
 
 # 自建服务器托管（国内直连，规避 GitHub 慢）：
 # 设置 DOWNLOAD_PUBLIC_BASE_URL（如 https://pro.zhenyangtang.com.cn）后，下载链接走
@@ -546,17 +546,17 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.44'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.45'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '修复快捷登录停在精选页及 UIFID 采集等待：自动切换真实推荐入口，不再等待视频资源全部加载\n'
-    '保留创作者页面完成设备采样，增加取消、超时、窗口清理和旧进度隔离\n'
-    '修复快捷登录漏保存抖音号，兼容平台短号并保留已验证资料\n'
-    '扩展更新至 2.3.3：修复主站 Token 采样等待和冷页面资料请求过早超时，显示具体采集阶段\n'
-    '扩展关闭弹窗时清理本次临时标签，保留原页面及登录会话\n'
-    'macOS 本机冷启动及扩展两个入口采集验证通过；未新增真实消息发送测试\n'
-    'Windows 已纳入 CI 构建、安装和运行中升级回归；未进行真实扫码采集验收'
+    '修复快捷登录卡在“正在自动点击推荐”：推荐入口被遮挡或窗口不在前台时也会自动切换，无需手动点击\n'
+    '修复推荐页一直“加载中”导致主站 UIFID 缺失：检测到停滞自动返回精选页重新切换，直到成功或会话超时\n'
+    '推荐切换改为全自动轮换：真实点击、页面自身推荐链接、重新加载精选页，不再试 3 次后报错\n'
+    '扩展更新至 2.3.4：推荐切换同样改为自动重试，不再要求手动操作\n'
+    '本地日志记录推荐切换步骤，仅含次数与动作，不含账号或凭证\n'
+    'macOS 本机两次真实快捷登录均自动完成导入；未新增真实消息发送测试\n'
+    'Windows 纳入 CI 构建、安装和运行中升级回归；未进行 Windows 真实扫码采集验收'
 )

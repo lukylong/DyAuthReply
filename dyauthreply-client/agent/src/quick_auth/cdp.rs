@@ -10,11 +10,24 @@ use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 const MAX_CDP_MESSAGE: usize = 2 * 1024 * 1024;
 const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
-// The site may redirect a direct recommendation URL to /jingxuan. Follow its
-// actual visible recommendation link with bounded retries. A click acknowledgement
-// is not evidence that the recommendation feed was mounted.
-// Resolve a click point from the actual visible navigation. Do not call DOM
-// .click(): the collector sends the normal browser mouse sequence below.
+// A logged-in session lands this on /jingxuan, which loads normally. In a freshly
+// logged-in profile a full document load of the recommendation feed (even the
+// navigation link's own `?recommend=1&from_nav=1`) sat on "加载中" for a minute
+// without UIFID, while the in-app route change from /jingxuan issued UIFID within
+// seconds. Never load the recommendation feed as a document; switch in-app.
+const MAIN_ENTRY_URL: &str = "https://www.douyin.com/?recommend=1";
+const SELECTED_URL: &str = "https://www.douyin.com/jingxuan";
+// A /jingxuan document needs a moment before fallbacks replace a real click.
+const SELECTED_SETTLE_SECS: u64 = 8;
+// The recommendation feed reached by a full load can sit on "加载中" with no
+// video, or play without issuing the formal UIFID.
+const STALLED_FEED_SECS: u64 = 25;
+const STALLED_UIFID_SECS: u64 = 60;
+
+// Follow the actual visible recommendation link with automatic retries. A click
+// acknowledgement is not evidence that the recommendation feed was mounted.
+// Resolve a click point from the actual visible navigation; the collector sends
+// the normal browser mouse sequence below.
 const OPEN_RECOMMENDATION: &str = r"(() => {
   if (location.origin !== 'https://www.douyin.com') return {status:'wrong_origin'};
   if (!location.pathname.startsWith('/jingxuan')) return {status:'already'};
@@ -34,6 +47,22 @@ const OPEN_RECOMMENDATION: &str = r"(() => {
   const hit = document.elementFromPoint(x,y);
   if (!hit || !link.contains(hit)) return {status:'not_ready'};
   return {status:'target',x,y};
+})()";
+
+// Fallback when the link is covered, the window is hidden or a real click did not
+// switch: let the site's own link handler perform the in-app route change.
+const CLICK_RECOMMENDATION: &str = r"(() => {
+  if (location.origin !== 'https://www.douyin.com') return {status:'wrong_origin'};
+  if (!location.pathname.startsWith('/jingxuan')) return {status:'already'};
+  const link = Array.from(document.querySelectorAll('a[href]')).find(a => {
+    try {
+      const u = new URL(a.href, location.href);
+      return u.origin === 'https://www.douyin.com' && u.pathname === '/' && u.searchParams.get('recommend') === '1';
+    } catch (_) { return false; }
+  });
+  if (!link) return {status:'not_ready'};
+  link.click();
+  return {status:'clicked'};
 })()";
 
 const DTRAIT_HOOK: &str = r"(() => {
@@ -83,7 +112,7 @@ const PAGE_INFO: &str = r"(async (readIdentity) => {
   }
   return {origin:location.hostname,pathname:location.pathname,keys:keys[0] || '',key_candidates:keys,
     web_protect:protects[0] || '',ticket_candidates:protects,
-    ua:navigator.userAgent || '',account,
+    ua:navigator.userAgent || '',account,feed_videos:document.querySelectorAll('video').length,
     browser_profile:{platform:navigator.platform,width:screen.width,height:screen.height,language:navigator.language,cpu_core_num:navigator.hardwareConcurrency,device_memory:navigator.deviceMemory,timezone_name:Intl.DateTimeFormat().resolvedOptions().timeZone,referer:'https://www.douyin.com/jingxuan',geo:[innerWidth,innerHeight,outerWidth,outerHeight,screen.availWidth,screen.availHeight,screen.width,screen.height]},
     dtrait_blob:String(window.__dyauthreplyLatestDtraitBlob || ''),
     dtrait_path:String(window.__dyauthreplyLatestDtraitPath || '')};
@@ -197,8 +226,12 @@ pub struct CdpClient {
     endpoint_base: String,
     main_page: Option<Box<CdpClient>>,
     current_path: String,
-    recommendation_attempts: u8,
+    recommendation_attempts: u32,
     recommendation_last_attempt: Option<tokio::time::Instant>,
+    route_action_at: Option<tokio::time::Instant>,
+    switch_step: u8,
+    feed_videos: u64,
+    recovery_attempts: u32,
 }
 
 impl CdpClient {
@@ -226,6 +259,10 @@ impl CdpClient {
             current_path: String::new(),
             recommendation_attempts: 0,
             recommendation_last_attempt: None,
+            route_action_at: None,
+            switch_step: 0,
+            feed_videos: 0,
+            recovery_attempts: 0,
         })
     }
 
@@ -305,8 +342,12 @@ impl CdpClient {
             sid == self.creator_session,
             "主站与创作者中心登录会话不一致，请统一账号后重试"
         );
-        if !has_main_uifid(&www) && main.current_path.starts_with("/jingxuan") {
-            main.open_recommendation_if_redirected().await?;
+        if !has_main_uifid(&www) {
+            if main.current_path.starts_with("/jingxuan") {
+                main.open_recommendation_if_redirected().await?;
+            } else if main.current_path == "/" {
+                main.recover_stalled_recommendation().await?;
+            }
         }
         page["account"] = self.creator_identity.clone().unwrap_or(Value::Null);
         merge_session_material(&mut page, &self.creator_material);
@@ -356,40 +397,64 @@ impl CdpClient {
             page["dtrait_path"] = json!(self.captured.dtrait_blob_path);
         }
         self.current_path = bounded_text(&page, "pathname", 512).into();
+        self.feed_videos = page["feed_videos"].as_u64().unwrap_or(0);
         Ok([storage, www, creator, imapi, page])
     }
 
+    // Retry automatically until the session deadline, never asking the user to
+    // click. Per loaded /jingxuan document: a real mouse click on the visible link,
+    // then the link's own handler, then reload /jingxuan and start over.
     async fn open_recommendation_if_redirected(&mut self) -> Result<()> {
+        let interval = if self.recommendation_attempts < 3 {
+            3
+        } else {
+            10
+        };
         if self
             .recommendation_last_attempt
-            .is_some_and(|last| last.elapsed().as_secs() < 3)
+            .is_some_and(|last| last.elapsed().as_secs() < interval)
         {
             return Ok(());
         }
-        anyhow::ensure!(
-            self.recommendation_attempts < 3,
-            "主站推荐切换未完成（已尝试3次），请检查页面加载或验证后重试"
-        );
+        // Back off read failures too, so they interleave with successful polls.
+        self.recommendation_last_attempt = Some(tokio::time::Instant::now());
         self.command("Page.bringToFront", json!({})).await?;
-        let result = self
-            .command(
-                "Runtime.evaluate",
-                json!({"expression":OPEN_RECOMMENDATION,"returnByValue":true}),
-            )
-            .await?;
-        anyhow::ensure!(
-            result.get("exceptionDetails").is_none(),
-            "主站推荐入口读取失败，请在登录窗口点击推荐"
+        let target = self.evaluate_status(OPEN_RECOMMENDATION).await?;
+        let status = target["status"].as_str();
+        if !matches!(status, Some("target" | "not_ready")) {
+            anyhow::ensure!(
+                status == Some("already"),
+                "主站推荐入口未就绪，正在等待页面加载或验证"
+            );
+            return Ok(());
+        }
+        let mouse = status == Some("target") && self.switch_step == 0;
+        if !mouse
+            && self
+                .route_action_at
+                .is_some_and(|at| at.elapsed().as_secs() < SELECTED_SETTLE_SECS)
+        {
+            return Ok(());
+        }
+        let action = if mouse {
+            "mouse_click"
+        } else if self.switch_step <= 1 {
+            "link_handler"
+        } else {
+            "reload_selected"
+        };
+        // Count attempts before dispatch so a failing send still backs off.
+        self.recommendation_attempts = self.recommendation_attempts.saturating_add(1);
+        self.route_action_at = Some(tokio::time::Instant::now());
+        tracing::info!(
+            attempt = self.recommendation_attempts,
+            action,
+            "quick-auth main site on selected feed; switching to recommendation"
         );
-        let target = result
-            .pointer("/result/value")
-            .context("主站推荐入口未返回状态")?;
-        match target["status"].as_str() {
-            Some("target") => {
-                let (x, y) = recommendation_click_point(target)?;
-                // Count attempts before dispatch so failed sends cannot retry without limit.
-                self.recommendation_attempts += 1;
-                self.recommendation_last_attempt = Some(tokio::time::Instant::now());
+        match action {
+            "mouse_click" => {
+                self.switch_step = 1;
+                let (x, y) = recommendation_click_point(&target)?;
                 for (kind, buttons) in
                     [("mouseMoved", 0), ("mousePressed", 1), ("mouseReleased", 0)]
                 {
@@ -398,11 +463,54 @@ impl CdpClient {
                         "buttons":buttons,"clickCount":i32::from(kind!="mouseMoved"),"pointerType":"mouse"
                     })).await?;
                 }
+                Ok(())
             }
-            Some("not_ready" | "already") => {}
-            _ => anyhow::bail!("主站推荐入口未就绪，请检查页面加载或验证状态"),
+            "link_handler" => {
+                self.switch_step = 2;
+                self.evaluate_status(CLICK_RECOMMENDATION).await.map(|_| ())
+            }
+            _ => self.navigate(SELECTED_URL).await,
         }
-        Ok(())
+    }
+
+    // A recommendation feed reached by a full load can stall. Without asking the
+    // user, go back to /jingxuan and switch in-app again, until the deadline.
+    async fn recover_stalled_recommendation(&mut self) -> Result<()> {
+        let grace = if self.feed_videos == 0 {
+            STALLED_FEED_SECS
+        } else {
+            STALLED_UIFID_SECS
+        };
+        if self
+            .route_action_at
+            .is_some_and(|at| at.elapsed().as_secs() < grace)
+        {
+            return Ok(());
+        }
+        self.recovery_attempts = self.recovery_attempts.saturating_add(1);
+        tracing::info!(
+            attempt = self.recovery_attempts,
+            videos = self.feed_videos,
+            "quick-auth recommendation feed stalled without UIFID; returning to selected feed"
+        );
+        self.navigate(SELECTED_URL).await
+    }
+
+    async fn evaluate_status(&mut self, expression: &str) -> Result<Value> {
+        let result = self
+            .command(
+                "Runtime.evaluate",
+                json!({"expression":expression,"returnByValue":true}),
+            )
+            .await?;
+        anyhow::ensure!(
+            result.get("exceptionDetails").is_none(),
+            "主站推荐入口读取失败，正在自动重试"
+        );
+        result
+            .pointer("/result/value")
+            .cloned()
+            .context("主站推荐入口未返回状态")
     }
 
     async fn open_main_page(&mut self) -> Result<Self> {
@@ -427,8 +535,7 @@ impl CdpClient {
                 .await
                 .context("主站连接超时")??;
             main.captured.main_site = true;
-            main.initialize_at("https://www.douyin.com/?recommend=1")
-                .await?;
+            main.initialize_at(MAIN_ENTRY_URL).await?;
             Ok::<Self, anyhow::Error>(main)
         }
         .await;
@@ -461,7 +568,7 @@ impl CdpClient {
     }
 
     #[cfg(test)]
-    pub(super) fn sample_observation(&self) -> (usize, bool, &'static str, u8) {
+    pub(super) fn sample_observation(&self) -> (usize, bool, &'static str, u32) {
         let route = self.main_page.as_ref().map_or("not_open", |main| {
             if main.current_path.starts_with("/jingxuan") {
                 "selected"
@@ -490,13 +597,23 @@ impl CdpClient {
             return "登录已识别，正在读取创作者账号资料".into();
         };
         let seconds = started.elapsed().as_secs();
-        if self
+        if let Some(main) = self
             .main_page
             .as_ref()
-            .is_some_and(|main| main.current_path.starts_with("/jingxuan"))
-            && completeness.0.get("main_uifid") == Some(&false)
+            .filter(|_| completeness.0.get("main_uifid") == Some(&false))
         {
-            return "主站停留在精选页，正在自动点击推荐并核对切换结果".into();
+            if main.current_path.starts_with("/jingxuan") {
+                return format!(
+                    "主站停留在精选页，正在自动切换到推荐页（已尝试 {} 次），无需手动操作",
+                    main.recommendation_attempts
+                );
+            }
+            if main.recovery_attempts > 0 {
+                return format!(
+                    "推荐页加载停滞，已自动刷新或重新切换 {} 次，正在等待主站UIFID（{seconds} 秒），无需手动操作",
+                    main.recovery_attempts
+                );
+            }
         }
         let missing = completeness.missing_fields();
         if seconds >= 30 {
@@ -517,6 +634,8 @@ impl CdpClient {
     }
 
     async fn navigate(&mut self, url: &str) -> Result<()> {
+        self.route_action_at = Some(tokio::time::Instant::now());
+        self.switch_step = 0;
         let result = self.command("Page.navigate", json!({"url":url})).await?;
         anyhow::ensure!(
             result["errorText"].as_str().is_none_or(str::is_empty),
@@ -1365,7 +1484,7 @@ mod tests {
             if method == "Page.navigate" {
                 let url = request["params"]["url"].as_str().unwrap();
                 host = if url.starts_with("https://www.douyin.com/") {
-                    assert_eq!(url, "https://www.douyin.com/?recommend=1");
+                    assert_eq!(url, MAIN_ENTRY_URL);
                     "www.douyin.com"
                 } else {
                     assert_eq!(
@@ -1486,44 +1605,81 @@ mod tests {
         assert!(result.candidate.is_none());
     }
 
-    #[tokio::test]
-    async fn recommendation_click_acknowledgement_is_not_navigation_success() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let peer = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = accept_async(stream).await.unwrap();
-            for _ in 0..3 {
-                for method in [
-                    "Page.bringToFront",
-                    "Runtime.evaluate",
-                    "Input.dispatchMouseEvent",
-                    "Input.dispatchMouseEvent",
-                    "Input.dispatchMouseEvent",
-                ] {
-                    let message = socket.next().await.unwrap().unwrap();
-                    let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
-                    assert_eq!(value["method"], method);
-                    let response = if method == "Runtime.evaluate" {
-                        json!({"result":{"value":{"status":"target","x":70,"y":55}}})
-                    } else {
-                        json!({})
-                    };
-                    if method == "Input.dispatchMouseEvent" {
+    // Serves one scripted recommendation attempt per round: bring the page to
+    // front, report the link status, then expect the chosen switching action.
+    async fn serve_recommendation_rounds(
+        listener: TcpListener,
+        rounds: Vec<(&'static str, &'static str)>,
+    ) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        for (status, action) in rounds {
+            let methods: &[&str] = match action {
+                "mouse" => &["Input.dispatchMouseEvent"; 3],
+                "link" => &["Runtime.evaluate"],
+                _ => &["Page.navigate"],
+            };
+            for (index, method) in ["Page.bringToFront", "Runtime.evaluate"]
+                .iter()
+                .chain(methods)
+                .enumerate()
+            {
+                let message = socket.next().await.unwrap().unwrap();
+                let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                assert_eq!(value["method"], *method);
+                let response = match (*method, index) {
+                    ("Runtime.evaluate", 1) => {
+                        assert_eq!(value["params"]["expression"], OPEN_RECOMMENDATION);
+                        json!({"result":{"value":{"status":status,"x":70,"y":55}}})
+                    }
+                    ("Runtime.evaluate", _) => {
+                        assert_eq!(value["params"]["expression"], CLICK_RECOMMENDATION);
+                        json!({"result":{"value":{"status":"clicked"}}})
+                    }
+                    ("Input.dispatchMouseEvent", _) => {
                         assert_eq!(value["params"]["x"], 70.0);
                         assert_eq!(value["params"]["y"], 55.0);
+                        json!({})
                     }
-                    socket
-                        .send(Message::Text(
-                            json!({"id":value["id"],"result":response})
-                                .to_string()
-                                .into(),
-                        ))
-                        .await
-                        .unwrap();
-                }
+                    ("Page.navigate", _) => {
+                        assert_eq!(value["params"]["url"], SELECTED_URL);
+                        json!({"frameId":"synthetic"})
+                    }
+                    _ => json!({}),
+                };
+                socket
+                    .send(Message::Text(
+                        json!({"id":value["id"],"result":response})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
             }
-        });
+        }
+    }
+
+    fn rewind_recommendation(client: &mut CdpClient, seconds: u64) {
+        let past = tokio::time::Instant::now() - std::time::Duration::from_secs(seconds);
+        client.recommendation_last_attempt = Some(past);
+        client.route_action_at = client.route_action_at.map(|_| past);
+    }
+
+    #[tokio::test]
+    async fn recommendation_click_acknowledgement_is_not_navigation_success() {
+        // A real click that does not switch is followed by the link's own handler,
+        // then a fresh /jingxuan document. Never a full load of the feed itself.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(serve_recommendation_rounds(
+            listener,
+            vec![
+                ("target", "mouse"),
+                ("target", "link"),
+                ("target", "reload"),
+                ("target", "mouse"),
+            ],
+        ));
         let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
             .await
             .unwrap();
@@ -1534,19 +1690,157 @@ mod tests {
             "immediate retry must back off"
         );
         for expected in 2..=3 {
-            client.recommendation_last_attempt =
-                Some(tokio::time::Instant::now() - std::time::Duration::from_secs(3));
+            rewind_recommendation(&mut client, SELECTED_SETTLE_SECS);
             client.open_recommendation_if_redirected().await.unwrap();
             assert_eq!(client.recommendation_attempts, expected);
         }
-        client.recommendation_last_attempt =
-            Some(tokio::time::Instant::now() - std::time::Duration::from_secs(3));
-        assert!(client
+        rewind_recommendation(&mut client, 3);
+        client.open_recommendation_if_redirected().await.unwrap();
+        assert_eq!(
+            client.recommendation_attempts, 3,
+            "later attempts back off longer"
+        );
+        rewind_recommendation(&mut client, 10);
+        client.open_recommendation_if_redirected().await.unwrap();
+        assert_eq!(client.recommendation_attempts, 4);
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn covered_recommendation_link_uses_the_site_handler_then_reloads_selected() {
+        // A covered link or hidden window keeps the hit test failing forever.
+        // That must not wait without acting or end in a manual-click request.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(serve_recommendation_rounds(
+            listener,
+            vec![
+                ("not_ready", "link"),
+                ("not_ready", "reload"),
+                ("not_ready", "link"),
+                ("not_ready", "reload"),
+            ],
+        ));
+        let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
+            .await
+            .unwrap();
+        for expected in 1..=4 {
+            rewind_recommendation(&mut client, 10);
+            client.open_recommendation_if_redirected().await.unwrap();
+            assert_eq!(client.recommendation_attempts, expected);
+        }
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_fresh_selected_document_settles_before_fallbacks() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            for method in ["Page.bringToFront", "Runtime.evaluate"] {
+                let message = socket.next().await.unwrap().unwrap();
+                let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                assert_eq!(value["method"], method);
+                let response = json!({"result":{"value":{"status":"not_ready"}}});
+                socket
+                    .send(Message::Text(
+                        json!({"id":value["id"],"result":response})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
+            .await
+            .unwrap();
+        client.route_action_at = Some(tokio::time::Instant::now());
+        client.open_recommendation_if_redirected().await.unwrap();
+        assert_eq!(client.recommendation_attempts, 0, "still rendering");
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stalled_recommendation_feed_recovers_without_the_user() {
+        // Observed live: a fully loaded recommendation page stayed on "加载中"
+        // with no video. Return to /jingxuan and switch in-app again.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            for _ in 0..2 {
+                let message = socket.next().await.unwrap().unwrap();
+                let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                assert_eq!(value["method"], "Page.navigate");
+                assert_eq!(value["params"]["url"], SELECTED_URL);
+                socket
+                    .send(Message::Text(
+                        json!({"id":value["id"],"result":{}}).to_string().into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
+            .await
+            .unwrap();
+        let ago = |s| Some(tokio::time::Instant::now() - std::time::Duration::from_secs(s));
+        client.route_action_at = ago(STALLED_FEED_SECS - 1);
+        client.recover_stalled_recommendation().await.unwrap();
+        assert_eq!(client.recovery_attempts, 0, "a loading feed gets its grace");
+        client.route_action_at = ago(STALLED_FEED_SECS);
+        client.recover_stalled_recommendation().await.unwrap();
+        assert_eq!(client.recovery_attempts, 1);
+        client.feed_videos = 2;
+        client.route_action_at = ago(STALLED_FEED_SECS);
+        client.recover_stalled_recommendation().await.unwrap();
+        assert_eq!(client.recovery_attempts, 1, "a playing feed waits longer");
+        client.route_action_at = ago(STALLED_UIFID_SECS);
+        client.recover_stalled_recommendation().await.unwrap();
+        assert_eq!(client.recovery_attempts, 2);
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recommendation_read_failures_back_off_between_polls() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            for method in ["Page.bringToFront", "Runtime.evaluate"] {
+                let message = socket.next().await.unwrap().unwrap();
+                let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                assert_eq!(value["method"], method);
+                let response = if method == "Runtime.evaluate" {
+                    json!({"exceptionDetails":{"text":"synthetic"}})
+                } else {
+                    json!({})
+                };
+                socket
+                    .send(Message::Text(
+                        json!({"id":value["id"],"result":response})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
+            .await
+            .unwrap();
+        let error = client
             .open_recommendation_if_redirected()
             .await
-            .unwrap_err()
-            .to_string()
-            .contains("已尝试3次"));
+            .unwrap_err();
+        assert!(!error.to_string().contains("手动"));
+        client.open_recommendation_if_redirected().await.unwrap();
+        assert_eq!(client.recommendation_attempts, 0);
         peer.await.unwrap();
     }
 

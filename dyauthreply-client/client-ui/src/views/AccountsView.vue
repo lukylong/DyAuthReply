@@ -316,8 +316,8 @@ function accountStatusLabel(acc: DouyinAccount) {
   if (acc.credential_state === 'invalid' || acc.status === 2) return '登录失效';
   if (isAccountHealthy(acc)) {
     return acc.credential_state === 'sendable'
-      ? '账号正常，可接收和发送消息'
-      : '账号正常，登录身份和接收链路已验证';
+      ? '登录和接收正常，上次发送成功；不保证下一条消息送达'
+      : '登录和接收正常，发送尚待实际回执验证；不代表消息已送达';
   }
   if (acc.identity_error) return acc.last_probe_error || '身份校验异常';
   return statusLabel(acc.status);
@@ -342,7 +342,7 @@ function accountCredentialLabel(acc: DouyinAccount) {
   if (acc.credential_state === 'receive_only') {
     return isSendRestricted(acc) ? '客户端发送受限（仅接收）' : '仅接收';
   }
-  if (isAccountHealthy(acc)) return '账号正常';
+  if (isAccountHealthy(acc)) return acc.credential_state === 'sendable' ? '在线 · 上次发送成功' : '在线 · 发送待验证';
   if (acc.credential_state === 'sendable') return '可发送';
   if (acc.identity_error) return '校验异常';
   return '检测中';
@@ -686,6 +686,9 @@ onMounted(async () => {
           <span :class="{ done: quickAuth.completeness.private_key }">安全密钥</span>
           <span :class="{ done: quickAuth.completeness.dtrait }">设备校验</span>
           <span :class="{ done: quickAuth.completeness.identity }">账号资料</span>
+          <span :class="{ done: quickAuth.completeness.main_uifid }">主站 UIFID</span>
+          <span :class="{ done: quickAuth.completeness.main_fingerprint }">主站指纹</span>
+          <span :class="{ done: quickAuth.completeness.sdk_token }">SDK Token</span>
         </div>
 
         <p v-if="quickAuthError" class="msg-box error-msg">{{ quickAuthError }}</p>
@@ -771,7 +774,7 @@ onMounted(async () => {
     >
       <div class="delete-modal-content">
         <p class="del-desc">
-          确认删除该抖音号吗？删除后将停止托管、清除其本地登录凭证与托管配置，此操作不可恢复。
+          确认删除该抖音号吗？删除后将停止托管并清除其本地登录凭证，此操作不可恢复。历史发送记录会保留；待核验消息仍标记为结果未知，不会再次发送。
         </p>
         <p v-if="deleteTarget?.auto_reply_enabled" class="msg-box warn-msg">
           该账号自动回复仍处于开启状态，请先在卡片上关闭「自动回复」后再删除。

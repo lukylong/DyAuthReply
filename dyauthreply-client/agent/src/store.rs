@@ -1641,6 +1641,15 @@ impl CoreStore {
     pub fn has_unfinished_account(&self, id: &str) -> Result<bool, StoreError> {
         Ok(self.lock_connection()?.query_row("SELECT EXISTS(SELECT 1 FROM outbound_batches WHERE account_id=?1 AND status NOT IN ('confirmed','rejected','partial'))",[id],|r|r.get(0))?)
     }
+    /// # Errors
+    /// Reports queued/in-flight sends that prevent removal. Uncertain history
+    /// stays durable and non-retryable, but does not retain deleted credentials.
+    pub fn has_blocking_account_removal_work(&self, id: &str) -> Result<bool, StoreError> {
+        Ok(self.lock_connection()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM outbound_segments s JOIN outbound_batches b ON b.id=s.batch_id WHERE b.account_id=?1 AND s.status IN ('prepared','retryable','sending'))",
+            [id], |row| row.get(0),
+        )?)
+    }
     /// Reads the existing durable idempotency claim without creating work.
     /// # Errors
     /// Returns validation, database, or corrupt-record errors.
@@ -6012,6 +6021,96 @@ mod tests {
             .unwrap();
         assert!(reconciled.applied);
         assert_eq!(reconciled.batch.status, BatchStatus::Confirmed);
+    }
+
+    #[test]
+    fn import_delete_uncertain_history_does_not_block_removal_or_allow_resend() {
+        let (_directory, store) = store();
+        let token = lease(&store).token();
+        let batch = store
+            .prepare_outbound_batch_at(
+                &token,
+                "delete-check",
+                "response",
+                &[OutboundSegmentDraft::text("synthetic")],
+                200,
+            )
+            .unwrap();
+        assert!(store.has_blocking_account_removal_work(ACCOUNT).unwrap());
+        store
+            .transition_segment_at(
+                &token,
+                &batch.segments[0].id,
+                SegmentTransition::StartAttempt,
+                201,
+            )
+            .unwrap();
+        assert!(store.has_blocking_account_removal_work(ACCOUNT).unwrap());
+        store
+            .transition_segment_at(
+                &token,
+                &batch.segments[0].id,
+                SegmentTransition::MarkUncertain {
+                    reason: "synthetic unknown outcome".into(),
+                },
+                202,
+            )
+            .unwrap();
+        assert!(!store.has_blocking_account_removal_work(ACCOUNT).unwrap());
+        assert!(store.has_unfinished_account(ACCOUNT).unwrap());
+        let preserved = store.outbound_batch(&batch.id).unwrap();
+        assert_eq!(preserved.segments[0].status, SegmentStatus::Uncertain);
+        assert_eq!(preserved.segments[0].attempt_count, 1);
+        assert_eq!(
+            preserved.segments[0].client_message_id,
+            batch.segments[0].client_message_id
+        );
+        assert!(matches!(
+            store.transition_segment_at(
+                &token,
+                &batch.segments[0].id,
+                SegmentTransition::StartAttempt,
+                203
+            ),
+            Err(StoreError::InvalidTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn import_delete_other_accounts_and_retryable_work_remain_scoped() {
+        let (_directory, store) = store();
+        let token = lease(&store).token();
+        let batch = store
+            .prepare_outbound_batch_at(
+                &token,
+                "remove-retryable",
+                "response",
+                &[OutboundSegmentDraft::text("synthetic")],
+                200,
+            )
+            .unwrap();
+        store
+            .transition_segment_at(
+                &token,
+                &batch.segments[0].id,
+                SegmentTransition::StartAttempt,
+                201,
+            )
+            .unwrap();
+        store
+            .transition_segment_at(
+                &token,
+                &batch.segments[0].id,
+                SegmentTransition::MarkRetryable {
+                    reason: "zero bytes written".into(),
+                },
+                202,
+            )
+            .unwrap();
+        assert!(store.has_blocking_account_removal_work(ACCOUNT).unwrap());
+        assert!(!store
+            .has_blocking_account_removal_work("other-account")
+            .unwrap());
     }
 
     #[test]

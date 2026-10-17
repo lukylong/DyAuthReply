@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const STREAM: &str = "douyin-im-http";
-pub const MAX_PENDING_RECORDS: u32 = 128;
+// The upstream limit counts conversation groups, not individual events.
+// One valid decoded page (up to 512 events) must fit atomically.
+pub const MAX_PENDING_RECORDS: u32 = 512;
 pub const MAX_PENDING_BYTES: u64 = 1024 * 1024;
 const MAX_PAGE_MESSAGES: usize = 512;
 
@@ -294,14 +296,24 @@ mod tests {
         commit_page(store, token, 1, old.as_ref(), page(cursor, ids)).unwrap()
     }
     #[test]
+    fn platform_page_exceeding_requested_limit_can_commit_and_advance() {
+        let (_dir, store, token) = fixture();
+        commit(&store, &token, 100, &[]);
+        let ids: Vec<u64> = (1..=136).collect();
+        let result = commit(&store, &token, 200, &ids);
+        assert_eq!(result.inserted, 136);
+        assert_eq!(result.cursor, 200);
+        assert_eq!(commit(&store, &token, 200, &ids).inserted, 0);
+    }
+    #[test]
     fn websocket_receipts_are_bounded_and_do_not_advance_http_cursor() {
         let (_dir, store, token) = fixture();
-        commit_frontier(&store, &token, 1, (1..=128).map(message).collect()).unwrap();
+        commit_frontier(&store, &token, 1, (1..=512).map(message).collect()).unwrap();
         assert!(store
             .inbound_checkpoint(&token.account_id, STREAM)
             .unwrap()
             .is_none());
-        assert!(commit_frontier(&store, &token, 1, vec![message(129)]).is_err());
+        assert!(commit_frontier(&store, &token, 1, vec![message(513)]).is_err());
         assert_eq!(
             store
                 .inbound_checkpoint(&token.account_id, "douyin-im-ws")
@@ -475,7 +487,7 @@ mod tests {
     fn failed_initial_page_keeps_watermark_and_retries_without_advancing_cursor() {
         let (_dir, store, token) = fixture();
         let cutoff = u64::try_from(store.ensure_inbound_live_start(&token, 1).unwrap()).unwrap();
-        let ids: Vec<u64> = (1..=129).collect();
+        let ids: Vec<u64> = (1..=513).collect();
         let mut response = page(100, &ids);
         for m in &mut response.messages {
             m.create_time_us = cutoff + 1;
@@ -564,10 +576,10 @@ mod tests {
     fn full_spool_rolls_back_every_insert_and_cursor() {
         let (_dir, store, token) = fixture();
         commit(&store, &token, 100, &[]);
-        let ids: Vec<u64> = (1..=128).collect();
+        let ids: Vec<u64> = (1..=512).collect();
         commit(&store, &token, 200, &ids);
         let old = store.inbound_checkpoint(&token.account_id, STREAM).unwrap();
-        assert!(commit_page(&store, &token, 1, old.as_ref(), page(201, &[129])).is_err());
+        assert!(commit_page(&store, &token, 1, old.as_ref(), page(201, &[513])).is_err());
         assert_eq!(
             store
                 .inbound_checkpoint(&token.account_id, STREAM)
@@ -577,8 +589,8 @@ mod tests {
             200
         );
         assert_eq!(
-            store.pending_inbound_receipts(&token, 200).unwrap().len(),
-            128
+            store.pending_inbound_receipts(&token, 600).unwrap().len(),
+            512
         );
         assert_eq!(commit(&store, &token, 200, &ids).inserted, 0);
     }

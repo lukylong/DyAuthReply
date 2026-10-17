@@ -103,12 +103,7 @@ struct TextContent<'a> {
 pub fn encode_send_message_request(input: &SendRequestInput) -> Result<Vec<u8>, ProtocolError> {
     validate_send_input(input)?;
 
-    let content = serde_json::to_string(&TextContent {
-        awe_type: 700,
-        kind: 0,
-        rich_text_infos: [],
-        text: &input.text,
-    })?;
+    let content = text_content(&input.text)?;
 
     let mut send_body = Vec::new();
     append_string_field(&mut send_body, 1, &input.conversation_id)?;
@@ -156,6 +151,89 @@ pub fn encode_send_message_request(input: &SendRequestInput) -> Result<Vec<u8>, 
     )
 }
 
+/// Current www envelope observed from a successful official-web send.
+/// # Errors
+/// Preserves the same message validation as the frozen legacy encoder.
+pub fn encode_captured_web_send(
+    input: &SendRequestInput,
+    profile: &Value,
+) -> Result<Vec<u8>, ProtocolError> {
+    let legacy = encode_send_message_request(input)?;
+    let fields = decode_message(&legacy)?;
+    let body = expect_bytes(
+        *fields
+            .iter()
+            .find(|f| f.number == 8)
+            .ok_or(ProtocolError::InvalidRequest("request body"))?,
+    )?;
+    let mut headers = request_headers(input);
+    for (key, value) in captured_profile_fields(profile) {
+        if headers.contains_key(key) {
+            headers.insert(key.into(), value);
+        }
+    }
+    let mut out = Vec::new();
+    append_varint_field(&mut out, 1, SEND_MESSAGE_COMMAND)?;
+    append_varint_field(&mut out, 2, input.sequence_id)?;
+    append_string_field(&mut out, 3, SDK_VERSION)?;
+    append_string_field(&mut out, 4, "")?;
+    append_varint_field(&mut out, 5, 3)?;
+    append_varint_field(&mut out, 6, 0)?;
+    append_string_field(&mut out, 7, "0d50935:feat/pc-im-group")?;
+    append_bytes_field(&mut out, 8, body)?;
+    append_string_field(&mut out, 9, "0")?;
+    append_string_field(&mut out, 11, DEVICE_PLATFORM)?;
+    append_string_field(&mut out, 14, VERSION_CODE)?;
+    for (key, value) in headers {
+        append_map_entry(&mut out, 15, &key, &value)?;
+    }
+    append_varint_field(&mut out, 18, 1)?;
+    append_string_field(&mut out, 21, BIZ)?;
+    append_string_field(&mut out, 22, ACCESS)?;
+    Ok(out)
+}
+
+pub(super) fn captured_profile_fields(profile: &Value) -> BTreeMap<&'static str, String> {
+    let mut fields = BTreeMap::new();
+    for (key, field, max) in [
+        ("screen_width", "width", 32768),
+        ("screen_height", "height", 32768),
+        ("cpu_core_num", "cpu_core_num", 256),
+    ] {
+        if let Some(n) = profile[field].as_u64().filter(|n| *n > 0 && *n <= max) {
+            fields.insert(key, n.to_string());
+        }
+    }
+    if let Some(n) = profile["device_memory"]
+        .as_f64()
+        .filter(|n| n.is_finite() && *n >= 0.25 && *n <= 1024.0)
+    {
+        fields.insert("device_memory", n.to_string());
+    }
+    for (key, field) in [
+        ("browser_platform", "platform"),
+        ("browser_language", "language"),
+        ("timezone_name", "timezone_name"),
+    ] {
+        if let Some(s) = profile[field]
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 128 && !s.chars().any(char::is_control))
+        {
+            fields.insert(key, s.into());
+        }
+    }
+    fields
+}
+
+pub(super) fn text_content(text: &str) -> Result<String, ProtocolError> {
+    Ok(serde_json::to_string(&TextContent {
+        awe_type: 700,
+        kind: 0,
+        rich_text_infos: [],
+        text,
+    })?)
+}
+
 pub(super) fn encode_normal_envelope(
     cmd: u64,
     sequence_id: u64,
@@ -183,7 +261,7 @@ pub(super) fn encode_normal_envelope(
     Ok(request)
 }
 
-fn validate_send_input(input: &SendRequestInput) -> Result<(), ProtocolError> {
+pub(super) fn validate_send_input(input: &SendRequestInput) -> Result<(), ProtocolError> {
     if input.conversation_id.is_empty() {
         return Err(ProtocolError::InvalidRequest("conversation_id is empty"));
     }
@@ -229,7 +307,7 @@ fn append_extension(output: &mut Vec<u8>, key: &str, value: &str) -> Result<(), 
     append_bytes_field(output, 5, &extension)
 }
 
-fn append_map_entry(
+pub(super) fn append_map_entry(
     output: &mut Vec<u8>,
     field_number: u32,
     key: &str,
@@ -528,6 +606,60 @@ mod tests {
         assert_eq!(
             headers.get("browser_name").map(String::as_str),
             Some("Mozilla")
+        );
+    }
+}
+
+#[cfg(test)]
+mod captured_web_tests {
+    use super::*;
+    fn input() -> SendRequestInput {
+        SendRequestInput {
+            conversation_id: "0:1:10:20".into(),
+            conversation_short_id: 30,
+            ticket: "synthetic-ticket".into(),
+            text: "synthetic current web".into(),
+            user_agent: "Chrome/155.0".into(),
+            client_msg_id: "synthetic-id".into(),
+            sequence_id: 10004,
+            stime: "1700000000000".into(),
+            message_type: 7,
+            identity_security_token: "synthetic-token".into(),
+            identity_security_device_id: "synthetic-device".into(),
+            mentioned_users: vec![],
+            ext: vec![],
+        }
+    }
+    #[test]
+    fn captured_web_matches_successful_browser_context() {
+        let input = input();
+        let profile = serde_json::json!({"width":1512,"height":982,"platform":"MacIntel","timezone_name":"Asia/Singapore"});
+        let encoded = encode_captured_web_send(&input, &profile).unwrap();
+        let f = decode_message(&encoded).unwrap();
+        assert_eq!(
+            expect_varint(*f.iter().find(|x| x.number == 18).unwrap()).unwrap(),
+            1
+        );
+        assert_eq!(
+            expect_bytes(*f.iter().find(|x| x.number == 7).unwrap()).unwrap(),
+            b"0d50935:feat/pc-im-group"
+        );
+        let mut headers = BTreeMap::new();
+        for field in f.iter().filter(|x| x.number == 15) {
+            let e = decode_message(expect_bytes(*field).unwrap()).unwrap();
+            headers.insert(
+                String::from_utf8(expect_bytes(e[0]).unwrap().to_vec()).unwrap(),
+                String::from_utf8(expect_bytes(e[1]).unwrap().to_vec()).unwrap(),
+            );
+        }
+        assert_eq!(headers["screen_width"], "1512");
+        assert_eq!(headers["screen_height"], "982");
+        assert_eq!(headers["timezone_name"], "Asia/Singapore");
+        let legacy = encode_send_message_request(&input).unwrap();
+        let old = decode_message(&legacy).unwrap();
+        assert_eq!(
+            expect_varint(*old.iter().find(|x| x.number == 18).unwrap()).unwrap(),
+            4
         );
     }
 }

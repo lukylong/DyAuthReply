@@ -23,6 +23,8 @@ use thiserror::Error;
 /// Account-bound imported material. No Debug/Serialize implementation: secrets
 /// must not become a diagnostic payload by accident.
 pub struct SendCredentials {
+    pub captured_web: bool,
+    pub browser_profile: serde_json::Value,
     pub account_id: String,
     pub canonical_sec_uid: String,
     pub binding_digest: String,
@@ -405,10 +407,25 @@ async fn signed_plan(
     signer: &NativeSigner,
     operation: &SendOperation,
 ) -> Result<super::http_plan::RequestPlan, LiveSendError> {
-    let body =
-        encode_send_message_request(&operation.request).map_err(|_| LiveSendError::Payload)?;
+    let body = if operation.credentials.captured_web {
+        super::im::encode_captured_web_send(
+            &operation.request,
+            &operation.credentials.browser_profile,
+        )
+    } else {
+        encode_send_message_request(&operation.request)
+    }
+    .map_err(|_| LiveSendError::Payload)?;
     let credentials = &operation.credentials;
     let mut headers = headers_for_user_agent(&operation.request.user_agent);
+    if credentials.captured_web {
+        for h in &mut headers {
+            if h.name == "sec-fetch-site" {
+                h.value = "same-site".into();
+            }
+        }
+        headers.push(OrderedHeader::new("origin", "https://www.douyin.com"));
+    }
     if !credentials.dtrait_header.is_empty() {
         headers.push(OrderedHeader::new(
             "x-tt-session-dtrait",
@@ -419,7 +436,7 @@ async fn signed_plan(
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| LiveSendError::Signing)?
         .as_secs();
-    let plan = prepare_send_request(&SendHttpPlanInput {
+    let input = SendHttpPlanInput {
         method: SEND_METHOD,
         url: SEND_ENDPOINT,
         raw_cookie_header: &credentials.cookie,
@@ -439,7 +456,12 @@ async fn signed_plan(
             timestamp,
             ecdh_key: credentials.ecdh_key.as_ref().map(<[u8; 32]>::as_slice),
         },
-    })
+    };
+    let plan = if credentials.captured_web {
+        super::http_plan::prepare_captured_web_send_request(&input, &credentials.browser_profile)
+    } else {
+        prepare_send_request(&input)
+    }
     .map_err(|_| LiveSendError::Signing)?;
     let output = signer
         .sign(plan.clone())
@@ -560,6 +582,8 @@ mod tests {
                 ext: vec![],
             },
             credentials: SendCredentials {
+                captured_web: false,
+                browser_profile: serde_json::Value::Null,
                 canonical_sec_uid: "synthetic-sec".into(),
                 binding_digest: "a".repeat(64),
                 account_id: "synthetic".to_owned(),
@@ -831,6 +855,60 @@ mod tests {
                         .restore_send_observation(&lease, &canonical, &binding)
                         .unwrap(),
                     SendCapability::RiskControlled
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn recipient_limit_rejects_message_without_persisting_account_risk() {
+        for business in [7467] {
+            for server_id in [0, 987] {
+                let (_dir, store, operation, _control) = setup();
+                let lease = operation.lease.clone();
+                let binding = operation.credentials.binding_digest.clone();
+                let canonical = operation.credentials.canonical_sec_uid.clone();
+                let batch_id = operation.batch_id.clone();
+                let original = store.outbound_batch(&batch_id).unwrap();
+                let mut inner = Vec::new();
+                append_varint_field(&mut inner, 1, server_id).unwrap();
+                append_string_field(&mut inner, 4, &original.segments[0].client_message_id)
+                    .unwrap();
+                append_string_field(
+                    &mut inner,
+                    6,
+                    &format!(r#"{{"status_code":{business},"raw_check_code":2}}"#),
+                )
+                .unwrap();
+                let mut body = Vec::new();
+                append_bytes_field(&mut body, 100, &inner).unwrap();
+                let mut response = Vec::new();
+                append_varint_field(&mut response, 3, 0).unwrap();
+                append_bytes_field(&mut response, 6, &body).unwrap();
+                let (url, server) = mock_http(response).await;
+                let mut sender = sender(store.clone());
+                sender.http.test_endpoint = Some(url);
+                let result = sender.send(operation).await.unwrap();
+                server.await.unwrap();
+                assert_eq!(
+                    result.classification,
+                    DeliveryClass::BusinessRejected,
+                    "business={business}, server_id={server_id}"
+                );
+                assert_eq!(result.platform_message_id, None);
+                let saved = store.outbound_batch(&batch_id).unwrap();
+                assert_eq!(saved.segments[0].status, SegmentStatus::Rejected);
+                assert_eq!(saved.segments[0].attempt_count, 1);
+                assert!(saved.segments[0]
+                    .last_error
+                    .as_deref()
+                    .unwrap()
+                    .contains("raw_check=Some(2)"));
+                assert_eq!(
+                    store
+                        .restore_send_observation(&lease, &canonical, &binding)
+                        .unwrap(),
+                    SendCapability::Unknown
                 );
             }
         }

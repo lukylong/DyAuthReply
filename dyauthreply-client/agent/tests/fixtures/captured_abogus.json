@@ -1,0 +1,113 @@
+{
+  "synthetic": true,
+  "reference_commit": "fc8b9c2490a9561265425c26058290f01c064eda",
+  "cases": [
+    {
+      "now": 1792166800000,
+      "random": 0.123456789,
+      "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+      "profile": {
+        "geo": [
+          1512,
+          739,
+          1512,
+          860,
+          1512,
+          860,
+          1512,
+          982
+        ],
+        "platform": "MacIntel",
+        "width": 1512,
+        "height": 982,
+        "language": "zh-CN",
+        "timezone_name": "Asia/Singapore",
+        "referer": "https://www.douyin.com/jingxuan"
+      },
+      "query": "verifyFp=verify_synthetic&fp=verify_synthetic&msToken=synthetic-only",
+      "body": "",
+      "expected": "xJsfkFWjQqmjFd/b8CY2tlql5Hy/rB8yDaiORj3lePq5LHMTH8P5zxt6nxuBYhRmPYpkwq17Cx-/bjxcZ470ponkzmkkud7WTT5CIWso/qq6TUGmgHDKC0TzowMe0YkwaQ91Elf5XsMNIfxAIH5Mlp5Gy5zo55jdbNMWD2L9tEWXDCSkin3iOCkpNyicUX/U"
+    },
+    {
+      "now": 1792166800123,
+      "random": 0.123456789,
+      "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+      "profile": {
+        "geo": [
+          1512,
+          739,
+          1512,
+          860,
+          1512,
+          860,
+          1512,
+          982
+        ],
+        "platform": "MacIntel",
+        "width": 1512,
+        "height": 982,
+        "language": "zh-CN",
+        "timezone_name": "Asia/Singapore",
+        "referer": "https://www.douyin.com/jingxuan"
+      },
+      "query": "verifyFp=verify_synthetic&fp=verify_synthetic&msToken=synthetic-only",
+      "body": "",
+      "expected": "xJsfkFWjQqmjFd/b8CY2tlql/h6/rB8yDaiORj3lePq5LHMTH8P5zxt6nxuBYhRmPYpkwq17Cx-/bjxcZ470ponkzmkkuQJRTT5CIWso/qq6TUGmgHDKC0TzowMe0YkwaQ91Elf5XsMNIfxAIH5Mlp5Gy5zo55jdbNMWD2L9tEWXDCSkin3iOCkdN6GCUR2j"
+    },
+    {
+      "now": 1792166800000,
+      "random": 0.123456789,
+      "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+      "profile": {
+        "geo": [
+          1512,
+          739,
+          1512,
+          860,
+          1512,
+          860,
+          1512,
+          982
+        ],
+        "platform": "MacIntel",
+        "width": 1512,
+        "height": 982,
+        "language": "zh-CN",
+        "timezone_name": "Asia/Singapore",
+        "referer": "https://www.douyin.com/jingxuan",
+        "signing_context": "current_web"
+      },
+      "query": "verifyFp=verify_synthetic&fp=verify_synthetic&msToken=synthetic-only",
+      "body": "",
+      "expected": "xJsfkFWjQqmjFd/b8Csg7lql5Hy/rB8yDaiORj3PePF5LHMTH8P5zxt6nxzBsh5-PYpkwql7cnM/bExbZ4X0ponkzmkkud7WTT5CIWso/qq6TUGmgHDKC0TzowMe0YkwaQ91Elf5XsMNIfxAIH5Mlp5Gy5zo55jdbNMWD2L9tEWXDCSkin3iOCkpNyicU624"
+    },
+    {
+      "now": 1792166800123,
+      "random": 0.123456789,
+      "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+      "profile": {
+        "geo": [
+          1512,
+          739,
+          1512,
+          860,
+          1512,
+          860,
+          1512,
+          982
+        ],
+        "platform": "MacIntel",
+        "width": 1512,
+        "height": 982,
+        "language": "zh-CN",
+        "timezone_name": "Asia/Singapore",
+        "referer": "https://www.douyin.com/jingxuan",
+        "signing_context": "current_web"
+      },
+      "query": "verifyFp=verify_synthetic&fp=verify_synthetic&msToken=synthetic-only",
+      "body": "",
+      "expected": "xJsfkFWjQqmjFd/b8Csg7lql/h6/rB8yDaiORj3PePF5LHMTH8P5zxt6nxzBsh5-PYpkwql7cnM/bExbZ4X0ponkzmkkuQJRTT5CIWso/qq6TUGmgHDKC0TzowMe0YkwaQ91Elf5XsMNIfxAIH5Mlp5Gy5zo55jdbNMWD2L9tEWXDCSkin3iOCkdN6GCU4/y"
+    }
+  ],
+  "im_context_source": "Successful official www send captured 2026-10-17: SDK1/minor0/page6241/aid6383/flags2,2,2"
+}

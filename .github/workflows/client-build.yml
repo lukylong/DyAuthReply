@@ -141,6 +141,17 @@ jobs:
       - name: Check formatting
         run: cargo fmt --manifest-path dyauthreply-client/agent/Cargo.toml -- --check
 
+      - name: Setup Node.js for protocol and capture regressions
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Run signing and capture regression tests
+        run: |
+          node scripts/client/test_abogus_user_agent.mjs
+          node scripts/client/test_current_abogus.mjs
+          node scripts/client/test_capture_extension.mjs
+
       - name: Run Clippy
         run: cargo clippy --locked --manifest-path dyauthreply-client/agent/Cargo.toml --all-targets -- -D warnings
 
@@ -250,6 +261,9 @@ jobs:
         run: |
           npm ci --prefix dyauthreply-client/client-ui
           npm ci --prefix dyauthreply-client/desktop
+
+      - name: Verify send status presentation
+        run: node scripts/client/test_send_status_presentation.mjs
 
       # 去掉 GitHub Secret 常见的尾随换行/空格，写回 GITHUB_ENV 供 tauri build 签名
       - name: Prepare minisign private key

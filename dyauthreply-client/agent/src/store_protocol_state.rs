@@ -72,6 +72,25 @@ fn label(cap: SendCapability) -> &'static str {
         SendCapability::AuthExpired => "auth_expired",
     }
 }
+
+/// Reclassify only a uniquely attributable legacy 7467 observation. The same
+/// account, timestamp and fence must match the durable rejected attempt; newer
+/// or ambiguous evidence keeps the restriction. Never alter the outbox.
+fn legacy_recipient_limit(c: &Connection, account: &str, at: i64) -> Result<bool, StoreError> {
+    Ok(c.query_row(
+        "SELECT count(*)=1 AND coalesce(max(
+            s.status='rejected' AND s.updated_at_ms=p.observed_at_ms
+            AND s.last_fence_epoch=p.fence_epoch
+            AND s.last_error LIKE 'RiskControlled [http=200,outer=Some(0),business=Some(7467),raw_check=Some(2),%'
+         ),0)
+         FROM outbound_segments s JOIN outbound_batches b ON b.id=s.batch_id
+         JOIN account_protocol_state p ON p.account_id=b.account_id
+         WHERE b.account_id=?1 AND s.attempt_count>0 AND s.updated_at_ms>=?2",
+        params![account, at],
+        |r| r.get(0),
+    )?)
+}
+
 pub(super) fn restore(
     c: &Connection,
     lease: &LeaseToken,
@@ -90,7 +109,10 @@ pub(super) fn restore(
                 )?;
                 return Ok(SendCapability::Unknown);
             }
-            if cap == "risk_controlled" && now.saturating_sub(at) >= RISK_RECHECK_MS {
+            if cap == "risk_controlled"
+                && (now.saturating_sub(at) >= RISK_RECHECK_MS
+                    || legacy_recipient_limit(c, &lease.account_id, at)?)
+            {
                 c.execute(
                     "UPDATE account_protocol_state SET capability='unknown',observed_at_ms=0,fence_epoch=?2 WHERE account_id=?1 AND capability='risk_controlled'",
                     params![lease.account_id, lease.fence_epoch],
@@ -153,6 +175,97 @@ mod tests {
             .token();
         (dir, store, lease)
     }
+    #[test]
+    fn recipient_limit_legacy_observation_is_repaired_without_touching_outbox() {
+        for code in [7467, 7911, 8610] {
+            let (_dir, store, lease) = fixture();
+            let digest = "a".repeat(64);
+            store
+                .restore_send_observation(&lease, "self", &digest)
+                .unwrap();
+            let batch = store
+                .prepare_outbound_batch(
+                    &lease,
+                    "trigger",
+                    "route",
+                    &[OutboundSegmentDraft::text("synthetic")],
+                )
+                .unwrap();
+            let id = &batch.segments[0].id;
+            store
+                .transition_segment(&lease, id, SegmentTransition::StartAttempt)
+                .unwrap();
+            let error = format!("RiskControlled [http=200,outer=Some(0),business=Some({code}),raw_check=Some(2),msg=OK,biz_msg=synthetic]");
+            store
+                .transition_segment_observed(
+                    &lease,
+                    id,
+                    SegmentTransition::Reject {
+                        error: error.clone(),
+                    },
+                    SendObservation {
+                        canonical_sec_uid: "self",
+                        credential_digest: &digest,
+                        capability: SendCapability::RiskControlled,
+                    },
+                )
+                .unwrap();
+            let c = store.lock_connection().unwrap();
+            let at: i64 = c
+                .query_row(
+                    "SELECT observed_at_ms FROM account_protocol_state",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            // A stale observation or another fence cannot authorize repair.
+            c.execute(
+                "UPDATE account_protocol_state SET observed_at_ms=?1",
+                [at - 1],
+            )
+            .unwrap();
+            assert_eq!(
+                restore(&c, &lease, "self", &digest, at + 1).unwrap(),
+                SendCapability::RiskControlled
+            );
+            c.execute(
+                "UPDATE account_protocol_state SET observed_at_ms=?1,fence_epoch=2",
+                [at],
+            )
+            .unwrap();
+            assert_eq!(
+                restore(&c, &lease, "self", &digest, at + 1).unwrap(),
+                SendCapability::RiskControlled
+            );
+            c.execute("UPDATE account_protocol_state SET fence_epoch=1", [])
+                .unwrap();
+            let expected = if code == 7467 {
+                SendCapability::Unknown
+            } else {
+                SendCapability::RiskControlled
+            };
+            assert_eq!(
+                restore(&c, &lease, "self", &digest, at + 1).unwrap(),
+                expected
+            );
+            assert_eq!(
+                restore(&c, &lease, "self", &digest, at + 2).unwrap(),
+                expected
+            );
+            drop(c);
+            let saved = store.outbound_batch(&batch.id).unwrap();
+            assert_eq!(
+                saved.segments[0].status,
+                crate::store::SegmentStatus::Rejected
+            );
+            assert_eq!(saved.segments[0].attempt_count, 1);
+            assert_eq!(
+                saved.segments[0].last_error.as_deref(),
+                Some(error.as_str())
+            );
+        }
+    }
+
     #[test]
     fn risk_restriction_expires_into_a_recheck_after_the_window() {
         let (_dir, store, lease) = fixture();

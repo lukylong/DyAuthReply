@@ -110,6 +110,15 @@ class DouyinHttpRequestPlanCorpusTests(unittest.TestCase):
             for case in cls.wire_corpus["request_cases"]
         }
 
+    def test_current_full_ticket_signature_supersedes_stale_short_id(self):
+        from urllib.parse import quote
+        from core.douyin.runtime.transport.request_plan import ticket_cookie_matches
+        full = quote(json.dumps({"value": "ts.2.current+signature", "timestamp": 1700000000000}), safe="")
+        self.assertTrue(ticket_cookie_matches("bd_ticket_guard_ts_sign_id=ts.2.old; bd_ticket_guard_tssign=" + full, "ts.2.current+signature"))
+        self.assertFalse(ticket_cookie_matches("bd_ticket_guard_ts_sign_id=ts.2; bd_ticket_guard_tssign=ts.2.wrong", "ts.2.current+signature"))
+        self.assertFalse(ticket_cookie_matches("bd_ticket_guard_tssign=%ZZ", "ts.2.current+signature"))
+        self.assertFalse(ticket_cookie_matches("bd_ticket_guard_ts_sign_id=ts.2.old; bd_ticket_guard_ts_sign_id=", "ts.2.current+signature"))
+
     def test_corpus_declares_independent_non_secret_boundary(self):
         self.assertEqual(self.corpus["schema_version"], 1)
         self.assertEqual(self.corpus["corpus_id"], "douyin-pc-im-http-plan-v1")
@@ -244,6 +253,16 @@ class DouyinHttpRequestPlanCorpusTests(unittest.TestCase):
 
 
 class DouyinHttpRequestPlanProductionSeamTests(unittest.IsolatedAsyncioTestCase):
+    def test_account_user_agent_is_forwarded_to_js_worker(self):
+        from core.douyin.runtime.transport.sign import js_signer
+        with patch.object(js_signer, "_pool_or_ctx_call", return_value="signed") as worker:
+            self.assertEqual(js_signer.get_ab("q=synthetic", "", "Synthetic Chrome UA"), "signed")
+            worker.assert_called_once_with("get_ab", "q=synthetic", "", "Synthetic Chrome UA")
+        with patch.object(js_signer, "_pool_or_ctx_call") as worker:
+            with self.assertRaises(js_signer.JsSignerUnavailable):
+                js_signer.get_ab("q=synthetic", "", "bad\nua")
+            worker.assert_not_called()
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.corpus = _load_json(CORPUS_PATH)
@@ -320,7 +339,7 @@ class DouyinHttpRequestPlanProductionSeamTests(unittest.IsolatedAsyncioTestCase)
                 )
                 self.assertEqual(kwargs["headers"]["cookie"], case_input["raw_cookie_header"])
                 self.assertEqual(provider._query_ms_token, case_input["query_ms_token"])
-                get_ab.assert_called_once_with(expected["a_bogus_query"], "")
+                get_ab.assert_called_once_with(expected["a_bogus_query"], "", case_input["user_agent"])
                 self.assertEqual(
                     build_client_data.call_args.args,
                     (
@@ -427,7 +446,7 @@ class DouyinHttpRequestPlanProductionSeamTests(unittest.IsolatedAsyncioTestCase)
                 body="body-content",
                 base_params="aid=6383",
             )
-        get_ab.assert_called_once_with("aid=6383&msToken=TOKEN", "body-content")
+        get_ab.assert_called_once_with("aid=6383&msToken=TOKEN", "body-content", provider._user_agent)
         self.assertEqual(
             fake_client.calls[0][1],
             "https://www.douyin.com/api/synthetic?aid=6383&msToken=TOKEN&a_bogus=RAW/AB",

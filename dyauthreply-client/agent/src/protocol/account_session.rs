@@ -155,11 +155,19 @@ impl NativeAccountSession {
                 })?
         };
         Ok(super::live_sender::SendCredentials {
+            captured_web: self.credentials.captured_web,
+            browser_profile: self.credentials.browser_profile.clone(),
             account_id: self.credentials.account_id.to_string(),
             canonical_sec_uid: self.credentials.expected_sec_uid.clone(),
             binding_digest: self.credentials.binding_digest(),
             credential_generation: generation,
-            cookie: self.credentials.cookie_header("www.douyin.com"),
+            cookie: self
+                .credentials
+                .cookie_header(if self.credentials.captured_web {
+                    "imapi.douyin.com"
+                } else {
+                    "www.douyin.com"
+                }),
             ms_token: self.credentials.query_ms_token.clone(),
             private_key: self.credentials.private_key.clone(),
             ticket: self.credentials.ticket.clone(),
@@ -193,11 +201,29 @@ impl NativeAccountSession {
         query: String,
         step: &'static str,
     ) -> Result<String, AccountRequestError> {
-        let ab = self
-            .signer
-            .sign_query(query.clone(), String::new())
-            .await
-            .map_err(|_| AccountRequestError::Signing { step })?;
+        let signed = if self.credentials.captured_web
+            && self.credentials.browser_profile["geo"]
+                .as_array()
+                .is_some_and(|g| g.len() == 8)
+        {
+            self.signer
+                .sign_captured_query(
+                    query.clone(),
+                    String::new(),
+                    self.credentials.user_agent.clone(),
+                    self.credentials.browser_profile.to_string(),
+                )
+                .await
+        } else {
+            self.signer
+                .sign_query(
+                    query.clone(),
+                    String::new(),
+                    self.credentials.user_agent.clone(),
+                )
+                .await
+        };
+        let ab = signed.map_err(|_| AccountRequestError::Signing { step })?;
         Ok(format!("{query}&a_bogus={}", percent_encode_rfc3986(&ab)))
     }
     /// Fetch server ECDH certificate using the account's current www cookies.
@@ -479,6 +505,54 @@ impl NativeAccountSession {
             return Err(AccountRequestError::Decode { step: STEP });
         }
         Ok(result)
+    }
+
+    /// Read a scoped recent conversation page without sending or triggering replies.
+    /// # Errors
+    /// Rejects authentication failure, foreign rows and malformed responses.
+    pub async fn conversation_history(
+        &mut self,
+        id: &str,
+        short: u64,
+    ) -> Result<Vec<super::inbox::InboxMessage>, AccountRequestError> {
+        const STEP: &str = "conversation_history";
+        self.verify_self().await?;
+        let request = super::inbox::encode_conversation_history(id, short)
+            .map_err(|_| AccountRequestError::Decode { step: STEP })?;
+        let mut headers = self.headers("imapi.douyin.com");
+        headers.extend([
+            OrderedHeader::new("content-type", "application/x-protobuf"),
+            OrderedHeader::new("accept", "application/x-protobuf"),
+            OrderedHeader::new("origin", "https://creator.douyin.com"),
+            OrderedHeader::new("referer", "https://creator.douyin.com/"),
+        ]);
+        let response = self
+            .request(
+                SessionEndpoint::ConversationHistory,
+                "",
+                &headers,
+                &request,
+                STEP,
+            )
+            .await?;
+        if !(200..300).contains(&response.status) {
+            return Err(AccountRequestError::Http {
+                step: STEP,
+                status: response.status,
+            });
+        }
+        let page = super::inbox::decode_conversation_history(&response.body, id, short)
+            .map_err(|_| AccountRequestError::Decode { step: STEP })?;
+        if page.status_code != 0 {
+            return Err(AccountRequestError::Business {
+                step: STEP,
+                code: Some(page.status_code),
+            });
+        }
+        if !page.wrapper_present {
+            return Err(AccountRequestError::Decode { step: STEP });
+        }
+        Ok(page.messages)
     }
 
     /// Establishes a native Frontier socket after authenticated self verification.

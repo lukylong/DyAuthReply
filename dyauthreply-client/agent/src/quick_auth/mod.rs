@@ -502,11 +502,12 @@ impl Broker {
                             self.ready(&session_id, candidate).await?;
                             return Ok(());
                         }
-                        Err(_) => {
+                        Err(error) => {
+                            let detail = format!("账号校验未通过：{error}");
                             self.update(
                                 &session_id,
                                 "collecting",
-                                "已取得登录信息，正在等待账号身份校验",
+                                &detail,
                                 Some(candidate.completeness),
                             )
                             .await?;
@@ -514,6 +515,8 @@ impl Broker {
                     }
                 }
                 Ok(capture) => {
+                    let missing = capture.completeness.missing_fields();
+                    let message = format!("正在初始化主站并补采：{missing}");
                     let logged_in = capture.completeness.cookie();
                     self.update(
                         &session_id,
@@ -523,7 +526,7 @@ impl Broker {
                             "awaiting_login"
                         },
                         if logged_in {
-                            "登录成功，正在等待页面生成完整发送凭证"
+                            &message
                         } else {
                             "请完成登录，系统会自动识别账号"
                         },
@@ -531,14 +534,10 @@ impl Broker {
                     )
                     .await?;
                 }
-                Err(_) => {
-                    self.update(
-                        &session_id,
-                        "collecting",
-                        "正在等待登录页面生成完整发送凭证",
-                        None,
-                    )
-                    .await?;
+                Err(error) => {
+                    let detail = format!("采集尚未完成：{error}");
+                    self.update(&session_id, "collecting", &detail, None)
+                        .await?;
                 }
             }
             tokio::select! {

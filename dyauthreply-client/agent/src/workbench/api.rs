@@ -288,8 +288,23 @@ async fn messages(
     if !app.service.has_account(&account) {
         return error(StatusCode::NOT_FOUND, "账号未托管");
     }
+    let sync = match app
+        .service
+        .refresh_conversation_history(&account, &conversation)
+        .await
+    {
+        Ok(true) => "refreshed",
+        Ok(false) => "cached",
+        Err(_) => {
+            tracing::warn!(
+                account_id = account,
+                "conversation history read repair failed; serving cache"
+            );
+            "cached-error"
+        }
+    };
     match tokio::task::spawn_blocking(move || app.db.messages(&account, &conversation)).await {
-        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Ok(v)) => ([("x-dyauthreply-history-sync", sync)], Json(v)).into_response(),
         _ => error(StatusCode::NOT_FOUND, "会话不存在或消息读取失败"),
     }
 }

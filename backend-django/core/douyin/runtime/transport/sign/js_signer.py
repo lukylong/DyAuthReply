@@ -508,7 +508,7 @@ def is_available() -> bool:
         return False
 
 
-def get_ab(query: str, data: str = "") -> str:
+def get_ab(query: str, data: str = "", user_agent: str = "") -> str:
     """计算 a_bogus。
 
     Args:
@@ -518,6 +518,11 @@ def get_ab(query: str, data: str = "") -> str:
     Returns:
         a_bogus 值（字符串）。
     """
+    if user_agent:
+        if len(user_agent) > 2048 or any(ord(c) < 32 or ord(c) == 127 for c in user_agent):
+            raise JsSignerUnavailable("签名 User-Agent 格式无效")
+        return _pool_or_ctx_call("get_ab", query, data, user_agent)
+    # Historical offline vectors retain the legacy default. Live callers pass UA.
     return _pool_or_ctx_call("get_ab", query, data)
 
 

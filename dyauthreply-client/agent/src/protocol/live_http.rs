@@ -24,6 +24,7 @@ pub enum SessionEndpoint {
     Certificate,
     Inbox,
     Conversation,
+    ConversationHistory,
 }
 impl SessionEndpoint {
     pub(super) const fn url(self) -> &'static str {
@@ -39,6 +40,7 @@ impl SessionEndpoint {
             Self::Certificate => "https://www.douyin.com/passport/ticket_guard/get_client_cert/",
             Self::Inbox => "https://imapi.douyin.com/v1/message/get_by_user",
             Self::Conversation => "https://imapi.douyin.com/v2/conversation/get_info_list",
+            Self::ConversationHistory => "https://imapi.douyin.com/v1/message/get_by_conversation",
         }
     }
     const fn method(self) -> Method {
@@ -49,7 +51,9 @@ impl SessionEndpoint {
             | Self::ProfileOther
             | Self::Works => Method::GET,
             Self::Csrf => Method::HEAD,
-            Self::Certificate | Self::Inbox | Self::Conversation => Method::POST,
+            Self::Certificate | Self::Inbox | Self::Conversation | Self::ConversationHistory => {
+                Method::POST
+            }
         }
     }
 }

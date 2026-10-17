@@ -7,12 +7,13 @@ opaque outputs to the prepared plan with a deterministic digest.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import struct
 import unicodedata
 from dataclasses import dataclass
 from typing import Iterable, Optional, Sequence
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from core.douyin.runtime.transport.browser_fingerprint import browser_fingerprint
 
@@ -137,6 +138,42 @@ def parse_cookie_lookup(raw_cookie_header: str) -> dict[str, str]:
     }
 
 
+def ticket_cookie_matches(raw_cookie: str, ts_sign: str) -> bool:
+    """Prefer a matching current SDK full signature over stale legacy short IDs."""
+    if not ts_sign:
+        return True
+    current_values = []
+    for part in raw_cookie.split(";"):
+        name, separator, value = part.strip().partition("=")
+        if separator and name == "bd_ticket_guard_tssign":
+            current_values.append(value)
+    if current_values:
+        for raw in current_values:
+            if re.search(r"%(?![0-9A-Fa-f]{2})", raw):
+                return False
+            try:
+                value = unquote(raw, encoding="utf-8", errors="strict")
+                if not value.startswith("ts."):
+                    decoded = json.loads(value)
+                    if isinstance(decoded, str):
+                        value = decoded
+                    elif isinstance(decoded, dict):
+                        value = decoded.get("value")
+                    else:
+                        value = None
+            except (ValueError, UnicodeError):
+                return False
+            if value != ts_sign:
+                return False
+        return True
+    sign_id = ""
+    for part in raw_cookie.split(";"):
+        name, separator, value = part.strip().partition("=")
+        if separator and name == "bd_ticket_guard_ts_sign_id" and value:
+            sign_id = value
+    return not sign_id or ts_sign.startswith(sign_id)
+
+
 def prepare_reference_send_request(
     *,
     method: str,
@@ -203,8 +240,7 @@ def prepare_reference_send_request(
         raise RequestPlanError("missing_ticket", "ticket is required")
     if not ts_sign:
         raise RequestPlanError("missing_ts_sign", "ts_sign is required")
-    sign_id = lookup["bd_ticket_guard_ts_sign_id"]
-    if sign_id and not ts_sign.startswith(sign_id):
+    if not ticket_cookie_matches(raw_cookie_header, ts_sign):
         raise RequestPlanError(
             "ticket_session_mismatch",
             "ticket credentials do not match the current Cookie session",

@@ -499,7 +499,7 @@ DOWNLOAD_RELEASE_PAGE = os.environ.get(
 DOWNLOAD_MACOS_FILE = os.environ.get('DOWNLOAD_MACOS_FILE', 'DAssistant-macos-aarch64.dmg')
 DOWNLOAD_WINDOWS_FILE = os.environ.get('DOWNLOAD_WINDOWS_FILE', 'DAssistant-windows-x64-setup.exe')
 DOWNLOAD_EXTENSION_FILE = os.environ.get('DOWNLOAD_EXTENSION_FILE', 'douyin-cred-extractor.zip')
-DOWNLOAD_EXTENSION_VERSION = os.environ.get('DOWNLOAD_EXTENSION_VERSION') or '2.2.0'
+DOWNLOAD_EXTENSION_VERSION = os.environ.get('DOWNLOAD_EXTENSION_VERSION') or '2.3.1'
 
 # 自建服务器托管（国内直连，规避 GitHub 慢）：
 # 设置 DOWNLOAD_PUBLIC_BASE_URL（如 https://pro.zhenyangtang.com.cn）后，下载链接走
@@ -546,14 +546,16 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.39'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.40'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '修复部分登录失效账号长期显示「检测中」：识别消息会话失效，展示具体原因并停止无效收发重试\n'
-    '临时网络或资料异常与登录失效分开提示，保留正常重试\n'
-    '新增及更新登录凭证时，同时校验账号身份和消息接口，避免只验证主页即保存不可用会话\n'
-    '已被平台拒绝的登录会话仍需重新登录，本次更新不会自动恢复失效凭证',
+    '修复新采集账号私信签名与请求参数不一致导致的发送失败，补齐实际浏览器环境信息\n'
+    '修复消息积压时收信队列及分页停滞；打开聊天可补拉最近消息，历史消息不触发自动回复\n'
+    '修复扩展凭证导入的长度及 Cookie 兼容问题，以及部分账号主页资料获取异常\n'
+    '区分登录失效、客户端发送受限和单个收件人发送上限，避免将单次业务失败误判为整个账号掉线\n'
+    '快捷登录与浏览器扩展同步更新；扩展升级到 2.3.1 后请重新加载\n'
+    '已完成本机指定账号双向正文及续期后发送验证；不代表所有账号和长期掉线场景均已验证',
 )

@@ -26,6 +26,7 @@ const AB_SOURCE: &str = include_str!(concat!(
     "/../../backend-django/core/douyin/runtime/transport/sign/js/dy_ab.js"
 ));
 const MAX_INPUT: usize = 16_384;
+const AB_CURRENT_SOURCE: &str = include_str!("ab_current.js");
 
 #[derive(Debug, Error)]
 pub enum SigningError {
@@ -169,7 +170,21 @@ pub fn ticket_client_data(input: &TicketGuardSigningInput) -> Result<String, Sig
 }
 
 fn abogus_with_prelude(query: &str, body: &str, prelude: &str) -> Result<String, SigningError> {
+    abogus_with_user_agent_and_prelude(query, body, None, prelude)
+}
+
+fn abogus_with_user_agent_and_prelude(
+    query: &str,
+    body: &str,
+    user_agent: Option<&str>,
+    prelude: &str,
+) -> Result<String, SigningError> {
     if query.len() > MAX_INPUT || body.len() > MAX_INPUT {
+        return Err(SigningError::InputLimit);
+    }
+    if user_agent
+        .is_some_and(|ua| ua.is_empty() || ua.len() > 2048 || ua.chars().any(char::is_control))
+    {
         return Err(SigningError::InputLimit);
     }
     let runtime = Runtime::new().map_err(|_| SigningError::Engine)?;
@@ -194,7 +209,7 @@ fn abogus_with_prelude(query: &str, body: &str, prelude: &str) -> Result<String,
             .get("get_ab")
             .map_err(|_| SigningError::Engine)?;
         function
-            .call::<_, String>((query, body))
+            .call::<_, String>((query, body, user_agent.unwrap_or("")))
             .map_err(|_| SigningError::Engine)
     })?;
     if result.is_empty() || result.len() > 8192 {
@@ -204,11 +219,64 @@ fn abogus_with_prelude(query: &str, body: &str, prelude: &str) -> Result<String,
     Ok(result)
 }
 
+fn captured_abogus(
+    query: &str,
+    body: &str,
+    ua: &str,
+    profile: &str,
+    prelude: &str,
+) -> Result<String, SigningError> {
+    if query.len() > MAX_INPUT
+        || body.len() > MAX_INPUT
+        || ua.is_empty()
+        || ua.len() > 2048
+        || profile.len() > 4096
+    {
+        return Err(SigningError::InputLimit);
+    }
+    let runtime = Runtime::new().map_err(|_| SigningError::Engine)?;
+    runtime.set_memory_limit(32 * 1024 * 1024);
+    runtime.set_max_stack_size(1024 * 1024);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    runtime.set_interrupt_handler(Some(Box::new(move || {
+        std::time::Instant::now() >= deadline
+    })));
+    let context = Context::full(&runtime).map_err(|_| SigningError::Engine)?;
+    context.with(|ctx| {
+        ctx.eval::<(), _>(prelude)
+            .map_err(|_| SigningError::Engine)?;
+        ctx.eval::<(), _>(AB_CURRENT_SOURCE)
+            .map_err(|_| SigningError::Engine)?;
+        let f: rquickjs::Function = ctx
+            .globals()
+            .get("get_ab_current")
+            .map_err(|_| SigningError::Engine)?;
+        let result = f
+            .call::<_, String>((query, body, ua, profile))
+            .map_err(|_| SigningError::Engine)?;
+        if result.is_empty() || result.len() > 8192 {
+            return Err(SigningError::InputLimit);
+        }
+        Ok(result)
+    })
+}
+
 /// No subprocess, external JS runtime, credential store, or network operation.
 /// # Errors
 /// Returns a bounded error on input limits or JS evaluation failure.
 pub fn abogus(query: &str, body: &str) -> Result<String, SigningError> {
     abogus_with_prelude(query, body, "")
+}
+
+/// Sign using the same imported User-Agent as the actual HTTP request.
+/// # Errors
+/// Rejects empty, oversized or control-containing UA values without logging them.
+pub fn abogus_for_user_agent(
+    query: &str,
+    body: &str,
+    user_agent: &str,
+) -> Result<String, SigningError> {
+    abogus_with_user_agent_and_prelude(query, body, Some(user_agent), "")
 }
 
 #[derive(Clone)]
@@ -234,7 +302,12 @@ impl NativeSigner {
     /// General query signing for authenticated read requests.
     /// # Errors
     /// Enforces the same global CPU admission and execution bounds as sends.
-    pub async fn sign_query(&self, query: String, body: String) -> Result<String, SigningError> {
+    pub async fn sign_query(
+        &self,
+        query: String,
+        body: String,
+        user_agent: String,
+    ) -> Result<String, SigningError> {
         let permit = self
             .lanes
             .clone()
@@ -242,7 +315,40 @@ impl NativeSigner {
             .map_err(|_| SigningError::Busy)?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            abogus(&query, &body)
+            abogus_for_user_agent(&query, &body, &user_agent)
+        })
+        .await
+        .map_err(|_| SigningError::Worker)?
+    }
+
+    /// Current host-aware SDK with a real captured geometry profile.
+    /// # Errors
+    /// Preserves bounded signer admission and rejects incomplete captured fields.
+    pub async fn sign_captured_query(
+        &self,
+        query: String,
+        body: String,
+        ua: String,
+        profile: String,
+    ) -> Result<String, SigningError> {
+        if profile.len() > 4096 {
+            return Err(SigningError::InputLimit);
+        }
+        let mut profile: serde_json::Value =
+            serde_json::from_str(&profile).map_err(|_| SigningError::InputLimit)?;
+        profile
+            .as_object_mut()
+            .ok_or(SigningError::InputLimit)?
+            .insert("signing_context".into(), serde_json::json!("current_web"));
+        let profile = profile.to_string();
+        let permit = self
+            .lanes
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| SigningError::Busy)?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            captured_abogus(&query, &body, &ua, &profile, "")
         })
         .await
         .map_err(|_| SigningError::Worker)?
@@ -261,7 +367,21 @@ impl NativeSigner {
             let input = plan.signer_requests();
             Ok(SignerOutputs {
                 plan_digest: plan.plan_digest(),
-                a_bogus: abogus(&input.a_bogus.query, input.a_bogus.body)?,
+                a_bogus: if let Some(profile) = &input.a_bogus.browser_profile {
+                    captured_abogus(
+                        &input.a_bogus.query,
+                        input.a_bogus.body,
+                        plan.user_agent(),
+                        profile,
+                        "",
+                    )?
+                } else {
+                    abogus_for_user_agent(
+                        &input.a_bogus.query,
+                        input.a_bogus.body,
+                        plan.user_agent(),
+                    )?
+                },
                 client_data: ticket_client_data(&input.ticket_guard)?,
                 ree_public_key: ree_public_key(&input.ticket_guard.private_key)?,
             })
@@ -275,6 +395,54 @@ impl NativeSigner {
 mod tests {
     use super::*;
     use std::fmt::Write;
+    #[test]
+    fn current_sdk_matches_independent_python_vectors_with_captured_geometry() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/captured_abogus.json"))
+                .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let prelude = format!(
+                "Date.now=()=>{};Math.random=()=>{};",
+                case["now"], case["random"]
+            );
+            let value = captured_abogus(
+                case["query"].as_str().unwrap(),
+                case["body"].as_str().unwrap(),
+                case["ua"].as_str().unwrap(),
+                &case["profile"].to_string(),
+                &prelude,
+            )
+            .unwrap();
+            assert_eq!(value, case["expected"].as_str().unwrap());
+            assert_eq!(value.len(), 192);
+            assert!(captured_abogus("x", "", "Chrome/155", "{}", &prelude).is_err());
+        }
+    }
+    #[test]
+    fn account_user_agent_changes_abogus_with_frozen_clock_and_random() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/native_signing.json")).unwrap();
+        let prelude = fixture["ab_prelude"].as_str().unwrap();
+        let mac = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
+        let win = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
+        let sign = |ua| {
+            abogus_with_user_agent_and_prelude("msToken=synthetic-only", "", Some(ua), prelude)
+                .unwrap()
+        };
+        assert_ne!(sign(mac), sign(win));
+        assert_eq!(sign(mac), sign(mac));
+        assert_ne!(
+            sign(mac),
+            abogus_with_prelude("msToken=synthetic-only", "", prelude).unwrap()
+        );
+        for invalid in ["", "bad\nua"] {
+            assert!(matches!(
+                abogus_for_user_agent("synthetic", "", invalid),
+                Err(SigningError::InputLimit)
+            ));
+        }
+    }
+
     #[test]
     fn browser_single_line_pkcs8_body_is_accepted_without_changing_plan_material() {
         let f: serde_json::Value =

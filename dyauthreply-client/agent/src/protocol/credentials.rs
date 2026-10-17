@@ -19,8 +19,10 @@ pub enum CredentialError {
     Invalid,
     #[error("credential is missing required field: {0}")]
     Missing(&'static str),
-    #[error("ticket guard and Cookie refer to different sessions")]
+    #[error("票据签名与 Cookie 的当前登录会话不匹配，请在同一账号页面刷新后重新复制完整凭证")]
     SessionMismatch,
+    #[error("采集不完整：{0}；请在同一浏览器账号初始化主站后重新抓取")]
+    CaptureIncomplete(&'static str),
 }
 
 #[derive(Clone, Deserialize)]
@@ -33,6 +35,8 @@ pub struct CredentialImport {
 }
 
 pub struct AccountCredentials {
+    pub captured_web: bool,
+    pub browser_profile: Value,
     pub account_id: AccountId,
     pub expected_sec_uid: String,
     pub user_agent: String,
@@ -110,6 +114,121 @@ fn header_cookie(raw: &str, name: &str) -> Option<String> {
         .map(|(_, value)| value.to_owned())
 }
 
+pub(crate) fn valid_query_token(value: &str) -> bool {
+    (32..=8192).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-+/=".contains(&b))
+}
+
+fn import_cookie_entries(raw: &str, scoped_capture: bool) -> Vec<Value> {
+    let pairs = raw.split(';').filter_map(|p| p.trim().split_once('='));
+    // Browser Cookie headers legally contain host/path variants of a name.
+    // Keep the exact scoped wire header separately; only the compatibility map
+    // is unique. V2 raw session and ticket checks run before this conversion.
+    let pairs: Vec<_> = if scoped_capture {
+        pairs.collect::<BTreeMap<_, _>>().into_iter().collect()
+    } else {
+        pairs.collect()
+    };
+    pairs
+        .into_iter()
+        .map(|(name, value)| serde_json::json!({"name":name,"value":value}))
+        .collect()
+}
+
+fn resolve_captured_token(state: &Value, fallback: String) -> Result<String, CredentialError> {
+    if let Some(captured) = state["_query_ms_token"]["value"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+    {
+        if !valid_query_token(captured) {
+            return Err(CredentialError::Invalid);
+        }
+        Ok(captured.to_owned())
+    } else {
+        Ok(fallback)
+    }
+}
+
+fn merge_capture_metadata(state: &mut Value, value: &Value) -> Result<(), CredentialError> {
+    if let Some(token) = value
+        .get("query_ms_token")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        if !valid_query_token(token) {
+            return Err(CredentialError::CaptureIncomplete("SDK Token 格式无效"));
+        }
+        state["_query_ms_token"] = serde_json::json!({"value":token,
+                "captured_at_ms":value["query_ms_token_captured_at_ms"],"source":"browser_network"});
+    }
+    if value["capture_version"] == 2 {
+        state["_capture_version"] = serde_json::json!(2);
+        state["_browser_profile"] = value["browser_profile"].clone();
+    }
+    Ok(())
+}
+
+fn validate_browser_capture(value: &Value) -> Result<(), CredentialError> {
+    if value["capture_version"] != 2 {
+        return Ok(());
+    }
+    let headers = &value["cookie_headers"];
+    let www = headers["www.douyin.com"].as_str().unwrap_or("");
+    if value["cookie"].as_str() != Some(www) {
+        return Err(CredentialError::CaptureIncomplete("主站Cookie快照不一致"));
+    }
+    let session = header_cookie(www, "sessionid")
+        .or_else(|| header_cookie(www, "sessionid_ss"))
+        .ok_or(CredentialError::CaptureIncomplete("主站登录会话"))?;
+    for host in ["creator.douyin.com", "imapi.douyin.com"] {
+        let raw = headers[host].as_str().unwrap_or("");
+        let other = header_cookie(raw, "sessionid").or_else(|| header_cookie(raw, "sessionid_ss"));
+        if other.as_deref() != Some(session.as_str()) {
+            return Err(CredentialError::SessionMismatch);
+        }
+    }
+    for host in ["www.douyin.com", "creator.douyin.com", "imapi.douyin.com"] {
+        let raw = headers[host].as_str().unwrap_or("");
+        for (name, val) in raw.split(';').filter_map(|p| p.trim().split_once('=')) {
+            if matches!(name, "sessionid" | "sessionid_ss" | "sid_tt") && val != session {
+                return Err(CredentialError::SessionMismatch);
+            }
+        }
+    }
+    if header_cookie(www, "UIFID").is_none() {
+        return Err(CredentialError::CaptureIncomplete("主站 UIFID"));
+    }
+    if header_cookie(www, "s_v_web_id").is_none() {
+        return Err(CredentialError::CaptureIncomplete("主站 s_v_web_id"));
+    }
+    if !valid_query_token(value["query_ms_token"].as_str().unwrap_or("")) {
+        return Err(CredentialError::CaptureIncomplete("浏览器 SDK Token"));
+    }
+    let keys = decode_object(value.get("keys").unwrap_or(&Value::Null))?;
+    let private = keys["ec_privateKey"]
+        .as_str()
+        .or_else(|| keys["private_key"].as_str())
+        .unwrap_or("");
+    let raw = value["ticket_guard_server_data"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| value["web_protect"].as_str())
+        .unwrap_or("");
+    let ticket = decode_ticket(raw)?;
+    let cert = ticket["client_cert"]
+        .as_str()
+        .or_else(|| ticket["sdk_cert"].as_str())
+        .unwrap_or("");
+    let public = super::native_signer::ree_public_key(private)
+        .map_err(|_| CredentialError::CaptureIncomplete("主站签名私钥"))?;
+    if cert.strip_prefix("pub.") != Some(public.as_str()) {
+        return Err(CredentialError::CaptureIncomplete("票据和私钥不配套"));
+    }
+    Ok(())
+}
+
 fn web_identity(
     cookies: &BTreeMap<String, String>,
     headers: &BTreeMap<String, String>,
@@ -125,11 +244,14 @@ fn web_identity(
         .or_else(|| cookies.get("msToken_ss"))
         .cloned()
         .unwrap_or_else(|| stable_ms_token(account, session, key));
-    let fingerprint = cookies
-        .get("s_v_web_id")
-        .cloned()
+    // The signed www request must use the fingerprint from the Cookie header
+    // it actually sends, not a stale creator-domain cookie in the flattened map.
+    let fingerprint = headers
+        .get("www.douyin.com")
+        .and_then(|raw| header_cookie(raw, "s_v_web_id"))
+        .or_else(|| cookies.get("s_v_web_id").cloned())
         .or_else(|| {
-            ["www.douyin.com", "creator.douyin.com", "imapi.douyin.com"]
+            ["creator.douyin.com", "imapi.douyin.com"]
                 .into_iter()
                 .find_map(|host| {
                     headers
@@ -171,12 +293,85 @@ fn text_ok(text: &str, max: usize) -> bool {
 }
 
 fn validate_ticket_session(result: &AccountCredentials) -> Result<(), CredentialError> {
-    let sign_id = result.cookie("www.douyin.com", "bd_ticket_guard_ts_sign_id");
-    if !sign_id.is_empty() && !result.ts_sign.is_empty() && !result.ts_sign.starts_with(&sign_id) {
+    // Stored snapshots were accepted by older clients without the modern cookie
+    // check. Keep them readable so a single retired/bad account cannot prevent
+    // startup or deletion. New imports and send plans use the strict check below.
+    let legacy = result.cookie("www.douyin.com", "bd_ticket_guard_ts_sign_id");
+    if !legacy.is_empty()
+        && !result.ts_sign.is_empty()
+        && !result.ts_sign.starts_with(&legacy)
+        && !ticket_cookie_matches(&result.cookie_header("www.douyin.com"), &result.ts_sign)
+    {
         return Err(CredentialError::SessionMismatch);
     }
     Ok(())
 }
+
+/// Current SDK cookies carry the complete signed value. A legacy short ID may
+/// survive a later login, so compare the full value first, without rewriting
+/// the Cookie header or accepting conflicting modern values.
+pub(super) fn ticket_cookie_matches(raw_cookie: &str, ts_sign: &str) -> bool {
+    if ts_sign.is_empty() {
+        return true; // Cookie-only receive imports do not contain a ticket yet.
+    }
+    let mut saw_current = false;
+    for (_, raw) in raw_cookie
+        .split(';')
+        .filter_map(|p| p.trim().split_once('='))
+        .filter(|(name, _)| *name == "bd_ticket_guard_tssign")
+    {
+        saw_current = true;
+        let Ok(decoded) = percent_decode(raw) else {
+            return false;
+        };
+        let current = if decoded.starts_with("ts.") {
+            Some(decoded.clone())
+        } else {
+            serde_json::from_str::<Value>(&decoded).ok().and_then(|v| {
+                v.as_str()
+                    .or_else(|| v.get("value").and_then(Value::as_str))
+                    .map(str::to_owned)
+            })
+        };
+        if current.as_deref() != Some(ts_sign) {
+            return false;
+        }
+    }
+    if saw_current {
+        return true;
+    }
+    header_cookie(raw_cookie, "bd_ticket_guard_ts_sign_id")
+        .is_none_or(|id| ts_sign.starts_with(&id))
+}
+
+fn validate_incoming_ticket(state: &Value) -> Result<(), CredentialError> {
+    // Tightening validation applies to newly supplied material, not old rows.
+    let raw_cookie = state["_cookie_headers"]["www.douyin.com"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map_or_else(
+            || {
+                state["cookies"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| {
+                        Some(format!("{}={}", c["name"].as_str()?, c["value"].as_str()?))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            },
+            str::to_owned,
+        );
+    if !ticket_cookie_matches(
+        &raw_cookie,
+        state["_bd_ticket"]["ts_sign"].as_str().unwrap_or(""),
+    ) {
+        return Err(CredentialError::SessionMismatch);
+    }
+    Ok(())
+}
+
 fn merge_dtrait(state: &mut Value, value: &Value) {
     let mut dtrait = state["_dtrait"].clone();
     if !dtrait.is_object() {
@@ -264,7 +459,12 @@ impl AccountCredentials {
             "{:x}",
             Sha256::digest(
                 format!(
-                    "native-binding-v2\0{}\0{}\0{}\0{}\0{}",
+                    "{}\0{}\0{}\0{}\0{}\0{}",
+                    if self.captured_web {
+                        "native-binding-captured-web-v1"
+                    } else {
+                        "native-binding-v2"
+                    },
                     self.account_id,
                     self.expected_sec_uid,
                     self.cookie_header("www.douyin.com"),
@@ -328,6 +528,7 @@ impl AccountCredentials {
         value: &Value,
         base: Option<&CredentialImport>,
     ) -> Result<CredentialImport, CredentialError> {
+        validate_browser_capture(value)?;
         let mut state = base.map_or_else(|| serde_json::json!({}), |v| v.storage_state.clone());
         let cookie = string(value, "cookie");
         let cookie_changed = !cookie.is_empty()
@@ -386,11 +587,8 @@ impl AccountCredentials {
         state["_bd_ticket"] = ticket;
         let cookie = string(value, "cookie");
         if !cookie.is_empty() {
-            let cookies: Vec<Value> = cookie
-                .split(';')
-                .filter_map(|p| p.trim().split_once('='))
-                .map(|(name, value)| serde_json::json!({"name":name,"value":value}))
-                .collect();
+            state["_query_ms_token"] = Value::Null;
+            let cookies = import_cookie_entries(&cookie, value["capture_version"] == 2);
             state["cookies"] = serde_json::json!(cookies);
             // A new full cookie header replaces old host snapshots unless explicitly refreshed too.
             state["_cookie_headers"] = value
@@ -398,7 +596,9 @@ impl AccountCredentials {
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
         }
+        merge_capture_metadata(&mut state, value)?;
         merge_dtrait(&mut state, value);
+        validate_incoming_ticket(&state)?;
         let ua = value
             .get("ua")
             .or_else(|| value.get("user_agent"))
@@ -463,17 +663,21 @@ impl AccountCredentials {
                 }
             }
         }
-        let ticket = &state["_bd_ticket"];
-        let dtrait = &state["_dtrait"];
+        let (ticket, dtrait) = (&state["_bd_ticket"], &state["_dtrait"]);
         let private_key = string(ticket, "private_key");
-        let (token, web_fingerprint) =
+        let (mut token, web_fingerprint) =
             web_identity(&cookies, &headers, account_id.as_str(), &private_key);
+        token = resolve_captured_token(&state, token)?;
         // verifyFp/fp and the Cookie must describe the same browser identity.
         // Chromium keeps this host-scoped and quick-auth can observe it first
         // on creator.douyin.com, so bind that captured value into the www/imapi
         // request snapshots instead of signing a query with a cookie-absent ID.
-        bind_fingerprint_cookie(&mut cookies, &mut headers, &web_fingerprint);
+        if state["_capture_version"] != 2 {
+            bind_fingerprint_cookie(&mut cookies, &mut headers, &web_fingerprint);
+        }
         let result = Self {
+            captured_web: state["_capture_version"] == 2,
+            browser_profile: state["_browser_profile"].clone(),
             account_id,
             expected_sec_uid: input.expected_sec_uid,
             user_agent: input.user_agent,
@@ -655,5 +859,176 @@ mod tests {
         );
         let credentials = AccountCredentials::import_extension("a".into(), &package).unwrap();
         assert!(!credentials.has_signing_material());
+    }
+}
+
+#[cfg(test)]
+mod ticket_rotation_regression {
+    use super::*;
+    fn input(short_id: &str, current: Option<&str>) -> Vec<u8> {
+        let mut cookies = vec![
+            serde_json::json!({"name":"sessionid","value":"synthetic-session"}),
+            serde_json::json!({"name":"bd_ticket_guard_ts_sign_id","value":short_id}),
+        ];
+        if let Some(current) = current {
+            let encoded = crate::protocol::http_plan::percent_encode_rfc3986(
+                &serde_json::json!({"value":current,"timestamp":1_700_000_000_000_u64}).to_string(),
+            );
+            cookies.push(serde_json::json!({"name":"bd_ticket_guard_tssign","value":encoded}));
+        }
+        serde_json::to_vec(&serde_json::json!({"account_id":"a","user_agent":"Chrome/155.0","storage_state":{"cookies":cookies,"_bd_ticket":{"ticket":"synthetic-ticket","ts_sign":"ts.2.current+signature","private_key":"synthetic-key"}}})).unwrap()
+    }
+    #[test]
+    fn import_delete_current_full_signature_supersedes_stale_short_id() {
+        assert!(AccountCredentials::import_json(&input(
+            "ts.2.old-id",
+            Some("ts.2.current+signature")
+        ))
+        .is_ok());
+    }
+    #[test]
+    fn import_delete_new_conflicting_full_signature_is_rejected_but_old_rows_remain_readable() {
+        let stored = input("ts.2", Some("ts.2.other-signature"));
+        assert!(AccountCredentials::import_json(&stored).is_ok());
+        let value = serde_json::json!({"cookie":"sessionid=synthetic-session; bd_ticket_guard_ts_sign_id=ts.2; bd_ticket_guard_tssign=ts.2.other-signature","ua":"Chrome/155.0","web_protect":"{\"ticket\":\"synthetic-ticket\",\"ts_sign\":\"ts.2.current+signature\"}"});
+        assert!(matches!(
+            AccountCredentials::input_from_fields("a".into(), &value, None),
+            Err(CredentialError::SessionMismatch)
+        ));
+    }
+
+    #[test]
+    fn import_delete_retired_snapshot_without_legacy_id_remains_readable() {
+        assert!(AccountCredentials::import_json(&input("", Some("ts.2.stale-snapshot"))).is_ok());
+    }
+
+    #[test]
+    fn import_delete_malformed_or_conflicting_current_cookies_fail_closed() {
+        for raw in [
+            "%ZZ",
+            "null",
+            "%7B%22value%22%3A3%7D",
+            "ts.2.current+signature; bd_ticket_guard_tssign=ts.2.other",
+        ] {
+            assert!(!ticket_cookie_matches(
+                &format!("bd_ticket_guard_tssign={raw}"),
+                "ts.2.current+signature"
+            ));
+        }
+        assert!(!ticket_cookie_matches(
+            "bd_ticket_guard_ts_sign_id=ts.2.old; bd_ticket_guard_ts_sign_id=",
+            "ts.2.current"
+        ));
+    }
+
+    #[test]
+    fn import_delete_scoped_current_cookie_handles_duplicate_legacy_ids() {
+        let mut document: Value = serde_json::from_slice(&input("ts.2.old", None)).unwrap();
+        document["storage_state"]["_cookie_headers"] = serde_json::json!({"www.douyin.com":"sessionid=synthetic-session; bd_ticket_guard_ts_sign_id=ts.2.stale-host; bd_ticket_guard_ts_sign_id=ts.2.stale-parent; bd_ticket_guard_tssign=ts.2.current+signature"});
+        assert!(AccountCredentials::import_json(&serde_json::to_vec(&document).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn import_delete_www_fingerprint_wins_over_stale_creator_snapshot() {
+        let raw = serde_json::json!({"account_id":"a","user_agent":"Chrome/155.0","storage_state":{"cookies":[{"name":"sessionid","value":"synthetic"},{"name":"s_v_web_id","value":"verify_creator_old"}],"_cookie_headers":{"www.douyin.com":"sessionid=synthetic; s_v_web_id=verify_www_current","imapi.douyin.com":"sessionid=synthetic"}}});
+        let credentials =
+            AccountCredentials::import_json(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        assert_eq!(credentials.web_fingerprint(), "verify_www_current");
+        assert_eq!(
+            credentials.cookie_header("www.douyin.com"),
+            "sessionid=synthetic; s_v_web_id=verify_www_current"
+        );
+        assert_eq!(
+            credentials.cookie("imapi.douyin.com", "s_v_web_id"),
+            "verify_www_current"
+        );
+    }
+
+    #[test]
+    fn import_delete_legacy_mismatch_still_rejected() {
+        assert!(matches!(
+            AccountCredentials::import_json(&input("ts.2.old-id", None)),
+            Err(CredentialError::SessionMismatch)
+        ));
+        assert!(AccountCredentials::import_json(&input("ts.2", None)).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod capture_v2_tests {
+    use super::*;
+    fn complete() -> Value {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/native_signing.json")).unwrap();
+        let raw = "sessionid=synthetic; sessionid_ss=synthetic; sid_tt=synthetic; UIFID=real-browser-field; s_v_web_id=verify_browser; bd_ticket_guard_tssign=ts.2.synthetic";
+        serde_json::json!({"capture_version":2,"cookie":raw,"cookie_headers":{"www.douyin.com":raw,"creator.douyin.com":raw,"imapi.douyin.com":raw},"ua":"Chrome/152.0","query_ms_token":"S".repeat(164),"keys":{"ec_privateKey":fixture["private_key"]},"ticket_guard_server_data":serde_json::json!({"ticket":"synthetic","ts_sign":"ts.2.synthetic","client_cert":format!("pub.{}",fixture["ree_public"].as_str().unwrap())}).to_string()})
+    }
+    #[test]
+    fn creator_channel_is_bound_to_capture_and_does_not_restore_www_send_state() {
+        let document =
+            AccountCredentials::input_from_fields("a".into(), &complete(), None).unwrap();
+        let creator = AccountCredentials::from_state(document.clone()).unwrap();
+        assert!(creator.captured_web);
+        let mut legacy = document;
+        legacy.storage_state["_capture_version"] = Value::Null;
+        let web = AccountCredentials::from_state(legacy).unwrap();
+        assert!(!web.captured_web);
+        assert_ne!(creator.binding_digest(), web.binding_digest());
+    }
+    #[test]
+    fn capture_v2_complete_passes_and_conflicts_reject() {
+        assert!(AccountCredentials::input_from_fields("a".into(), &complete(), None).is_ok());
+        for (field, value) in [
+            ("query_ms_token", Value::String("bad\nvalue".into())),
+            ("keys", serde_json::json!({"ec_privateKey":"invalid"})),
+        ] {
+            let mut raw = complete();
+            raw[field] = value;
+            assert!(AccountCredentials::input_from_fields("a".into(), &raw, None).is_err());
+        }
+        for host in ["www.douyin.com", "creator.douyin.com", "imapi.douyin.com"] {
+            let mut raw = complete();
+            let h = raw["cookie_headers"][host].as_str().unwrap().to_owned();
+            raw["cookie_headers"][host] = Value::String(format!("{h}; sid_tt=other"));
+            assert!(AccountCredentials::input_from_fields("a".into(), &raw, None).is_err());
+        }
+        let mut raw = complete();
+        raw["ticket_guard_server_data"] = Value::String(
+            "{\"ticket\":\"synthetic\",\"ts_sign\":\"ts.2.other\",\"client_cert\":\"pub.other\"}"
+                .into(),
+        );
+        assert!(AccountCredentials::input_from_fields("a".into(), &raw, None).is_err());
+    }
+    #[test]
+    fn full_cookie_replacement_clears_previous_sdk_token() {
+        let previous =
+            AccountCredentials::input_from_fields("a".into(), &complete(), None).unwrap();
+        let next = serde_json::json!({"cookie":"sessionid=new-session","ua":"Chrome/152.0","web_protect":"{}","keys":"{}"});
+        let updated =
+            AccountCredentials::input_from_fields("a".into(), &next, Some(&previous)).unwrap();
+        assert!(updated.storage_state["_query_ms_token"].is_null());
+    }
+    #[test]
+    fn capture_v2_scoped_duplicate_names_preserve_wire_header_and_import() {
+        let mut raw = complete();
+        let cookie = format!("{}; bd_ticket_guard_ts_sign_id=ts.2.old-host; bd_ticket_guard_ts_sign_id=ts.2.old-parent",raw["cookie"].as_str().unwrap());
+        raw["cookie"] = serde_json::json!(cookie);
+        raw["cookie_headers"]["www.douyin.com"] = serde_json::json!(cookie);
+        let state = AccountCredentials::input_from_fields("a".into(), &raw, None).unwrap();
+        let credentials = AccountCredentials::from_state(state).unwrap();
+        assert_eq!(credentials.cookie_header("www.douyin.com"), cookie);
+    }
+    #[test]
+    fn captured_query_token_survives_import_without_entering_cookie_header() {
+        let value = serde_json::json!({"cookie":"sessionid=synthetic","cookie_headers":{"www.douyin.com":"sessionid=synthetic"},"ua":"Chrome/152.0","query_ms_token":"S".repeat(164)});
+        let state = AccountCredentials::input_from_fields("a".into(), &value, None).unwrap();
+        let parsed = AccountCredentials::from_state(state).unwrap();
+        assert_eq!(parsed.query_ms_token, "S".repeat(164));
+        assert!(!parsed.cookie_header("www.douyin.com").contains("msToken="));
+    }
+    #[test]
+    fn capture_v2_missing_main_site_material_is_rejected_before_synthetic_fallback() {
+        let value = serde_json::json!({"cookie":"sessionid=synthetic","ua":"Chrome/152.0","capture_version":2});
+        assert!(AccountCredentials::input_from_fields("a".into(), &value, None).is_err());
     }
 }

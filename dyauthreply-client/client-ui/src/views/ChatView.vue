@@ -358,17 +358,23 @@ function insertEmoji(emoji: string) {
 }
 
 function platformReason(s: string): string {
-  const m = /(?:biz_msg|msg)=([^,\]]+)/.exec(s);
-  return m?.[1]?.trim() ? `（抖音提示：${m[1].trim()}）` : '';
+  // The envelope can say OK while the business response rejects the message.
+  const business = /(?:^|[,\s\[])biz_msg=([^\]]+)/.exec(s)?.[1]?.trim();
+  const outer = /(?:^|[,\s\[])msg=([^,\]]+)/.exec(s)?.[1]?.trim();
+  const reason = business || (outer?.toUpperCase() === 'OK' ? '' : outer);
+  return reason ? `（抖音提示：${reason}）` : '';
 }
 
 function humanizeSendError(raw?: string | null): string {
   if (!raw) return '未知错误';
   const s = raw.trim();
   if (s.startsWith('发送未受理：')) return s.slice('发送未受理：'.length);
+  const code = /business=Some\((\d+)\)/.exec(s)?.[1];
+  if (code === '7467') {
+    return `该收件人的消息配额已达上限(7467)${platformReason(s)}；本次发送失败，不代表整个账号禁止发送`;
+  }
   if (s.includes('RiskControlled') || s.includes('7911') || s.includes('机房')) {
-    const code = /business=Some\((\d+)\)/.exec(s)?.[1];
-    return `抖音风控拒绝发送${code ? `(${code})` : ''}${platformReason(s)}，该账号已暂停发送，约 30 分钟内自动复查`;
+    return `此网页登录态的发送被拒绝${code ? `(${code})` : ''}${platformReason(s)}；客户端暂缓发送，30 分钟冷却后重新验证，不保证恢复，也不代表手机端被禁言`;
   }
   if (s.includes('8101')) return '发送被限制(8101)';
   if (s.includes('登录失效') || s.includes('401') || s.includes('LoginExpired')) {
@@ -975,13 +981,13 @@ onUnmounted(() => {
             <span v-else>{{ avatarInitial(displayPeerName(activeConversation)) }}</span>
           </div>
           <div class="chat-head-text">
-            <strong>{{ displayPeerName(activeConversation) }}</strong>
+            <strong>收件人：{{ displayPeerName(activeConversation) }}</strong>
             <span v-if="displayPeerSubtitle(activeConversation)" class="peer-sub">
               {{ displayPeerSubtitle(activeConversation) }}
             </span>
           </div>
           <div v-if="activeAccount" class="chat-head-meta">
-            <span class="account-badge">@ {{ activeAccount.nickname }}</span>
+            <span class="account-badge">发送账号：{{ activeAccount.nickname }}</span>
           </div>
         </header>
 

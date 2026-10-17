@@ -103,7 +103,7 @@ impl Importer {
         )
         .await
         .context("账号身份校验超时")?
-        .context("账号身份校验失败")?;
+        .map_err(|error| anyhow::anyhow!("账号身份校验失败：{error}"))?;
         if let Some(base) = base {
             anyhow::ensure!(
                 base.expected_sec_uid == verified.sec_uid,
@@ -327,7 +327,7 @@ async fn verify_identity(
     )
     .await
     .context("账号身份校验超时，未保存凭证")?
-    .context("账号身份校验失败，未保存凭证")
+    .map_err(|error| anyhow::anyhow!("账号身份校验失败，未保存凭证：{error}"))
 }
 /// Records how an account entered the client. A login made in a browser on another
 /// OS (e.g. imported from a Windows PC into this Mac) sends from an environment the

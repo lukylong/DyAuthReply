@@ -118,7 +118,7 @@ class FrontierImWsClient:
             "verifyFp": s_v_web_id, "fp": s_v_web_id, "msToken": ms,
         }
         query = urlencode(params)
-        a_bogus = await asyncio.to_thread(js_signer.get_ab, query, "")
+        a_bogus = await asyncio.to_thread(js_signer.get_ab, query, "", self._ua)
         url = f"https://www.douyin.com/aweme/v1/web/query/user?{query}&a_bogus={a_bogus}"
         headers = {
             "user-agent": self._ua,

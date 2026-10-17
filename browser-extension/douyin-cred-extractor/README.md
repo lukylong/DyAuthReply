@@ -1,54 +1,38 @@
-# 抖音登录态提取器（DyAuthReply 导入助手）
+# 抖音登录态提取器 v2.3.1
 
-Chrome/Edge MV3 扩展，用于生成 DyAuthReply 后台可直接粘贴的 `DYCRED1.` 登录态导入串。
+生成供 D助手导入的 `DYCRED1.` 凭证。需要配套支持 `capture_version: 2` 的客户端；更新扩展后请重新采集，旧导入串不会自动补齐。
 
-## 当前凭证来源（v2.2.0）
+## 本版修正
 
-| 字段 | 来源 | 用途 |
-| --- | --- | --- |
-| `cookie` | `chrome.cookies` API | 兼容字段；包含 creator 页面可见的 HttpOnly `sessionid` |
-| `cookie_headers` | 按 creator/imapi/www URL 分别调用 `chrome.cookies` | 保留同名 Cookie 的域作用域，运行时按目标主机选择 |
-| `ticket_guard_server_data` | 登录响应写入的 `bd_ticket_guard_server_data` Cookie | 提供 `ticket` / `ts_sign` / `client_cert` |
-| `keys` | `localStorage['security-sdk/s_sdk_crypt_sdk']` | 提供发送签名所需 `ec_privateKey` |
-| `dtrait_blob` / `session_dtrait` | document-start 页面钩子 + 请求头监听 | 身份安全 token 的动态设备特征；优先用 blob 按路径重算 |
-| `web_protect` | 旧版 localStorage 字段 | 仅兼容已有浏览器登录态 |
+- 新增实际窗口/屏幕八项几何数据、CPU、内存、语言和时区，供客户端按当前主站 SDK 签名；这些值来自浏览器，不用固定 Windows 指纹代替。
+- 配套客户端按 `verifyFp → fp → msToken` 的完整查询签名，保留旧版凭证读取兼容。旧导入串不会自动多出新环境字段。
+- 自检验收同时核对接收方正文；分配了消息 ID 但接收方为空的 8101 不视为发送成功，也不据此判整个账号掉线。
 
-`im/user_token/v2` 现在只返回 userid，扩展不再依赖该端点。发送凭证来自登录响应的
-`bd-ticket-guard-server-data` 响应头/同名 Cookie；后端同时兼容旧 `web_protect` 数据。
+- 先通过创作者中心的登录账号接口取得身份，再在同一窗口、同一 Cookie store 的临时主站标签页初始化 SDK。
+- 真实采集主站 `UIFID`、`s_v_web_id`、网络请求/响应中的 `msToken`、实际 UA 和设备采样；不把随机生成字段当采集成功。
+- 按 creator / www / imapi 分别保存 Cookie，校验三个域的会话一致，并核对采集期间没有切号。
+- 读取同一会话在主站和创作者中心的新旧 SDK 键，只有票据签名与请求 Cookie 一致、票据公钥与私钥配套才导出；主站旧票据不覆盖创作者中心当前票据。
+- 响应观察按 Cookie store、标签页、域和采集时间隔离；临时标签页结束后清除对应缓存。
+- 资料接口失败、主站需要验证或缺字段时显示具体阶段，不生成新的导入串，不继续显示上一次结果。
 
-## 安装
+## 更新与使用
 
-1. 打开 `chrome://extensions`（Edge：`edge://extensions`）。
-2. 开启「开发者模式」。
-3. 点「加载已解压的扩展程序」，选择本目录。
-4. 每次更新扩展文件后，在扩展页点「重新加载」。
+1. 在浏览器扩展管理页重新加载本目录，确认版本 **2.3.1**。
+2. 在已登录的创作者中心或抖音主站打开扩展，点击“补齐主站并抓取登录态”。
+3. 保持扩展弹窗打开，等待临时页面完成初始化；如果主站要求登录/验证，请由本人完成后重新采集。
+4. 检查弹窗显示的账号昵称，复制完整导入串，在 D助手中导入对应账号。
 
-## 使用
+成功采集只证明材料齐全且相互匹配，不等于平台允许发信。发送状态必须以实际业务回执和接收结果为准。本版不自动续期短时 SDK Token，不绕过验证码、平台频率限制或发送拒绝。
 
-1. 先在扩展页重载 v2.2.0，再重新打开 creator 页面，让 document-start 钩子捕获设备特征。
-2. 打开 [creator 私信管理页](https://creator.douyin.com/creator-micro/data/following/chat)。
-3. 打开扩展，确认 Cookie、server_data、keys 三个徽标均正常。
-4. 复制 `DYCRED1.` 一键导入串，在 DyAuthReply `/douyin/account` 的「导入登录态」中粘贴。
+## 数据字段
 
-一键导入串包含 `{cookie, cookie_headers, ticket_guard_server_data, dtrait_blob, keys, ua, ...}`。后台不会把
-server_data 当作续期响应，而是在导入时一次性解析并加密保存。
+| 字段 | 来源 |
+| --- | --- |
+| cookie / cookie_headers | chrome.cookies，保留分域作用域与 HttpOnly 登录态 |
+| query_ms_token / query_ms_token_captured_at_ms | 主站真实网络观察，或主站实际 Cookie；独立保存，不塞回 Cookie |
+| keys / ticket_guard_server_data | 同会话的主站/创作者中心 SDK localStorage / 当前标签页响应；公私钥配对校验 |
+| dtrait_blob / session_dtrait_path | document-start 钩子捕获的设备采样 |
+| ua / browser_profile | 实际浏览器 UA、平台、屏幕与语言 |
+| sec_uid / nickname / unique_id | 创作者中心当前登录账号接口，不推断聊天对象身份 |
 
-如果只拿到 Cookie，账号仍可作为「仅接收」导入；要发送私信，必须同时具有
-`ticket`、`ts_sign`、`client_cert` 和 `private_key`。
-
-## 多账号
-
-同一 Chrome 配置的普通窗口共享 Cookie。账号 A/B 应使用「普通窗口 + 无痕窗口」或两个
-独立 Chrome 配置；无痕窗口需在扩展详情中开启「在无痕模式下启用」。导入前核对弹窗中的
-账号昵称和 sessionid 指纹，两个账号的指纹应不同。
-
-## 权限与数据流
-
-- `cookies` + `host_permissions`：读取当前 Cookie store 的 douyin.com Cookie。为了覆盖登录
-  子域写入的 server_data，只跨子域补取精确字段 `bd_ticket_guard_server_data`，不会合并其他 Cookie。
-- `webRequest`：只读取 douyin.com 登录响应的 `bd-ticket-guard-server-data` 头，
-  按普通/无痕 Cookie store 隔离存在 `storage.session`，浏览器会话结束即清空。
-- `scripting` + `activeTab` + `tabs`：读取当前 creator 页面 localStorage 与账号信息。
-- `storage`：按普通/无痕 Cookie store 保存非敏感账号指纹，用于切号提醒。
-
-扩展不把凭证上传到第三方；内容仅在本地弹窗生成，复制由用户触发。
+扩展权限不增加。凭证只在浏览器本地生成，复制由用户触发；不要把导入串发到聊天、日志或工单。普通窗口共享登录态，多账号请使用独立配置或分离的普通/无痕 Cookie store。

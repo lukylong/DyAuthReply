@@ -2119,6 +2119,11 @@ class HttpProtocolTransport(AccountTransport):
                 f"msg={result.status_msg!r}"
             )
 
+        # 7467 只限制当前收件人的陌生人消息配额，不代表整个账号受限。
+        # 本条仍然失败，即便分配了消息 ID 也不能当作成功或自动重试。
+        if result.biz_status_code == 7467:
+            raise RuntimeError(_format_send_business_failure(result, log_tag))
+
         # 显式风控优先于成功状态和消息 ID。服务端分配了 ID 不代表
         # 消息已送达；保留异常类型，让 worker 切到 receive_only 并停止发送。
         if result.biz_raw_check_code == 2:

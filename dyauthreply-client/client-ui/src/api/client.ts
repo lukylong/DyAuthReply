@@ -566,6 +566,9 @@ export interface QuickAuthComponent {
 export interface QuickAuthCompleteness {
   cookie: boolean;
   scoped_cookies: boolean;
+  main_uifid?: boolean;
+  main_fingerprint?: boolean;
+  sdk_token?: boolean;
   server_data: boolean;
   private_key: boolean;
   dtrait: boolean;

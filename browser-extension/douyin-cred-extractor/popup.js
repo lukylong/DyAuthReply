@@ -18,6 +18,16 @@ const SESSION_DTRAIT_STORAGE_PREFIX = 'session_dtrait_';
 
 const $ = (id) => document.getElementById(id);
 
+async function executeBounded(details) {
+  let timer;
+  try {
+    return await Promise.race([
+      chrome.scripting.executeScript({...details,injectImmediately:true}),
+      new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('页面脚本执行超时，请完成页面加载或验证后重试')),8000);}),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
 function showToast(msg) {
   const t = $('toast');
   t.textContent = msg;
@@ -229,7 +239,7 @@ function accountFingerprint(cookie) {
 
 /** 在页面上下文读取：两个 localStorage 键 + UA + best-effort 当前登录账号信息。 */
 async function collectPageInfo(tabId) {
-  const [{ result } = {}] = await chrome.scripting.executeScript({
+  const [{ result } = {}] = await executeBounded({
     target: { tabId },
     // MAIN 世界：可读取页面 window.__INITIAL_STATE__ 等全局状态（ISOLATED 世界读不到）；
     // localStorage / DOM 在两个世界都可读，故切到 MAIN 不影响 keys/web_protect 抓取。
@@ -381,14 +391,14 @@ async function collectPageInfo(tabId) {
  */
 async function fetchLoggedInAccount(tabId) {
   try {
-    const [{ result } = {}] = await chrome.scripting.executeScript({
+    const [{ result } = {}] = await executeBounded({
       target: { tabId },
       world: 'MAIN', // MAIN 世界才能用页面的 cookie 发同域请求
       func: async () => {
         try {
           const resp = await fetch(
             'https://creator.douyin.com/web/api/media/user/info/',
-            { credentials: 'include' },
+            { credentials: 'include', signal: AbortSignal.timeout(5000) },
           );
           if (!resp.ok) return { error: `HTTP ${resp.status}` };
           const data = await resp.json();
@@ -631,244 +641,106 @@ function flashOk(msg) {
 
 let grabbing = false;
 
-async function grab() {
-  if (grabbing) return;
-  grabbing = true;
-  const btn = $('grabBtn');
-  btn.disabled = true;
-  btn.classList.add('loading');
-  btn.textContent = '抓取中…';
-  $('okBanner').hidden = true;
+async function signingPageInfo(tabId) {
+  const [{result} = {}] = await executeBounded({target:{tabId},world:'MAIN',func:()=>{
+    const read=names=>names.map(n=>localStorage.getItem(n)||'').filter(Boolean);
+    return {origin:location.hostname,ua:navigator.userAgent,
+      keys:read(['security-sdk/s_sdk_crypt_sdk_new','security-sdk/s_sdk_crypt_sdk']),
+      tickets:read(['security-sdk/s_sdk_sign_data_key/web_protect_new','security-sdk/s_sdk_sign_data_key_new/web_protect','security-sdk/s_sdk_sign_data_key/web_protect']),
+      dtrait_blob:String(window.__dyauthreplyLatestDtraitBlob || ''),
+      dtrait_path:String(window.__dyauthreplyLatestDtraitPath || ''),
+      browser_profile:{platform:navigator.platform,width:screen.width,height:screen.height,language:navigator.language,cpu_core_num:navigator.hardwareConcurrency,device_memory:navigator.deviceMemory,timezone_name:Intl.DateTimeFormat().resolvedOptions().timeZone,referer:'https://www.douyin.com/jingxuan',geo:[innerWidth,innerHeight,outerWidth,outerHeight,screen.availWidth,screen.availHeight,screen.width,screen.height]}};
+  }});
+  return result || {};
+}
 
-  try {
-    // 先清空旧账号残留，再抓——切号时不会出现新账号卡片配旧 cookie 的误导画面
-    // （放在 try 内：任何异常都能被 catch，finally 一定复位按钮，避免卡死”点了没反应”）
-    clearResult();
-    $('tabHint').hidden = true;
-
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab || !tab.url || !/:\/\/[^/]*douyin\.com/.test(tab.url)) {
-      $('tabHint').textContent =
-        '当前标签页不是抖音页面。请切换到已登录的 douyin.com 标签页（creator.douyin.com 或 www.douyin.com）再抓取。';
-      $('tabHint').hidden = false;
-      return;
-    }
-
-    // creator 域仍用于读取账号身份与 keys；server_data 则从全 douyin.com Cookie 存储补取。
-    const url = new URL(tab.url);
-    if (url.hostname !== 'creator.douyin.com') {
-      $('tabHint').innerHTML =
-        '<b>⚠️ 建议在 creator.douyin.com 抓取</b><br>' +
-        `当前页面：<b>${url.hostname}</b><br><br>` +
-        '<b style="color:#ff6b00;">强烈建议</b>切换到 <b>creator.douyin.com</b> 再抓取，原因：<br>' +
-        '1. <b>keys</b> 需从 creator 页面 localStorage 读取（发送私信必需）<br>' +
-        '2. 避免多域名 Cookie 混乱<br>' +
-        '3. 后台对接的是 creator 站点<br><br>' +
-        '<b>推荐页面</b>：<a href="https://creator.douyin.com/creator-micro/data/following/chat" target="_blank">creator.douyin.com/creator-micro/data/following/chat</a>（私信管理）<br>' +
-        '<br>如果仅做「仅接收」导入（不发送私信），可继续抓取。';
-      $('tabHint').hidden = false;
-      // 不 return，允许继续抓取，但给出警告
-    }
-
-    $('tabHint').hidden = true;
-
-    const cookieStoreId = await resolveCookieStoreId(tab);
-    if (!cookieStoreId) {
-      $('tabHint').textContent =
-        '无法识别当前窗口的 cookie 存储。请到 chrome://extensions 重新加载本扩展；若仍失败，请更新 Chrome/Edge 到较新版本。';
-      $('tabHint').hidden = false;
-      return;
-    }
-
-    await loadLastFingerprint(cookieStoreId);
-
-    const [cookie, cookieHeaders, ls, diag, capturedServerData, capturedDtrait] = await Promise.all([
-      collectCookies(tab.url, cookieStoreId),
-      collectScopedCookieHeaders(cookieStoreId),
-      collectPageInfo(tab.id),
-      diagnoseSessionIds(tab.url, cookieStoreId),
-      loadCapturedServerData(cookieStoreId),
-      loadCapturedSessionDtrait(cookieStoreId),
-    ]);
-
-    const fp = accountFingerprint(cookie);
-    const uidTt = extractCookieField(cookie, 'uid_tt');
-    const serverData = chooseNewestServerData(
-      ticketGuardServerDataFromCookie(cookie),
-      capturedServerData,
-    );
-
-    // ===== v2.0.0 核心修复：通过 creator API 获取真实登录账号信息 =====
-    const isCreator = /creator\.douyin\.com/.test(tab.url);
-    let apiAccount = null;
-    if (isCreator) {
-      console.log('[扩展v2.0] 在 creator 域名，调用 API 获取账号信息...');
-      apiAccount = await fetchLoggedInAccount(tab.id);
-      if (apiAccount && !apiAccount.error) {
-        console.log('[扩展v2.0] API 返回账号信息:', {
-          nickname: apiAccount.nickname,
-          uid: apiAccount.uid,
-          sec_uid: (apiAccount.sec_uid || '').slice(0, 20) + '...',
-          unique_id: apiAccount.unique_id,
-        });
-        // API 返回的信息比页面遍历可靠，优先使用
-        ls.account = {
-          ...ls.account,           // 保留页面遍历的兜底字段
-          nickname: apiAccount.nickname || (ls.account && ls.account.nickname) || '',
-          sec_uid: apiAccount.sec_uid || (ls.account && ls.account.sec_uid) || '',
-          unique_id: apiAccount.unique_id || (ls.account && ls.account.unique_id) || '',
-          uid: apiAccount.uid || (ls.account && ls.account.uid) || '',
-          avatar: apiAccount.avatar || (ls.account && ls.account.avatar) || '',
-          _source: 'api',          // 标记来源，便于调试和 UI 显示
-        };
-      } else {
-        console.warn('[扩展v2.0] API 调用失败，回退到页面推断:', apiAccount && apiAccount.error);
-        if (ls.account) ls.account._source = 'page';
-      }
-    } else {
-      console.log('[扩展v2.0] 非 creator 域名，使用页面推断（可能不准确）');
-      if (ls.account) ls.account._source = 'page';
-    }
-
-    // uid_tt 交叉验证说明：
-    // cookie uid_tt 是一个 hex 哈希（如 4ad5265ba88f...），API uid 是数字 ID（如 80549827440），
-    // 两者格式不同但属于同一账号，不能直接对比。
-    // 真正可靠的验证已由 API 本身完成：API 用当前 cookie 请求，返回的就是 cookie 对应的账号。
-    const identityMismatch = false;
-
-    const currentNickname = (ls.account && ls.account.nickname) || '';
-
-    if (tab.incognito && !fp) {
-      $('tabHint').innerHTML =
-        '<b style="color:var(--bad)">无痕窗口未读到 sessionid</b><br>' +
-        '请确认：① 已在无痕窗口登录 creator.douyin.com；② 在 chrome://extensions 为本扩展勾选<b>「在无痕模式下启用」</b>；③ 在<b>无痕窗口内</b>点击扩展图标（不是在普通窗口点）。';
-      $('tabHint').hidden = false;
-      return;
-    }
-
-    if (diag.sameAcrossStores) {
-      $('tabHint').innerHTML =
-        '<b style="color:var(--bad)">⚠️ 普通窗口与无痕窗口 sessionid 完全相同</b><br>' +
-        '这说明浏览器里实际只有<b>一套</b>登录态，不是两个独立账号。常见原因：<br>' +
-        '1. 两个窗口其实登录的是<b>同一个</b>抖音号<br>' +
-        '2. 第二个窗口是<b>普通窗口</b>而不是无痕（同一 Chrome 配置只能同时保留一个 douyin sessionid）<br>' +
-        '3. 扩展未在无痕启用，抓到的仍是普通窗口 cookie<br><br>' +
-        '<b>正确做法</b>：账号 A 用普通窗口，账号 B 必须用<b>无痕窗口</b>（或另一个 Chrome 用户配置），并在 chrome://extensions 勾选「在无痕模式下启用」。<br>' +
-        '下方「各窗口 sessionid」应显示<b>两个不同的前缀</b>，相同则请勿导入。';
-      $('tabHint').hidden = false;
-    }
-
-    // 判断是否切换了账号
-    const isSwitched = lastFingerprint && fp && lastFingerprint !== fp;
-
-    console.log('[扩展v2.0] 账号切换检测:', {
-      lastFingerprint,
-      currentFingerprint: fp,
-      isSwitched,
-      nickname: currentNickname,
-      source: ls.account && ls.account._source,
-    });
-
-    // 检测账号切换：Cookie 指纹变了
-    // 如果有 API 验证，切换警告可以弱化（API 数据是可靠的）；身份不一致时强警告
-    if (identityMismatch) {
-      $('tabHint').innerHTML =
-        '<b style="color:var(--bad)">⚠️ 身份不一致：Cookie 和 API 返回的账号不同</b><br>' +
-        `API 返回 uid: <b>${esc(apiAccount.uid)}</b><br>` +
-        `Cookie uid_tt: <b>${esc(uidTt)}</b><br><br>` +
-        '这可能是浏览器缓存导致。<b>请硬刷新页面（Ctrl+Shift+R / Cmd+Shift+R）后重试</b>。';
-      $('tabHint').hidden = false;
-      showToast('⚠️ 身份不一致，请刷新页面');
-    } else if (isSwitched && (!apiAccount || apiAccount.error)) {
-      // 指纹变了且没有 API 验证——需要强警告
-      $('tabHint').innerHTML =
-        '<b>⚠️ 检测到账号切换</b><br>' +
-        `Cookie 指纹已变化：<span class="fp">${esc(lastFingerprint)}</span> → <span class="fp">${esc(fp)}</span><br>` +
-        (currentNickname ? `当前识别昵称：<b>${esc(currentNickname)}</b><br>` : '') +
-        '<br><b style="color:#ff6b00;">注意：账号信息来自页面推断，可能不准确</b><br>' +
-        '<br><b>请核对以下信息是否正确：</b><br>' +
-        '1. 上方显示的<b>昵称</b>是否是新账号的？<br>' +
-        '2. 上方显示的<b>抖音号</b>是否是新账号的？<br>' +
-        '3. 去<b>抖音页面</b>本身查看个人中心，核对昵称<br>' +
-        '<br><b>如果信息不正确，请：</b><br>' +
-        '• 硬刷新（Ctrl+Shift+R / Cmd+Shift+R）<br>' +
-        '• 或关闭标签页重新打开新账号<br>' +
-        '<br><b style=”color:#2ecc71;”>核对无误后再复制导入串！</b>';
-      $('tabHint').hidden = false;
-      showToast('检测到账号切换，请核对信息');
-    } else if (isSwitched && apiAccount && !apiAccount.error) {
-      // 指纹变了但有 API 验证——弱提示
-      $('tabHint').innerHTML =
-        '<b style="color:#2ecc71;">✓ 检测到账号切换，已通过 API 验证</b><br>' +
-        `Cookie 指纹已变化：<span class="fp">${esc(lastFingerprint)}</span> → <span class="fp">${esc(fp)}</span><br>` +
-        `当前账号：<b>${esc(currentNickname)}</b>（已通过 creator API 确认）`;
-      $('tabHint').hidden = false;
-    }
-
-    // 记录当前指纹和昵称（持久化到 storage）
-    lastFingerprint = fp;
-    lastNickname = currentNickname;
-    saveFingerprint(fp, currentNickname, cookieStoreId);
-
-    $('cookie').value = cookie;
-    $('web_protect').value = ls.web_protect || serverData.raw;
-    $('keys').value = ls.keys;
-    $('bundle').value = buildBundle({
-      cookie,
-      cookie_headers: cookieHeaders,
-      ticket_guard_server_data: serverData.raw,
-      web_protect: ls.web_protect,
-      keys: ls.keys,
-      ua: ls.ua,
-      sec_uid: ls.account?.sec_uid || '',      // 新增
-      nickname: ls.account?.nickname || '',    // 新增
-      unique_id: ls.account?.unique_id || '',  // 新增
-      dtrait_blob: ls.dtrait_blob || '',
-      session_dtrait: capturedDtrait.value,
-      session_dtrait_path: capturedDtrait.path,
-    });
-
-    setBadge($('cookieStatus'), ...validateCookie(cookie));
-    setBadge($('wpStatus'), ...validateTicketSource(ls.web_protect, serverData));
-    setBadge($('keysStatus'), ...validateJsonField(ls.keys, 'ec_privateKey'));
-
-    $('result').hidden = false;
-
-    let host = tab.url;
+async function waitLoaded(tabId) {
+  // Video/stream requests can keep tab.status="loading" after the SDK is usable.
+  // Wait for an initialized document, not every media resource to finish.
+  const deadline=Date.now()+20000;
+  while(Date.now()<deadline){
+    const tab=await chrome.tabs.get(tabId);
+    if(tab.status==='complete')return;
     try {
-      host = new URL(tab.url).host;
-    } catch {
-      /* ignore */
-    }
-    renderAccount(ls.account, fp, uidTt, isSwitched);
-    renderStatus({
-      host,
-      incognito: tab.incognito,
-      cookieStoreId,
-      diagRows: diag.rows,
-    });
-    const who = ls.account && ls.account.nickname ? ls.account.nickname : (fp || '');
-    const srcLabel = ls.account && ls.account._source === 'api' ? '（API 验证）' : '（页面推断）';
-    flashOk(who ? `抓取成功：${who} ${srcLabel}` : '抓取成功（未读到 sessionid）');
-    showToast(who ? `已抓取：${who}` : '已抓取，但未读到 sessionid');
+      const [{result}={}]=await executeBounded({target:{tabId},func:()=>({ready:document.readyState,host:location.hostname})});
+      if(['interactive','complete'].includes(result?.ready)&&['creator.douyin.com','www.douyin.com'].includes(result?.host))return;
+    } catch { /* A just-created document may not be available yet. */ }
+    await new Promise(r=>setTimeout(r,500));
+  }
+  throw new Error('页面初始化超时，请检查主站是否需要验证');
+}
 
-    // 新流程优先用登录响应 server_data，旧 web_protect 仅作兼容。
-    if (!(serverData.data.ticket || ls.web_protect) || !ls.keys) {
-      $('tabHint').innerHTML =
-        '发送凭证不完整：需要 <b>bd_ticket_guard_server_data + keys</b>。' +
-        '请重新登录抖音，再打开 <b>creator.douyin.com 私信页</b>重新抓取；' +
-        '仅 Cookie 的导入仍可用于「仅接收」。';
-      $('tabHint').hidden = false;
+async function observations(storeId, tabId, since) {
+  const keys=['ticket','token','dtrait'].map(kind=>`dy_capture_v2_${storeId}_${tabId}_www.douyin.com_${kind}`);
+  const values=await chrome.storage.session.get(keys);const result={};
+  for(let i=0;i<keys.length;i++){
+    const v=values[keys[i]];
+    if(v?.storeId===storeId&&v.tabId===tabId&&v.sourceHost==='www.douyin.com'&&v.capturedAt>=since)result[['ticket','token','dtrait'][i]]=v;
+  }
+  return result;
+}
+
+async function grab() {
+  if(grabbing)return;grabbing=true;const btn=$('grabBtn');btn.disabled=true;btn.classList.add('loading');btn.textContent='初始化主站并采集中…';
+  const owned=[];
+  try {
+    clearResult();$('tabHint').hidden=true;
+    const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
+    const host=tab?.url ? new URL(tab.url).hostname : '';
+    if(!tab || !['www.douyin.com','creator.douyin.com'].includes(host))throw new Error('请在已登录的抖音主站或创作者中心打开扩展');
+    const storeId=await resolveCookieStoreId(tab);if(!storeId)throw new Error('未识别到当前窗口的 Cookie 存储');
+    let creator=tab;
+    if(host!=='creator.douyin.com'){
+      creator=await chrome.tabs.create({windowId:tab.windowId,active:false,url:'https://creator.douyin.com/creator-micro/data/following/chat'});owned.push(creator.id);await waitLoaded(creator.id);
     }
-  } catch (e) {
-    $('tabHint').textContent = `抓取失败：${e && e.message ? e.message : e}`;
-    $('tabHint').hidden = false;
-    showToast('抓取失败');
+    let account=null;
+    for(let i=0;i<4;i++){
+      account=await fetchLoggedInAccount(creator.id);
+      if(account?.sec_uid && account.nickname && !account.error)break;
+      await new Promise(r=>setTimeout(r,750));
+    }
+    if(!account?.sec_uid || !account.nickname || account.error)throw new Error('创作者中心账号资料校验失败，请先确认该页面已登录；本次未生成凭证');
+    const initialCreator=await cookieHeaderForUrl('https://creator.douyin.com/',storeId);
+    const sid=DyCapture.session(initialCreator);if(!sid)throw new Error('创作者中心未取得登录会话');
+    const since=Date.now();
+    const main=host==='www.douyin.com'?tab:await chrome.tabs.create({windowId:tab.windowId,active:false,url:'https://www.douyin.com/user/self?from_tab_name=main'});if(main.id!==tab.id)owned.push(main.id);await waitLoaded(main.id);
+    if(await resolveCookieStoreId(await chrome.tabs.get(main.id))!==storeId)throw new Error('主站页面与当前窗口不在同一 Cookie 存储');
+    const deadline=Date.now()+30000;let selected=null;let missing=[];
+    while(Date.now()<deadline){
+      const [headers,page,creatorPage,seen]=await Promise.all([collectScopedCookieHeaders(storeId),signingPageInfo(main.id),signingPageInfo(creator.id),observations(storeId,main.id,since)]);
+      if(page.origin!=='www.douyin.com')throw new Error('主站跳转到登录或验证页面，请完成主站登录后重试');
+      const token=seen.token?.value || DyCapture.cookie(headers['www.douyin.com'],'msToken') || DyCapture.cookie(headers['www.douyin.com'],'msToken_ss');
+      missing=DyCapture.missing(headers,token,sid);
+      if(creatorPage.origin!=='creator.douyin.com')throw new Error('创作者中心页面已跳转，请重新采集');
+      if(!page.dtrait_blob&&creatorPage.dtrait_blob){page.dtrait_blob=creatorPage.dtrait_blob;page.dtrait_path=creatorPage.dtrait_path;}
+      if(!page.dtrait_blob)missing.push('浏览器设备采样');
+      const material=await DyCapture.selectMaterial([...(page.keys || []),...(creatorPage.keys || [])],[seen.ticket?.value,...(page.tickets || []),...(creatorPage.tickets || [])],headers['www.douyin.com']);
+      if(!material)missing.push('当前会话配套票据/签名密钥');
+      if(!missing.length){selected={headers,page,seen,token,material};break;}
+      $('tabHint').textContent=`正在等待浏览器生成：${missing.join('、')}。只采集真实值，不使用随机补值。`;$('tabHint').hidden=false;
+      await new Promise(r=>setTimeout(r,1000));
+    }
+    if(!selected)throw new Error(`采集未完成：${missing.join('、')}。请在主站完成加载/验证后重试；本次未生成导入串`);
+    const {headers,page,seen,token,material}=selected;
+    const finalCreator=await cookieHeaderForUrl('https://creator.douyin.com/',storeId);
+    if(DyCapture.session(finalCreator)!==sid)throw new Error('采集期间切换了账号，请重新抓取');
+    const payload={capture_version:2,cookie:headers['www.douyin.com'],cookie_headers:headers,
+      query_ms_token:token,query_ms_token_captured_at_ms:seen.token?.capturedAt || Date.now(),
+      browser_profile:page.browser_profile,ticket_guard_server_data:material.serverData,web_protect:material.serverData,
+      keys:material.keys,ua:page.ua,sec_uid:account.sec_uid,nickname:account.nickname,unique_id:account.unique_id,
+      dtrait_blob:page.dtrait_blob,session_dtrait:seen.dtrait?.value || '',session_dtrait_path:page.dtrait_path || seen.dtrait?.path || ''};
+    const packed='DYCRED1.'+btoa(unescape(encodeURIComponent(JSON.stringify(payload)))).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
+    if(packed.length>1048576)throw new Error('采集结果超出大小限制');
+    $('bundle').value=packed;$('cookie').value=payload.cookie;$('web_protect').value=material.serverData;$('keys').value=material.keys;
+    setBadge($('cookieStatus'),'ok','主站/会话/SDK 信息已核对');setBadge($('wpStatus'),'ok','与主站签名匹配');setBadge($('keysStatus'),'ok','与票据公钥匹配');
+    renderAccount({...account,_source:'api'},accountFingerprint(payload.cookie),extractCookieField(payload.cookie,'uid_tt'),false);
+    $('result').hidden=false;$('tabHint').hidden=true;
+    flashOk('主站信息、分域会话、SDK Token 和签名材料已采集；发送能力仍以实际回执为准');
+  } catch(e) {
+    clearResult();$('tabHint').textContent=e instanceof Error?e.message:String(e);$('tabHint').hidden=false;
   } finally {
-    btn.disabled = false;
-    btn.classList.remove('loading');
-    btn.textContent = '重新抓取';
-    grabbing = false;
+    for(const id of owned)await chrome.tabs.remove(id).catch(()=>{});
+    grabbing=false;btn.disabled=false;btn.classList.remove('loading');btn.textContent='补齐主站并抓取登录态';
   }
 }
 

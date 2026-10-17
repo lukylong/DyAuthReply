@@ -98,6 +98,21 @@ pub fn classify_live_delivery(
     expected_client_msg_id: &str,
 ) -> DeliveryClass {
     let historical = classify_delivery(http_status, result, expected_client_msg_id);
+    // 7467 is the recipient's stranger-message quota, not an account-wide
+    // authentication or sending restriction. Reject this message even if an ID
+    // was allocated; never report delivery or retry it automatically.
+    if http_status.is_some_and(|status| (200..300).contains(&status))
+        && result.outer_status_present
+        && result.status_code == 0
+        && result.has_response_body
+        && result.has_inner_response
+        && result.business_payload_present
+        && result.business_payload_valid
+        && result.biz_status_code == 7467
+        && historical != DeliveryClass::LoginExpired
+    {
+        return DeliveryClass::BusinessRejected;
+    }
     let valid_risk_marker = result.has_response_body
         && result.has_inner_response
         && result.business_payload_present
@@ -114,6 +129,18 @@ pub fn classify_live_delivery(
         );
     if valid_risk_marker && (http_status == Some(403) || accepted_envelope) {
         DeliveryClass::RiskControlled
+    } else if accepted_envelope
+        && result.business_payload_present
+        && result.business_payload_valid
+        && result.biz_status_code == 8101
+        && result.server_msg_id != 0
+        && result.client_msg_id == expected_client_msg_id
+        && !expected_client_msg_id.is_empty()
+    {
+        // Observed 8101/raw=1 allocates an ID but returns {} to the recipient.
+        // Do not count sender-only acknowledgements as delivery or latch the
+        // entire account. The frozen historical classifier stays unchanged.
+        DeliveryClass::BusinessRejected
     } else {
         historical
     }
@@ -138,6 +165,62 @@ mod tests {
             business_payload_present: false,
             business_payload_valid: true,
         }
+    }
+
+    #[test]
+    fn live_sender_only_ack_is_not_success_or_account_wide_risk() {
+        let mut result = complete_response();
+        result.business_payload_present = true;
+        result.biz_status_code = 8101;
+        result.biz_raw_check_code = 1;
+        assert_eq!(
+            classify_delivery(Some(200), &result, "client"),
+            DeliveryClass::Delivered
+        );
+        assert_eq!(
+            classify_live_delivery(Some(200), &result, "client"),
+            DeliveryClass::BusinessRejected
+        );
+        result.biz_raw_check_code = 2;
+        assert_eq!(
+            classify_live_delivery(Some(200), &result, "client"),
+            DeliveryClass::RiskControlled
+        );
+    }
+    #[test]
+    fn recipient_limit_is_not_account_risk() {
+        let mut response = complete_response();
+        response.business_payload_present = true;
+        response.biz_status_code = 7467;
+        response.biz_raw_check_code = 2;
+        response.biz_status_text =
+            "给对方发送的消息已达上限，对方回复或互关后才能继续发送消息".into();
+        for server_id in [0, 12345] {
+            response.server_msg_id = server_id;
+            assert_eq!(
+                classify_live_delivery(Some(200), &response, "client"),
+                DeliveryClass::BusinessRejected
+            );
+        }
+        assert_eq!(
+            classify_live_delivery(Some(401), &response, "client"),
+            DeliveryClass::LoginExpired
+        );
+        assert_eq!(
+            classify_live_delivery(Some(503), &response, "client"),
+            DeliveryClass::Inconclusive
+        );
+        response.biz_status_code = 7911;
+        assert_eq!(
+            classify_live_delivery(Some(200), &response, "client"),
+            DeliveryClass::RiskControlled
+        );
+        response.biz_status_code = 7467;
+        response.business_payload_valid = false;
+        assert_ne!(
+            classify_live_delivery(Some(200), &response, "client"),
+            DeliveryClass::BusinessRejected
+        );
     }
 
     #[test]

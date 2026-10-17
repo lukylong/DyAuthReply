@@ -394,3 +394,127 @@ mod tests {
         assert_eq!(page.messages[0].sender_uid, 44);
     }
 }
+
+/// Bounded current-conversation read, matching the creator UI's command 301.
+/// # Errors
+/// Rejects invalid route identifiers before encoding.
+pub fn encode_conversation_history(id: &str, short: u64) -> Result<Vec<u8>, ProtocolError> {
+    if id.is_empty()
+        || id.len() > 256
+        || id.chars().any(char::is_control)
+        || short == 0
+        || short > i64::MAX as u64
+    {
+        return Err(ProtocolError::InvalidRequest("conversation history scope"));
+    }
+    let mut payload = Vec::new();
+    wire::append_string_field(&mut payload, 1, id)?;
+    for (field, value) in [(2, 1), (3, short), (4, 1), (5, 0), (6, 20)] {
+        wire::append_varint_field(&mut payload, field, value)?;
+    }
+    let mut body = Vec::new();
+    wire::append_bytes_field(&mut body, 301, &payload)?;
+    super::creator::envelope(
+        301,
+        10004,
+        &body,
+        &[
+            ("aid_new", ""),
+            ("app_name", "douyin_creator"),
+            ("is-retry", "0"),
+        ],
+    )
+}
+
+/// Decode only the requested direct conversation; no cursor/automation changes.
+/// # Errors
+/// Rejects malformed envelopes, excess rows and foreign conversation messages.
+pub fn decode_conversation_history(
+    raw: &[u8],
+    id: &str,
+    short: u64,
+) -> Result<InboxPage, ProtocolError> {
+    let outer = wire::decode_message(raw)?;
+    let status_code = if outer.iter().any(|f| f.number == 3) {
+        i64::from_le_bytes(num(&outer, 3)?.to_le_bytes())
+    } else {
+        -1
+    };
+    let mut page = InboxPage {
+        status_code,
+        status_message: text(&outer, 4)?,
+        messages: Vec::new(),
+        next_cursor: 0,
+        wrapper_present: false,
+    };
+    let Some(body) = bytes(&outer, 6)? else {
+        return Ok(page);
+    };
+    let body = wire::decode_message(body)?;
+    let Some(history) = bytes(&body, 301)? else {
+        return Ok(page);
+    };
+    let history = wire::decode_message(history)?;
+    page.wrapper_present = true;
+    for row in history.iter().filter(|f| f.number == 1) {
+        if page.messages.len() >= 200 {
+            return Err(ProtocolError::InvalidRequest("conversation history count"));
+        }
+        if let Some(message) = decode_message(wire::expect_bytes(*row)?)? {
+            if message.conversation_id != id || message.conversation_short_id != short {
+                return Err(ProtocolError::InvalidRequest(
+                    "conversation history scope mismatch",
+                ));
+            }
+            page.messages.push(message);
+        }
+    }
+    Ok(page)
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    fn response(id: &str, short: u64, rows: usize) -> Vec<u8> {
+        let mut message = Vec::new();
+        wire::append_string_field(&mut message, 1, id).unwrap();
+        wire::append_varint_field(&mut message, 3, 100).unwrap();
+        wire::append_varint_field(&mut message, 5, short).unwrap();
+        wire::append_string_field(&mut message, 8, r#"{"text":"synthetic"}"#).unwrap();
+        let mut history = Vec::new();
+        for _ in 0..rows {
+            wire::append_bytes_field(&mut history, 1, &message).unwrap();
+        }
+        let mut body = Vec::new();
+        wire::append_bytes_field(&mut body, 301, &history).unwrap();
+        let mut outer = Vec::new();
+        wire::append_varint_field(&mut outer, 3, 0).unwrap();
+        wire::append_bytes_field(&mut outer, 6, &body).unwrap();
+        outer
+    }
+    #[test]
+    fn history_is_scoped_bounded_and_never_treated_as_an_inbox_cursor() {
+        let page =
+            decode_conversation_history(&response("0:1:10:20", 30, 1), "0:1:10:20", 30).unwrap();
+        assert!(page.wrapper_present);
+        assert_eq!(page.messages.len(), 1);
+        assert_eq!(page.next_cursor, 0);
+        assert_eq!(page.messages[0].text.as_deref(), Some("synthetic"));
+        assert!(decode_conversation_history(&response("foreign", 30, 1), "0:1:10:20", 30).is_err());
+        assert!(
+            decode_conversation_history(&response("0:1:10:20", 31, 1), "0:1:10:20", 30).is_err()
+        );
+        assert!(
+            decode_conversation_history(&response("0:1:10:20", 30, 201), "0:1:10:20", 30).is_err()
+        );
+        assert!(
+            !decode_conversation_history(&[24, 0], "0:1:10:20", 30)
+                .unwrap()
+                .wrapper_present
+        );
+        assert!(encode_conversation_history("", 30).is_err());
+        let encoded = encode_conversation_history("0:1:10:20", 30).unwrap();
+        let fields = wire::decode_message(&encoded).unwrap();
+        assert_eq!(num(&fields, 1).unwrap(), 301);
+    }
+}

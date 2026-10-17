@@ -8,13 +8,13 @@
 </head>
 <body>
   <header class="hd">
-    <h1>抖音登录态提取器 <span style="font-size:11px;color:#9aa0aa;font-weight:400;">v2.2.0</span></h1>
+    <h1>抖音登录态提取器 <span style="font-size:11px;color:#9aa0aa;font-weight:400;">v2.3.1</span></h1>
     <p class="sub">DyAuthReply · 导入登录态助手</p>
   </header>
 
   <div id="tabHint" class="hint hint-warn" hidden></div>
 
-  <button id="grabBtn" class="btn btn-primary">抓取当前页面登录态</button>
+  <button id="grabBtn" class="btn btn-primary">补齐主站并抓取登录态</button>
 
   <div id="okBanner" class="hint hint-ok" hidden></div>
 
@@ -76,17 +76,17 @@
   <div id="toast" class="toast" hidden></div>
 
   <footer class="ft">
-    <p><b style="color: #ff6b00;">⚠️ 统一规范：只在 creator.douyin.com 抓取</b></p>
+    <p><b style="color: #ff6b00;">在已登录的创作者中心或抖音主站抓取</b></p>
     <p><b>推荐页面</b>：<a href="https://creator.douyin.com/creator-micro/data/following/chat" target="_blank" style="color:#2ecc71;">creator.douyin.com/creator-micro/data/following/chat</a>（私信管理）</p>
     <p><b style="color: #ff6b00;">同机双账号：必须普通 + 无痕（或两个 Chrome 配置）</b></p>
     <p>Chrome 同一配置下，所有<b>普通窗口</b>共享一套 douyin.com Cookie——两个普通标签页不可能同时是两个号。
        第二个号请用<b>无痕窗口</b>，并在 chrome://extensions 勾选「在无痕模式下启用」。
-       抓取后核对下方「各窗口 sessionid」前缀必须不同。</p>
-    <p><b>server_data</b> 由登录响应下发，<b>keys</b> 从 creator 页面读取。
-       缺失任一项时，请重新登录后在 <b>creator.douyin.com</b> 重新抓取。</p>
-    <p>插件<b>只读取、不修改</b>任何数据；keys（私钥）在浏览器里是固定的，多次抓取值不变。</p>
+       抓取后核对账号昵称与 sessionid 指纹，避免覆盖其他账号。</p>
+    <p>会在同一浏览器窗口临时打开主站，采集主站 UIFID、指纹、SDK Token 和配套密钥。只复制完整导入串，单独 Cookie 不包含全部发送材料。</p>
+    <p>若有缺项或账号不一致，本次不会生成导入串。签名密钥可能随登录变化，不能混用其他页面或旧账号的数据。</p>
   </footer>
 
+  <script src="capture-core.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

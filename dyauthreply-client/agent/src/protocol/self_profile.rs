@@ -164,6 +164,15 @@ impl NativeAccountSession {
         }
         let fingerprint = Fingerprint::new(&self.credentials.user_agent);
         let mut params = fingerprint.params();
+        if self.credentials.captured_web {
+            let captured =
+                super::super::im::captured_profile_fields(&self.credentials.browser_profile);
+            for (key, value) in &mut params {
+                if let Some(actual) = captured.get(key) {
+                    value.clone_from(actual);
+                }
+            }
+        }
         let webid = (0..19)
             .map(|_| char::from(b'0' + rand::thread_rng().gen_range(0..10)))
             .collect::<String>();
@@ -468,9 +477,7 @@ fn unsigned(value: Option<&Value>) -> u64 {
 
 fn parse_works(payload: &Value, owner: &VerifiedSelf) -> Result<WorksPage, AccountRequestError> {
     const STEP: &str = "self_works";
-    if payload.get("status_code").and_then(Value::as_i64) != Some(0)
-        && payload.get("aweme_list").is_none()
-    {
+    if payload.get("status_code").and_then(Value::as_i64) != Some(0) {
         return Err(AccountRequestError::Business {
             step: STEP,
             code: payload.get("status_code").and_then(Value::as_i64),
@@ -539,18 +546,45 @@ fn parse_works(payload: &Value, owner: &VerifiedSelf) -> Result<WorksPage, Accou
 }
 /// Every row must name this account as author; a creator list never serves peers.
 fn check_work_owner(row: &Value, owner: &VerifiedSelf) -> Result<(), AccountRequestError> {
-    let sec_uid = row.pointer("/author/sec_uid").and_then(Value::as_str);
-    let user_id = row
-        .get("author_user_id")
-        .or_else(|| row.pointer("/author/uid"))
-        .and_then(identifier);
-    if sec_uid.is_none() && user_id.is_none() {
+    let sec_uid = row
+        .pointer("/author/sec_uid")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let nested_uid = row
+        .pointer("/author/uid")
+        .and_then(identifier)
+        .filter(|s| !s.is_empty());
+    let root_uid = row.get("author_user_id").and_then(identifier);
+    if sec_uid.is_none() && nested_uid.is_none() && root_uid.is_none() {
         return Err(AccountRequestError::Decode { step: "self_works" });
     }
     if sec_uid.is_some_and(|value| value != owner.sec_uid)
-        || user_id.is_some_and(|value| value != owner.user_id)
+        || nested_uid
+            .as_ref()
+            .is_some_and(|value| value != &owner.user_id)
     {
         return Err(AccountRequestError::AccountMismatch);
+    }
+    if root_uid
+        .as_ref()
+        .is_some_and(|value| value != &owner.user_id)
+    {
+        // The creator API serializes this numeric duplicate through JavaScript.
+        // Accept its precision loss ONLY when both exact nested identities match.
+        // String IDs, safe integers and genuinely different authors still reject.
+        let root = &row["author_user_id"];
+        let rounded_duplicate = root.as_u64().is_some_and(|n| n > 9_007_199_254_740_991)
+            && sec_uid == Some(owner.sec_uid.as_str())
+            && nested_uid.as_deref() == Some(owner.user_id.as_str())
+            && root.as_f64()
+                == owner
+                    .user_id
+                    .parse::<serde_json::Number>()
+                    .ok()
+                    .and_then(|n| n.as_f64());
+        if !rounded_duplicate {
+            return Err(AccountRequestError::AccountMismatch);
+        }
     }
     Ok(())
 }
@@ -842,6 +876,30 @@ mod tests {
             aweme_count: 0,
             total_favorited: 0,
         }
+    }
+    #[test]
+    fn works_rounded_numeric_duplicate_requires_both_exact_nested_identities() {
+        let mut owner = owner();
+        owner.user_id = "9007199254740993".into();
+        let row = serde_json::json!({"author_user_id":9_007_199_254_740_992_u64,"author":{"uid":owner.user_id,"sec_uid":owner.sec_uid}});
+        assert!(check_work_owner(&row, &owner).is_ok());
+        for bad in [
+            serde_json::json!({"author_user_id":"9007199254740992","author":row["author"]}),
+            serde_json::json!({"author_user_id":9_007_199_254_742_000_u64,"author":row["author"]}),
+            serde_json::json!({"author_user_id":9_007_199_254_740_992_u64,"author":{"uid":owner.user_id,"sec_uid":"peer"}}),
+            serde_json::json!({"author_user_id":9_007_199_254_740_992_u64,"author":{"uid":owner.user_id}}),
+            serde_json::json!({"author_user_id":9_007_199_254_740_992_u64,"author":{"sec_uid":owner.sec_uid}}),
+        ] {
+            assert!(check_work_owner(&bad, &owner).is_err());
+        }
+    }
+    #[test]
+    fn works_business_error_never_passes_with_an_aweme_list() {
+        assert!(parse_works(
+            &serde_json::json!({"status_code":7911,"aweme_list":[]}),
+            &owner()
+        )
+        .is_err());
     }
     #[test]
     fn works_page_handles_video_and_image_covers_without_persisting_raw_rows() {

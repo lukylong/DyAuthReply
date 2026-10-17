@@ -749,6 +749,40 @@ class SendMessageRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.raw_check_code, 2)
         self.assertIn("系统繁忙", str(raised.exception))
 
+    async def test_7467_recipient_limit_does_not_latch_account_risk(self):
+        signer = _FakeSendSignProvider()
+        transport = HttpProtocolTransport(sign_provider=signer)
+        transport._get_identity_security_token = AsyncMock(
+            return_value=("IDENTITY", "DEVICE")
+        )
+        transport._resolve_send_conversation_context = AsyncMock(
+            return_value=(987, "conversation-ticket")
+        )
+        decoded = SimpleNamespace(
+            status_code=0,
+            status_msg="OK",
+            server_msg_id=0,
+            client_msg_id="",
+            biz_status_code=7467,
+            biz_status_text="给对方发送的消息已达上限，对方回复或互关后才能继续发送消息",
+            biz_raw_check_code=2,
+        )
+
+        with patch(
+            "core.douyin.runtime.transport.http_protocol.decode_send_message_response",
+            return_value=decoded,
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                await transport._post_send_message(
+                    SimpleNamespace(id="account-risk"),
+                    "0:1:test:peer",
+                    "风控测试",
+                    log_tag="send_text",
+                )
+
+        self.assertNotIsInstance(raised.exception, SendRiskControlError)
+        self.assertIn("给对方发送的消息已达上限", str(raised.exception))
+
     async def test_send_text_keeps_typed_risk_error_for_worker(self):
         signer = _FakeSendSignProvider()
         transport = HttpProtocolTransport(

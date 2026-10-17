@@ -299,6 +299,7 @@ class JsSignProvider:
                 a_bogus = await sync_to_async(js_signer.get_ab, thread_sensitive=False)(
                     prepared.a_bogus_query,
                     prepared.a_bogus_body,
+                    self._user_agent,
                 )
                 client_data, ree_key = await asyncio.gather(
                     sync_to_async(
@@ -384,7 +385,7 @@ class JsSignProvider:
                 a_bogus = ""
                 if not skip_query_sign:
                     a_bogus = await sync_to_async(js_signer.get_ab, thread_sensitive=False)(
-                        params_with_token, body_str
+                        params_with_token, body_str, self._user_agent
                     )
             except js_signer.JsSignerUnavailable as e:
                 raise SignerUnavailable(f"JS a_bogus 失败: {e}") from e
@@ -587,7 +588,7 @@ class JsSignProvider:
                 "msToken": resolve_mstoken(request_cookies),
             }
         )
-        a_bogus = await sync_to_async(js_signer.get_ab, thread_sensitive=False)(query, "")
+        a_bogus = await sync_to_async(js_signer.get_ab, thread_sensitive=False)(query, "", self._user_agent)
         csrf_token = await self._fetch_secsdk_csrf_token(origin)
         headers = {
             "x-tt-session-dtrait": "",

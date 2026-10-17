@@ -138,6 +138,7 @@ impl fmt::Debug for CookieLookup {
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct ABogusSigningInput {
+    pub browser_profile: Option<String>,
     pub host: &'static str,
     pub query: String,
     pub body: &'static str,
@@ -147,6 +148,10 @@ impl fmt::Debug for ABogusSigningInput {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ABogusSigningInput")
+            .field(
+                "browser_profile",
+                &self.browser_profile.as_ref().map(|p| Redacted(p.len())),
+            )
             .field("host", &self.host)
             .field("query", &Redacted(self.query.len()))
             .field("body", &Redacted(self.body.len()))
@@ -246,6 +251,12 @@ impl fmt::Debug for UnsignedRequestPlan {
 }
 
 impl UnsignedRequestPlan {
+    /// Imported UA already covered by the immutable plan digest.
+    #[must_use]
+    pub fn user_agent(&self) -> &str {
+        &self.user_agent_input
+    }
+
     #[must_use]
     pub const fn method(&self) -> &'static str {
         self.method
@@ -499,7 +510,7 @@ pub fn prepare_send_request(
 ) -> Result<UnsignedRequestPlan, RequestPlanError> {
     validate_request_boundary(input)?;
     let cookie_lookup = parse_cookie_lookup(input.raw_cookie_header);
-    validate_credentials(input, &cookie_lookup)?;
+    validate_credentials(input)?;
     let unsigned_headers = merge_unsigned_headers(input)?;
     validate_header_collection(&unsigned_headers, FINAL_GUARD_HEADER_COUNT)?;
     let signer_requests = build_signer_requests(input, &cookie_lookup)?;
@@ -522,6 +533,30 @@ pub fn prepare_send_request(
         signer_requests,
         plan_digest: [0; 32],
     };
+    plan.plan_digest = compute_plan_digest(&plan);
+    Ok(plan)
+}
+
+/// Use the actual current-www query order and a captured browser profile.
+/// # Errors
+/// Retains the fixed endpoint, guard/session checks and request bounds.
+pub fn prepare_captured_web_send_request(
+    input: &SendHttpPlanInput<'_>,
+    profile: &serde_json::Value,
+) -> Result<UnsignedRequestPlan, RequestPlanError> {
+    let mut plan = prepare_send_request(input)?;
+    plan.cookie_host = "imapi.douyin.com";
+    plan.signer_requests.a_bogus.query = format!(
+        "verifyFp={}&fp={}&msToken={}",
+        percent_encode_rfc3986(input.fingerprint.verify_fp),
+        percent_encode_rfc3986(input.fingerprint.fp),
+        percent_encode_rfc3986(input.query_ms_token)
+    );
+    if profile["geo"].as_array().is_some_and(|a| a.len() == 8) {
+        let mut signing_profile = profile.clone();
+        signing_profile["signing_context"] = serde_json::json!("current_web");
+        plan.signer_requests.a_bogus.browser_profile = Some(signing_profile.to_string());
+    }
     plan.plan_digest = compute_plan_digest(&plan);
     Ok(plan)
 }
@@ -566,10 +601,7 @@ fn validate_request_boundary(input: &SendHttpPlanInput<'_>) -> Result<(), Reques
     Ok(())
 }
 
-fn validate_credentials(
-    input: &SendHttpPlanInput<'_>,
-    cookie_lookup: &CookieLookup,
-) -> Result<(), RequestPlanError> {
+fn validate_credentials(input: &SendHttpPlanInput<'_>) -> Result<(), RequestPlanError> {
     if input.query_ms_token.is_empty() {
         return Err(RequestPlanError::MissingMsToken);
     }
@@ -612,12 +644,10 @@ fn validate_credentials(
         }
     }
 
-    if !cookie_lookup.bd_ticket_guard_ts_sign_id.is_empty()
-        && !input
-            .ticket_guard
-            .ts_sign
-            .starts_with(&cookie_lookup.bd_ticket_guard_ts_sign_id)
-    {
+    if !super::credentials::ticket_cookie_matches(
+        input.raw_cookie_header,
+        input.ticket_guard.ts_sign,
+    ) {
         return Err(RequestPlanError::TicketSessionMismatch);
     }
     Ok(())
@@ -647,6 +677,7 @@ fn build_signer_requests(
 
     Ok(SignerRequests {
         a_bogus: ABogusSigningInput {
+            browser_profile: None,
             host: SIGNING_HOST,
             query: a_bogus_query,
             body: "",
@@ -691,14 +722,23 @@ pub fn finalize_send_request(
         MAX_REE_PUBLIC_KEY_BYTES,
     )?;
 
-    let final_url = format!(
-        "{}?msToken={}&a_bogus={}&verifyFp={}&fp={}",
-        unsigned.endpoint,
-        percent_encode_rfc3986(&unsigned.query_ms_token),
-        percent_encode_rfc3986(&outputs.a_bogus),
-        percent_encode_rfc3986(&unsigned.fingerprint_verify_fp),
-        percent_encode_rfc3986(&unsigned.fingerprint_fp),
-    );
+    let final_url = if unsigned.cookie_host == "imapi.douyin.com" {
+        format!(
+            "{}?{}&a_bogus={}",
+            unsigned.endpoint,
+            unsigned.signer_requests.a_bogus.query,
+            percent_encode_rfc3986(&outputs.a_bogus)
+        )
+    } else {
+        format!(
+            "{}?msToken={}&a_bogus={}&verifyFp={}&fp={}",
+            unsigned.endpoint,
+            percent_encode_rfc3986(&unsigned.query_ms_token),
+            percent_encode_rfc3986(&outputs.a_bogus),
+            percent_encode_rfc3986(&unsigned.fingerprint_verify_fp),
+            percent_encode_rfc3986(&unsigned.fingerprint_fp),
+        )
+    };
     if final_url.len() > MAX_FINAL_URL_BYTES {
         return Err(RequestPlanError::UrlTooLarge {
             actual: final_url.len(),
@@ -1059,6 +1099,9 @@ fn compute_plan_digest(plan: &UnsignedRequestPlan) -> [u8; 32] {
     digest.put(if guard.ecdh_key.is_some() { b"1" } else { b"0" });
     digest.put(guard.ecdh_key.as_deref().unwrap_or_default());
     digest.put(guard.t_trust.map_or("", |_| "1").as_bytes());
+    if let Some(profile) = &plan.signer_requests.a_bogus.browser_profile {
+        digest.put(profile.as_bytes());
+    }
     digest.finish()
 }
 
@@ -1161,6 +1204,70 @@ mod tests {
                 ecdh_key: Some(b"\x00\x11\x22"),
             },
         }
+    }
+
+    #[test]
+    fn captured_web_full_query_and_profile_are_digest_bound() {
+        let headers = caller_headers();
+        let input = input(&headers);
+        let profile =
+            serde_json::json!({"geo":[1512,739,1512,860,1512,860,1512,982],"platform":"MacIntel"});
+        let legacy = prepare_send_request(&input).unwrap();
+        let captured = prepare_captured_web_send_request(&input, &profile).unwrap();
+        assert!(captured
+            .signer_requests()
+            .a_bogus
+            .query
+            .starts_with("verifyFp="));
+        assert!(captured.signer_requests().a_bogus.query.contains("&fp="));
+        assert!(captured
+            .signer_requests()
+            .a_bogus
+            .query
+            .contains("&msToken="));
+        let metadata: serde_json::Value = serde_json::from_str(
+            captured
+                .signer_requests()
+                .a_bogus
+                .browser_profile
+                .as_ref()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(metadata["signing_context"], "current_web");
+        assert_eq!(captured.cookie_host(), "imapi.douyin.com");
+        assert_ne!(legacy.plan_digest(), captured.plan_digest());
+        let mut other = profile;
+        other["geo"][0] = serde_json::json!(1280);
+        assert_ne!(
+            captured.plan_digest(),
+            prepare_captured_web_send_request(&input, &other)
+                .unwrap()
+                .plan_digest()
+        );
+    }
+    #[test]
+    fn import_delete_send_plan_uses_the_same_current_ticket_binding_as_import() {
+        let headers = caller_headers();
+        let mut request = input(&headers);
+        let raw = format!(
+            "bd_ticket_guard_ts_sign_id=ts.2.old; bd_ticket_guard_tssign={}",
+            percent_encode_rfc3986(
+                r#"{"value":"ts.2.synthetic.payload","timestamp":1700000000000}"#
+            )
+        );
+        request.raw_cookie_header = &raw;
+        let plan = prepare_send_request(&request).unwrap();
+        assert!(plan
+            .unsigned_headers()
+            .iter()
+            .any(|h| h.name == "cookie" && h.value == raw));
+        let wrong = "bd_ticket_guard_ts_sign_id=ts.2; bd_ticket_guard_tssign=ts.2.wrong";
+        request.raw_cookie_header = wrong;
+        assert!(matches!(
+            prepare_send_request(&request),
+            Err(RequestPlanError::TicketSessionMismatch)
+        ));
     }
 
     fn prepare(headers: &[OrderedHeader]) -> UnsignedRequestPlan {

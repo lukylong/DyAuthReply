@@ -36,6 +36,7 @@ use uuid::Uuid;
 pub mod api;
 mod automation;
 mod frontier;
+mod history;
 mod hot;
 pub use automation::AutomationPolicy;
 pub use frontier::FrontierStatus;
@@ -201,6 +202,7 @@ impl CommandStatus {
 /// Latest bounded receive pass, not lifetime totals. No message bodies or secrets.
 #[derive(Default, Clone, Serialize)]
 pub struct ReceiveProcessing {
+    pub last_reconcile_error: Option<String>,
     pub reconciled_sends: usize,
     pub receipt_conflicts: usize,
     pub last_page_baseline: bool,
@@ -234,6 +236,7 @@ struct AccountSlot {
     restored_binding: Mutex<Option<String>>,
     identity_error: Mutex<Option<String>>,
     profile_read: Mutex<()>,
+    history_refresh: Mutex<BTreeMap<String, Instant>>,
     works_cache: Mutex<BTreeMap<String, (Instant, crate::protocol::WorksPage)>>,
     http: ProtocolHttpClient,
 }
@@ -257,6 +260,7 @@ impl AccountSlot {
             restored_binding: Mutex::new(None),
             identity_error: Mutex::new(None),
             profile_read: Mutex::new(()),
+            history_refresh: Mutex::new(BTreeMap::new()),
             works_cache: Mutex::new(BTreeMap::new()),
             http,
         }
@@ -485,7 +489,7 @@ impl ManualService {
         Ok(())
     }
     /// # Errors
-    /// Quiesces this account's manual admission and refuses removal of unresolved sends.
+    /// Quiesces admission and blocks active sends while retaining uncertain audit history.
     pub async fn retire_account(&self, id: &str) -> Result<()> {
         if let Ok(slot) = self.slot(id) {
             let _submission = slot.submission.lock().await;
@@ -501,8 +505,8 @@ impl ManualService {
                 "请先关闭自动回复再移除账号"
             );
             anyhow::ensure!(
-                !self.inner.store.has_unfinished_account(id)?,
-                "账号仍有待发送或待核验任务，请处理后再移除"
+                !self.inner.store.has_blocking_account_removal_work(id)?,
+                "账号仍有尚未发送或正在发送的任务，请等待处理后再移除；历史待核验记录不会阻止删除"
             );
             self.inner.registry.delete(id)?;
             let account = AccountId::new(id)?;
@@ -1356,6 +1360,19 @@ impl ManualService {
         control: tokio::sync::watch::Receiver<AccountControl>,
     ) -> Result<()> {
         let result = self.fetch_and_commit(work, control).await;
+        if let Err(error) = &result {
+            let reason = if error.to_string().contains("inbound pending spool is full") {
+                "inbound_spool_full"
+            } else {
+                "inbound_reconcile_failed"
+            };
+            self.slot(&work.account_id)?
+                .processing
+                .lock()
+                .await
+                .last_reconcile_error = Some(reason.into());
+            tracing::warn!(account_id = %work.account_id, reason, "receive reconciliation failed");
+        }
         let healthy = self
             .slot(&work.account_id)?
             .frontier_status
@@ -1373,10 +1390,30 @@ impl ManualService {
             .runtime
             .update_inbound_state(&work.account_id, work.fence(), inbound)
             .await?;
-        result?;
+        let next_page = result?;
         self.activate_configured_auto(&work.account_id).await?;
         self.maintain_frontier(work).await?;
-        self.recover_prepared(work).await
+        self.recover_prepared(work).await?;
+        if let Some(cursor) = next_page {
+            // Queue one next page through the fair executor, not an unbounded
+            // per-account loop. Empty/replayed pages cannot spin this chain.
+            let next = WorkEnvelope::new(
+                work.account_id.clone(),
+                format!("http-page:{cursor}"),
+                WorkKind::Reconcile,
+                work.fence(),
+                self.inner.runtime.monotonic_now_ms(),
+            );
+            let admission = self.inner.runtime.enqueue(next).await;
+            anyhow::ensure!(
+                matches!(
+                    admission,
+                    AdmissionResult::Accepted | AdmissionResult::Duplicate
+                ),
+                "inbox next page admission deferred"
+            );
+        }
+        Ok(())
     }
 
     async fn initialize_identity(
@@ -1502,7 +1539,7 @@ impl ManualService {
         &self,
         work: &WorkEnvelope,
         control: tokio::sync::watch::Receiver<AccountControl>,
-    ) -> Result<()> {
+    ) -> Result<Option<u64>> {
         let slot = self.slot(&work.account_id).context("account not loaded")?;
         let generation = i64::try_from(work.credential_generation)?;
         let initial = self
@@ -1545,6 +1582,8 @@ impl ManualService {
         .await??;
         let cursor = super::inbound::cursor_for(previous.as_ref(), generation)?;
         let page = self.fetch_inbox(work, &mut session, cursor).await?;
+        let next_page =
+            (!page.messages.is_empty() && page.next_cursor > cursor).then_some(page.next_cursor);
         let grant = self
             .inner
             .controller
@@ -1595,7 +1634,7 @@ impl ManualService {
         log_inbound_summary(work.account_id.as_str(), &summary);
         self.spawn_peer_backfill(work.account_id.as_str());
         *slot.processing.lock().await = summary;
-        Ok(())
+        Ok(next_page)
     }
 
     async fn cancel_tail(&self, work: &WorkEnvelope, reason: &str) -> Result<()> {
@@ -1845,10 +1884,15 @@ impl ManualService {
                 .update_send_capability(&work.account_id, work.fence(), capability)
                 .await?;
             if matches!(
-                capability,
-                SendCapability::RiskControlled | SendCapability::AuthExpired
+                outcome.classification,
+                DeliveryClass::RiskControlled
+                    | DeliveryClass::LoginExpired
+                    | DeliveryClass::BusinessRejected
+                    | DeliveryClass::ProtocolRejected
             ) {
-                return self.cancel_tail(&work, "平台拒绝发送，停止后续消息").await;
+                return self
+                    .cancel_tail(&work, "本次发送被拒绝，停止该批次后续消息")
+                    .await;
             }
             anyhow::ensure!(
                 capability == SendCapability::Sendable,
@@ -2036,7 +2080,7 @@ fn filter_pending(
         ..ReceiveProcessing::default()
     };
     let now_us = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
-    let pending = store.pending_inbound_receipts(lease, 128)?;
+    let pending = store.pending_inbound_receipts(lease, super::inbound::MAX_PENDING_RECORDS)?;
     if let Some(projection) = projection {
         let events = pending
             .iter()

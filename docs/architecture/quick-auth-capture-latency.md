@@ -28,3 +28,12 @@
 `collection_pipelines_five_reads_before_waiting_for_responses` 使用本机合成 WebSocket 服务：收到五个读取后才回复，并反序插入网络事件。旧实现超过 1 秒门限，新实现通过。这是确定性的调度/响应关联验证，不是官方网页总耗时测量，也不承诺采集整体提速四倍。
 
 另外覆盖：缺少正式 UIFID、错误/迟到回复、初期快轮询与后期退避、扩展两个入口、资料失败、缺失字段、配套票据与 Cookie store 隔离。推荐流路径的现场结果见上节；真实主站冷启动总耗时须在安装候选版本后另行验收。
+
+
+## 0.1.43：无名 Cookie 导致整个采集轮次失败
+
+0.1.42 现场再次卡住时，原生 API 报“浏览器Cookie字段无效”，而不是继续缺少 UIFID。只读浏览器 Cookie 元数据确认 www 域存在一个 name 为空、path 为 /、非 HttpOnly 的条目；正式 UIFID 已存在。一次格式错误使 completeness 保留上一轮数据，因此旧灰色标签不能作为实时缺字段的证据。
+
+用户授权只清理该无名条目后，原安装采集器进入 awaiting_confirmation，全部字段为 true，证明根因是无名 Cookie 的兼容性，而非 UIFID 初始化再次失败。未清理其他登录凭证。
+
+修复原生 cookie_header：name/value 必须仍为字符串；空字符串名称仅忽略此条目（与扩展 cookie?.name 过滤一致），非空名称的长度、控制字符和重复会话冲突校验不变。自动采集不修改浏览器存储。回归把无名条目加入完整 CDP fixture，并覆盖异常类型、空值和冲突会话。不存在 .trellis/spec，契约记录于本文。

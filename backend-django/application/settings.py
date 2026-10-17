@@ -546,12 +546,13 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.42'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.43'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
+    '修复快捷登录因网页空名称 Cookie 反复报错卡住：仅忽略无名条目，保留登录凭证和格式校验\n'
     '修复快捷登录停在主站 UIFID 的问题：自动进入推荐流初始化正式字段，保留真实会话和签名校验\n'
     '优化快捷登录并行读取与浏览器扩展预加载，显示采集等待时长和缺失项；扩展更新至 2.3.2\n'
     '账号仍绑定自动回复规则时阻止删除，停用规则仍需解绑，保留全局规则及已有聊天记录\n'

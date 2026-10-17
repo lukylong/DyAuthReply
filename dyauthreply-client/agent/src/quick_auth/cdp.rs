@@ -744,10 +744,17 @@ fn cookie_header(value: &Value) -> Result<String> {
     anyhow::ensure!(cookies.len() <= 512, "浏览器Cookie数量超限");
     let mut unique = BTreeMap::new();
     for cookie in cookies {
-        let name = cookie["name"].as_str().unwrap_or_default();
-        let value = cookie["value"].as_str().unwrap_or_default();
-        if name.is_empty()
-            || name.len() > 256
+        let name = cookie["name"]
+            .as_str()
+            .context("浏览器Cookie名称格式无效")?;
+        let value = cookie["value"].as_str().context("浏览器Cookie值格式无效")?;
+        // Chromium can store unrelated nameless cookies (for example a bare
+        // browser marker). Match the extension's cookie?.name filter: omit only
+        // that entry, without editing browser storage or any named credential.
+        if name.is_empty() {
+            continue;
+        }
+        if name.len() > 256
             || value.len() > 32_768
             || name.chars().any(char::is_control)
             || value.chars().any(char::is_control)
@@ -822,6 +829,7 @@ mod tests {
 
     fn cookies() -> Value {
         json!({"cookies":[
+            {"name":"","value":"synthetic-browser-marker","domain":"www.douyin.com"},
             {"name":"sessionid","value":"session-one","domain":".douyin.com"},
             {"name":"msToken","value":"S".repeat(164),"domain":".douyin.com"},
             {"name":"UIFID","value":"synthetic-uifid","domain":".douyin.com"},
@@ -1077,6 +1085,44 @@ mod tests {
             serde_json::to_value(Completeness::default()).unwrap()["ready"],
             false
         );
+    }
+
+    #[test]
+    fn cookie_header_ignores_browser_unnamed_entries_only() {
+        // Chromium accepts an empty cookie name. An unrelated nameless entry
+        // must not poison all three scoped snapshots or change login cookies.
+        let value = json!({"cookies":[
+            {"name":"", "value":"synthetic-browser-marker"},
+            {"name":"sessionid", "value":"synthetic-session"},
+            {"name":"UIFID", "value":"real-browser-field"},
+            {"name":"optional", "value":""}
+        ]});
+        assert_eq!(
+            cookie_header(&value).unwrap(),
+            "UIFID=real-browser-field; optional=; sessionid=synthetic-session"
+        );
+        assert_eq!(
+            cookie_value(&value, "sessionid").as_deref(),
+            Some("synthetic-session")
+        );
+        assert_eq!(
+            cookie_value(&value, "UIFID").as_deref(),
+            Some("real-browser-field")
+        );
+        for malformed in [
+            json!({"value":"missing-name"}),
+            json!({"name":false,"value":"bad"}),
+            json!({"name":"a","value":123}),
+            json!({"name":"a","value":"bad\r\n"}),
+        ] {
+            assert!(cookie_header(&json!({"cookies":[malformed]})).is_err());
+        }
+        assert!(cookie_header(&json!({"cookies":[
+            {"name":"sessionid","value":"one"},
+            {"name":"","value":"marker"},
+            {"name":"sessionid","value":"other"}
+        ]}))
+        .is_err());
     }
 
     #[test]

@@ -50,6 +50,9 @@ if (extensionVersion !== serverExtensionVersion) {
     `Browser extension versions differ: manifest=${extensionVersion} server=${serverExtensionVersion}`,
   );
 }
+const serverReleaseNotes = match('backend-django/application/settings.py', /DOWNLOAD_RELEASE_NOTES\s*=\s*os\.environ\.get\(([\s\S]*?)\n\)/, 'server release notes');
+if (!serverReleaseNotes.includes(`扩展更新至 ${extensionVersion}`)) throw new Error('Server release notes announce a stale extension version');
+if (!text('.github/client-release-notes.md').includes(`D助手 ${version} / 浏览器扩展 ${extensionVersion}`)) throw new Error('Release notes title differs from package versions');
 
 if (tauri.productName !== 'D助手' || tauri.identifier !== 'com.dyauthreply.client') {
   throw new Error('Stable overwrite identity changed; existing installations would fork');

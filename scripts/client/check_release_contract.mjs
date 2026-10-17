@@ -38,6 +38,8 @@ if (tag && tag !== `client-v${version}`) {
 }
 
 const extensionVersion = json('browser-extension/douyin-cred-extractor/manifest.json').version;
+const popupExtensionVersion = match('browser-extension/douyin-cred-extractor/popup.html', />v(\d+\.\d+\.\d+)<\/span>/, 'popup extension version');
+if (popupExtensionVersion !== extensionVersion) throw new Error('Popup extension version differs from manifest');
 const serverExtensionVersion = match(
   'backend-django/application/settings.py',
   /DOWNLOAD_EXTENSION_VERSION\s*=.*?or\s*'([^']+)'/,

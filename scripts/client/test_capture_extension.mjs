@@ -27,15 +27,16 @@ async function popupCase(mode, entry="creator"){
  const elements=new Map();const element=id=>{if(!elements.has(id))elements.set(id,{value:'',hidden:true,classList:{add(){},remove(){},toggle(){}},addEventListener(){}});return elements.get(id);};
  const needsWarmup=['warmup','never_ready','redirected','redirect_bounce_once','redirect_never_changes'].includes(mode);
  let identityRead=false, materialRead=false, pageFailures=0, initialDocumentReads=0, recommendationClicks=0;
- const timers=new Map();let timerId=0;
+ const timers=new Map(),scheduledDelays=[];let timerId=0;
  const redirectPending=()=>mode==='redirected'?recommendationClicks===0:mode==='redirect_bounce_once'?recommendationClicks<2:mode==='redirect_never_changes';
  let now=100000, removed=[], mainStarted=entry==='www'&&!needsWarmup, recommendationOpened=false;
  let mainId=entry==='www'?1:null;
  const tabs=new Map([[1,{id:1,windowId:1,url:`https://${entry}.douyin.com/`,cookieStoreId:'0'}]]);
  const context=vm.createContext({URL,TextDecoder,Uint8Array,atob,btoa,crypto:webcrypto,console,unescape,encodeURIComponent,
-   Date:class extends Date {static now(){now+=1000;return now;}},setTimeout(fn,delay){const id=++timerId;timers.set(id,true);if(delay<5000)fn();else if(mode.endsWith('_timeout'))setImmediate(()=>{if(timers.get(id))fn();});return id;},clearTimeout(id){timers.delete(id);},
+   Date:class extends Date {static now(){now+=1000;return now;}},setTimeout(fn,delay){scheduledDelays.push(delay);const id=++timerId;timers.set(id,true);if(delay<5000)fn();else if(mode.endsWith('_timeout'))setImmediate(()=>{if(timers.get(id))fn();});return id;},clearTimeout(id){timers.delete(id);},
    setInterval:()=>0,clearInterval:()=>{},
    document:{getElementById:element,addEventListener(){}},HTMLElement:class{},navigator:{}});
+ if(['tab_metadata_timeout','cookie_store_timeout','cookie_store_unmapped'].includes(mode))delete tabs.get(1).cookieStoreId;
  const chrome={
   runtime:{connect:()=>{
     const listeners=[],disconnects=[],owned=new Set();let closed=false;
@@ -48,7 +49,7 @@ async function popupCase(mode, entry="creator"){
       disconnect:()=>{closed=true;void cleanup();for(const f of disconnects)f();}};
     return port;
   }},
-  tabs:{query:async()=>[tabs.get(1)],
+  tabs:{query:async()=>mode==='tab_query_timeout'?new Promise(()=>{}):[tabs.get(1)],
     create:async options=>{
       const next={id:tabs.size+1,windowId:1,url:options.url,cookieStoreId:'0'};
       if(new URL(options.url).hostname==='www.douyin.com'){
@@ -57,8 +58,8 @@ async function popupCase(mode, entry="creator"){
       }
       tabs.set(next.id,next);return next;
     },
-    get:async id=>{if(mode==='closed_tab'&&id!==1)throw new Error('closed');return {...tabs.get(id),cookieStoreId:mode==='store_mismatch'&&id===mainId?'other':'0',status:mode==='about_blank'&&initialDocumentReads<2?'complete':'loading',url:mode==='about_blank'&&initialDocumentReads<2?'about:blank':tabs.get(id).url};},remove:async id=>removed.push(id)},
-  cookies:{getAllCookieStores:async()=>[{id:'0',tabIds:[...tabs.keys()]}],getAll:async({url})=>{
+    get:async id=>{if(mode==='tab_metadata_timeout'&&id===1)return new Promise(()=>{});if(mode==='closed_tab'&&id!==1)throw new Error('closed');return {...tabs.get(id),cookieStoreId:['cookie_store_timeout','cookie_store_unmapped'].includes(mode)?undefined:mode==='store_mismatch'&&id===mainId?'other':'0',status:mode==='about_blank'&&initialDocumentReads<2?'complete':'loading',url:mode==='about_blank'&&initialDocumentReads<2?'about:blank':tabs.get(id).url};},remove:async id=>removed.push(id)},
+  cookies:{getAllCookieStores:async()=>mode==='cookie_store_timeout'?new Promise(()=>{}):[{id:'0',tabIds:mode==='cookie_store_unmapped'?[]:[...tabs.keys()]}],getAll:async({url})=>{
     if(mode==='cookie_permission')throw new Error('synthetic-private-error');
     if(mode==='cookie_timeout')return new Promise(()=>{});
     let raw=needsWarmup&&(!recommendationOpened||mode==='never_ready'||redirectPending())?cookie.replace('UIFID=browser','UIFID_TEMP=temporary'):cookie;
@@ -70,6 +71,7 @@ async function popupCase(mode, entry="creator"){
   }},
   scripting:{executeScript:async({func,target})=>{
     if(String(func).includes('media/user/info'))assert(mainStarted,'main-site warmup must start before the remote identity lookup');
+    if(String(func).includes('media/user/info')&&mode==='identity_slow')return [{result:await func()}];
     if(String(func).includes("searchParams.get('recommend')")){recommendationClicks++;return [{result:'clicked'}];}
     let host=new URL(tabs.get(target.tabId).url).hostname;
     if(String(func).includes('media/user/info'))identityRead=true;
@@ -80,17 +82,22 @@ async function popupCase(mode, entry="creator"){
     if(signing&&mode==='page_throw_once'&&pageFailures++===0)throw new Error('transient navigation');
     if(signing&&mode==='script_timeout')return new Promise(()=>{});
     return [{result:String(func).includes('document.readyState')?{ready:'interactive',host}:String(func).includes('media/user/info')?
-      (mode==='identity'?{error:'not authenticated'}:{nickname:'SAMPLE',sec_uid:'self'}):
+      (mode==='identity'?{error:'not authenticated'}:mode==='identity_timeout'?{error:'timeout'}:{nickname:'SAMPLE',sec_uid:'self'}):
       {origin:host,pathname:redirectPending()&&host==='www.douyin.com'?'/jingxuan':'/',keys:[keys],tickets:host==='creator.douyin.com'?[ticket]:[ticket.replace('ts.2.synthetic','ts.2.stale')],dtrait_blob:mode==='missing'?'':'synthetic-blob',dtrait_path:'/passport/token/beat/web/',ua:'Chrome/152.0',browser_profile:{platform:'MacIntel'}}}];
   }},
-  storage:{session:{get:async list=>Object.fromEntries(list.map(k=>[k,{value:k.endsWith('_token')?token:k.endsWith('_ticket')?ticket:'dtrait',capturedAt:999999,storeId:'0',tabId:mainId,sourceHost:'www.douyin.com'}]))}}
+  storage:{session:{get:async list=>mode==='stale_source_token'&&mainId===1?{}:Object.fromEntries(list.map(k=>[k,{value:k.endsWith('_token')?token:k.endsWith('_ticket')?ticket:'dtrait',capturedAt:999999,storeId:'0',tabId:mainId,sourceHost:'www.douyin.com'}]))}}
  };
  context.chrome=chrome;vm.runInContext(core,context);
+ context.AbortSignal={timeout:ms=>({budgetMs:ms})};
+ context.fetch=async(_url,options)=>{
+   if(options.signal.budgetMs<12000)throw Object.assign(new Error('synthetic timeout'),{name:'TimeoutError'});
+   return {ok:true,json:async()=>({status_code:0,user:{nickname:'SAMPLE',sec_uid:'self',short_id:'123'}})};
+ };
  const originalSelect=context.DyCapture.selectMaterial;
  context.DyCapture.selectMaterial=async(...args)=>{const result=await originalSelect(...args);materialRead=true;return result;};
  vm.runInContext(popupSource,context);
  await vm.runInContext(mode==='double_click'?'Promise.all([grab(),grab()])':'grab()',context);
- if(['success','warmup','redirected','redirect_bounce_once','nameless','about_blank','page_throw_once','double_click'].includes(mode)){
+ if(['success','identity_slow','stale_source_token','warmup','redirected','redirect_bounce_once','nameless','about_blank','page_throw_once','double_click'].includes(mode)){
   assert(element('bundle').value.startsWith('DYCRED1.'),element('tabHint').textContent);
   const payload=JSON.parse(Buffer.from(element('bundle').value.slice(8),'base64url'));
   assert.equal(payload.capture_version,2);assert.equal(payload.query_ms_token,token);assert.equal(payload.sec_uid,'self');
@@ -101,12 +108,16 @@ async function popupCase(mode, entry="creator"){
  if(mode==='redirect_bounce_once')assert.equal(recommendationClicks,2);
  if(mode==='redirect_never_changes')assert.equal(recommendationClicks,3);
  assert.equal(element('grabBtn').disabled,false);
+ if(mode==='identity_slow')assert(scheduledDelays.includes(18000),'script deadline must allow the longer identity request to finish');
+ if(mode==='identity_timeout')assert.match(element('tabHint').textContent,/资料接口响应超时/);
+ if(['tab_query_timeout','tab_metadata_timeout','cookie_store_timeout'].includes(mode))assert.match(element('tabHint').textContent,/超时/);
+ if(mode==='cookie_store_unmapped')assert.equal(identityRead,false,'never guess a cookie store when the tab is not mapped');
  assert.deepEqual(removed,[...tabs.keys()].filter(id=>id!==1));
  assert.equal(tabs.get(1).url,`https://${entry}.douyin.com/`,'never navigate or close the user tab');
  console.log('PASS popup: '+mode+' / '+entry+', real UIFID requirement and owned-tab cleanup');
 }
-await popupCase('success');await popupCase('success','www');await popupCase('warmup','www');await popupCase('never_ready','www');
-for(const mode of ['redirected','redirect_bounce_once','redirect_never_changes','missing','identity','nameless','malformed_cookie','cookie_permission','cookie_timeout','script_timeout','identity_switch','final_switch','store_mismatch','wrong_origin','closed_tab','about_blank','page_throw_once','double_click'])await popupCase(mode);
+await popupCase('success');await popupCase('success','www');await popupCase('stale_source_token','www');await popupCase('warmup','www');await popupCase('never_ready','www');
+for(const mode of ['redirected','redirect_bounce_once','redirect_never_changes','missing','identity','nameless','malformed_cookie','cookie_permission','cookie_timeout','script_timeout','identity_switch','final_switch','store_mismatch','wrong_origin','closed_tab','about_blank','page_throw_once','double_click','identity_timeout','tab_query_timeout','tab_metadata_timeout','cookie_store_timeout','cookie_store_unmapped','identity_slow'])await popupCase(mode);
 console.log('PASS extension capture regression suite');
 const listeners={}, saved={};
 const bg=vm.createContext({URL,TextDecoder,Uint8Array,atob,btoa,Date,crypto:webcrypto});

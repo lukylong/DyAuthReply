@@ -18,20 +18,20 @@ const SESSION_DTRAIT_STORAGE_PREFIX = 'session_dtrait_';
 
 const $ = (id) => document.getElementById(id);
 
-async function boundedRead(read, message) {
+async function boundedRead(read, message, timeoutMs = 8000) {
   let timer;
   try {
     return await Promise.race([
       Promise.resolve().then(read),
-      new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error(message)),8000);}),
+      new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error(message)),timeoutMs);}),
     ]);
   } catch { throw new Error(message); }
   finally { clearTimeout(timer); }
 }
 
-async function executeBounded(details) {
+async function executeBounded(details, timeoutMs = 8000) {
   return boundedRead(()=>chrome.scripting.executeScript({...details,injectImmediately:true}),
-    '页面读取失败或超时，请完成页面加载或验证后重试');
+    '页面读取失败或超时，请完成页面加载或验证后重试', timeoutMs);
 }
 
 function showToast(msg) {
@@ -89,27 +89,18 @@ async function resolveCookieStoreId(tab) {
   if (tab.cookieStoreId) return tab.cookieStoreId;
 
   if (tab.id != null) {
-    try {
-      const full = await chrome.tabs.get(tab.id);
-      if (full?.cookieStoreId) return full.cookieStoreId;
-    } catch {
-      /* ignore */
-    }
+    const full = await boundedRead(() => chrome.tabs.get(tab.id), '读取当前标签资料失败或超时，请重新打开扩展');
+    if (full?.cookieStoreId) return full.cookieStoreId;
   }
 
-  const stores = await chrome.cookies.getAllCookieStores().catch(() => []);
+  const stores = await boundedRead(() => chrome.cookies.getAllCookieStores(), '读取 Cookie 存储失败或超时，请重新打开扩展');
   if (tab.id != null) {
     for (const store of stores) {
       if (store.tabIds?.includes(tab.id)) return store.id;
     }
   }
 
-  if (tab.incognito) {
-    const alt = stores.find((s) => s.id !== '0');
-    if (alt) return alt.id;
-  }
-  if (stores.some((s) => s.id === '0')) return '0';
-  if (stores.length === 1) return stores[0].id;
+  // A default or single store is not proof that it owns this tab.
   return '';
 }
 
@@ -408,13 +399,15 @@ async function fetchLoggedInAccount(tabId) {
         try {
           const resp = await fetch(
             'https://creator.douyin.com/web/api/media/user/info/',
-            { credentials: 'include', signal: AbortSignal.timeout(5000) },
+            // Cold creator documents may still be initializing the site SDK.
+            // Keep a finite request budget without aborting every five seconds.
+            { credentials: 'include', signal: AbortSignal.timeout(15000) },
           );
-          if (!resp.ok) return { error: `HTTP ${resp.status}` };
+          if (!resp.ok) return { error: 'http', http_status: resp.status };
           const data = await resp.json();
           if (data.status_code !== 0) {
             return {
-              error: data.status_msg || `status_code=${data.status_code}`,
+              error: 'api', api_code: Number.isSafeInteger(data.status_code) ? data.status_code : null,
             };
           }
           const user = data.user || {};
@@ -437,14 +430,29 @@ async function fetchLoggedInAccount(tabId) {
             avatar,
           };
         } catch (e) {
-          return { error: e.message };
+          return { error: ['TimeoutError','AbortError'].includes(e.name) ? 'timeout' : 'network' };
         }
       },
-    });
-    return result || { error: '脚本执行失败' };
+    }, 18000);
+    return result || { error: 'empty' };
   } catch (e) {
-    return { error: `executeScript 失败: ${e.message}` };
+    return { error: 'page_read' };
   }
+}
+
+function accountReadFailure(account) {
+  const reason = account?.error === 'timeout' ? '资料接口响应超时'
+    : account?.error === 'network' ? '资料接口网络或响应解析异常'
+    : account?.error === 'page_read' ? '资料页面读取失败或超时'
+    : account?.error === 'http' && Number.isInteger(account.http_status) ? `资料接口 HTTP ${account.http_status}`
+    : account?.error === 'api' && Number.isSafeInteger(account.api_code) ? `资料接口状态码 ${account.api_code}`
+    : '资料接口未返回完整的当前账号身份';
+  return `创作者中心账号资料校验未完成：${reason}；本次未生成凭证。请检查创作者页面加载或验证后重试`;
+}
+
+function captureProgress(message) {
+  $('tabHint').textContent = message;
+  $('tabHint').hidden = false;
 }
 
 /** 把凭证打包成单行「一键导入串」：DYCRED1.<base64url(JSON)>。 */
@@ -747,32 +755,36 @@ async function grab() {
   try {
     scope=captureTabScope();
     clearResult();$('tabHint').hidden=true;
-    const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
+    captureProgress('正在读取当前标签页…');
+    const [tab]=await boundedRead(()=>chrome.tabs.query({active:true,currentWindow:true}),'读取当前标签页失败或超时，请重新打开扩展');
     const host=tab?.url ? new URL(tab.url).hostname : '';
     if(!tab || !['www.douyin.com','creator.douyin.com'].includes(host))throw new Error('请在已登录的抖音主站或创作者中心打开扩展');
+    captureProgress('正在核对当前窗口的登录存储…');
     const storeId=await resolveCookieStoreId(tab);if(!storeId)throw new Error('未识别到当前窗口的 Cookie 存储');
-    const needsMainWarmup=!DyCapture.cookie(await cookieHeaderForUrl('https://www.douyin.com/',storeId),'UIFID');
     // Warm both origins while the identity API is loading. Keep the creator
     // document alive so its asynchronous device initialization is not cancelled.
     const since=Date.now();
+    captureProgress('正在打开临时采集页面…');
     let creator=tab;
     if(host!=='creator.douyin.com'){
       creator=await scope.create({windowId:tab.windowId,url:'https://creator.douyin.com/creator-micro/data/following/chat'});
     }
-    // A loaded self/select page need not issue UIFID. Initialize the actual
-    // recommendation feed in an owned tab; never navigate the user's page.
-    const main=host==='www.douyin.com'&&!needsMainWarmup?tab:await scope.create({windowId:tab.windowId,url:'https://www.douyin.com/?recommend=1'});
+    // Even with UIFID, an idle existing page need not emit a fresh SDK Token.
+    // Always initialize an owned main page; never navigate the user's page.
+    const main=await scope.create({windowId:tab.windowId,url:'https://www.douyin.com/?recommend=1'});
+    captureProgress('正在等待主站与创作者页面初始化…');
     await Promise.all([waitLoaded(creator.id,'creator.douyin.com'),waitLoaded(main.id,'www.douyin.com')]);
-    if(await resolveCookieStoreId(await chrome.tabs.get(main.id))!==storeId)throw new Error('主站页面与当前窗口不在同一 Cookie 存储');
+    if(await resolveCookieStoreId(await boundedRead(()=>chrome.tabs.get(main.id),'读取主站标签资料失败或超时'))!==storeId)throw new Error('主站页面与当前窗口不在同一 Cookie 存储');
     const initialCreator=await cookieHeaderForUrl('https://creator.douyin.com/',storeId);
     const sid=DyCapture.session(initialCreator);if(!sid)throw new Error('创作者中心未取得登录会话');
     let account=null;
-    for(let i=0;i<4;i++){
+    for(let i=0;i<3;i++){
+      captureProgress(`正在校验当前账号资料（${i+1}/3）…`);
       account=await fetchLoggedInAccount(creator.id);
       if(account?.sec_uid && account.nickname && !account.error)break;
       await new Promise(r=>setTimeout(r,750));
     }
-    if(!account?.sec_uid || !account.nickname || account.error)throw new Error('创作者中心账号资料校验失败，请先确认该页面已登录；本次未生成凭证');
+    if(!account?.sec_uid || !account.nickname || account.error)throw new Error(accountReadFailure(account));
     if(DyCapture.session(await cookieHeaderForUrl('https://creator.douyin.com/',storeId))!==sid)throw new Error('账号资料读取期间切换了登录会话，请重新采集');
     const deadline=Date.now()+30000;let selected=null;let missing=[];let readFailures=0;let recommendationAttempts=0;let recommendationLastAttempt=0;
     while(Date.now()<deadline){

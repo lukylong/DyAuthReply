@@ -458,9 +458,14 @@ impl Workbench {
         let mut changed = std::collections::BTreeSet::new();
         let now = now_ms();
         for event in events {
+            // The durable spool accepts a bounded 1 MiB page. A stricter 64 KiB
+            // display-input cap poisoned valid rich receipts and every subsequent
+            // HTTP/WS drain. Keep parsing bounded by the upstream spool budget;
+            // visible text/media retain their independent, smaller display limits.
             anyhow::ensure!(
                 event.version == 1
-                    && event.content_json.len() <= 64 * 1024
+                    && u64::try_from(event.content_json.len())?
+                        <= crate::runtime::inbound::MAX_PENDING_BYTES
                     && event.conversation_id.len() <= 256,
                 "invalid projection event"
             );

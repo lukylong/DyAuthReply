@@ -151,6 +151,7 @@ jobs:
           node scripts/client/test_abogus_user_agent.mjs
           node scripts/client/test_current_abogus.mjs
           node scripts/client/test_capture_extension.mjs
+          node scripts/client/test_reply_log_presentation.mjs
 
       - name: Run Clippy
         run: cargo clippy --locked --manifest-path dyauthreply-client/agent/Cargo.toml --all-targets -- -D warnings

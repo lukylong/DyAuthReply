@@ -108,6 +108,13 @@ fn fallback(decoded_text: Option<&str>) -> Described {
 }
 
 fn labelled(kind: &'static str, content: String) -> Described {
+    // A large display value must not disconnect the account's receive channel.
+    // Preserve its exact delivery identity, but never present truncated text as complete.
+    let (kind, content) = if content.len() > 16 * 1024 {
+        ("other", "[消息内容过长，请在抖音查看]".to_owned())
+    } else {
+        (kind, content)
+    };
     Described {
         kind,
         content,

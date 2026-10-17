@@ -68,7 +68,7 @@ fn projection_failure_preserves_transaction_and_notification_order() {
     db.ensure_account("a", "self").unwrap();
     let mut notices = db.changed.subscribe();
     let mut bad = event("bad", "peer");
-    bad.content_json = "x".repeat(65537);
+    bad.content_json = "x".repeat(1024 * 1024 + 1);
     assert!(db
         .project("a", "self", &[event("new", "peer"), bad])
         .is_err());
@@ -537,4 +537,66 @@ fn reprojection_refreshes_labels_and_media_but_never_rewrites_text() {
     altered.text = Some("different".into());
     altered.content_json = r#"{"text":"different"}"#.into();
     assert!(db.project("a", "self", &[altered]).is_err());
+}
+
+#[test]
+fn oversized_rich_inbound_does_not_poison_following_messages() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Workbench::open(root.path()).unwrap();
+    db.ensure_account("a", "self").unwrap();
+    let mut rich = event("oversized-rich", "peer");
+    rich.text = None;
+    rich.content_json = json!({"stickers":["x".repeat(89_809)],"hint_text":""}).to_string();
+    db.project("a", "self", &[rich, event("following-text", "peer")])
+        .unwrap();
+    let conversations = db.conversations("a", 1, 50, "").unwrap();
+    let id = conversations["items"][0]["id"].as_str().unwrap();
+    let messages = db.messages("a", id).unwrap();
+    assert_eq!(messages.as_array().unwrap().len(), 2);
+    assert!(messages
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["content"] == "hello"));
+    assert!(messages
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|m| m["content"].as_str().unwrap().len() <= 16 * 1024));
+}
+
+#[test]
+fn oversized_control_inbound_stays_hidden_without_blocking_text() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Workbench::open(root.path()).unwrap();
+    db.ensure_account("a", "self").unwrap();
+    let mut control = event("oversized-control", "peer");
+    control.text = None;
+    control.content_json = json!({"read_index":1,"extra":"x".repeat(89_809)}).to_string();
+    db.project("a", "self", &[control, event("following-text", "peer")])
+        .unwrap();
+    let conversations = db.conversations("a", 1, 50, "").unwrap();
+    let id = conversations["items"][0]["id"].as_str().unwrap();
+    assert_eq!(db.messages("a", id).unwrap().as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn oversized_display_text_inbound_has_bounded_placeholder() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Workbench::open(root.path()).unwrap();
+    db.ensure_account("a", "self").unwrap();
+    let mut large = event("oversized-text", "peer");
+    large.text = Some("中".repeat(6000));
+    large.content_json = json!({"text":large.text}).to_string();
+    db.project("a", "self", &[large, event("following-text", "peer")])
+        .unwrap();
+    let conversations = db.conversations("a", 1, 50, "").unwrap();
+    let id = conversations["items"][0]["id"].as_str().unwrap();
+    let messages = db.messages("a", id).unwrap();
+    assert_eq!(messages.as_array().unwrap().len(), 2);
+    assert!(messages
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["content"] == "[消息内容过长，请在抖音查看]"));
 }

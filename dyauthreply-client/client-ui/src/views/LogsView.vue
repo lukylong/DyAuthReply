@@ -264,7 +264,7 @@ onUnmounted(() => {
           </colgroup>
           <thead>
             <tr>
-              <th>触发时间</th>
+              <th title="客户端处理该记录的时间，不是消息原始发送时间">处理时间</th>
               <th>发送账号 / 联系人</th>
               <th>发送结果</th>
               <th>回复内容与原因</th>
@@ -404,7 +404,7 @@ onUnmounted(() => {
             <dd>{{ selected.peer_nickname || "—" }}</dd>
           </div>
           <div>
-            <dt>触发时间</dt>
+            <dt title="客户端处理该记录的时间，不是消息原始发送时间">处理时间</dt>
             <dd>{{ selected.sys_create_datetime }}</dd>
           </div>
           <div>

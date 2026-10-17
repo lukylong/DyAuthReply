@@ -225,13 +225,13 @@ impl PlanPass<'_> {
         if decision.is_silent() {
             // Control/group/empty packets are not direct messages; keep them out of the reply log.
             self.store.consume_inbound(self.lease, key(receipt), None)?;
-        } else if decision.is_terminal_ignore() {
+        } else if let Some(reason) = terminal_skip_reason(decision) {
             self.store.consume_inbound_audited(
                 self.lease,
                 key(receipt),
                 crate::store::DecisionAudit {
                     result: "skipped",
-                    reason: "启用前或已过期消息，不补发",
+                    reason,
                     rule_id: None,
                 },
             )?;
@@ -404,6 +404,16 @@ impl PlanPass<'_> {
         }
     }
 }
+// Report the actual eligibility branch; a self echo is not an expired incoming message.
+fn terminal_skip_reason(decision: Eligibility) -> Option<&'static str> {
+    match decision {
+        Eligibility::IgnoreSelf => Some("本人发出的消息，不自动回复"),
+        Eligibility::IgnoreHistory => Some("消息早于本次接收或自动回复启用时间，不补发"),
+        Eligibility::IgnoreExpired => Some("消息超过5分钟有效回复窗口，不补发"),
+        _ => None,
+    }
+}
+
 fn key(receipt: &InboundReceipt) -> InboundReceiptKey<'_> {
     InboundReceiptKey {
         stream: &receipt.stream,
@@ -416,6 +426,33 @@ fn key(receipt: &InboundReceipt) -> InboundReceiptKey<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn skipped_audit_distinguishes_self_history_and_expired_messages() {
+        assert_eq!(
+            terminal_skip_reason(Eligibility::IgnoreSelf),
+            Some("本人发出的消息，不自动回复")
+        );
+        assert_eq!(
+            terminal_skip_reason(Eligibility::IgnoreHistory),
+            Some("消息早于本次接收或自动回复启用时间，不补发")
+        );
+        assert_eq!(
+            terminal_skip_reason(Eligibility::IgnoreExpired),
+            Some("消息超过5分钟有效回复窗口，不补发")
+        );
+        for decision in [
+            Eligibility::IgnoreSystem,
+            Eligibility::IgnoreNonDirect,
+            Eligibility::IgnoreEmpty,
+            Eligibility::Candidate,
+            Eligibility::DeferIdentity,
+            Eligibility::DeferTimestamp,
+            Eligibility::DeferContent,
+        ] {
+            assert_eq!(terminal_skip_reason(decision), None);
+        }
+    }
+
     fn policy() -> AutomationPolicy {
         AutomationPolicy {
             account_id: "account".into(),

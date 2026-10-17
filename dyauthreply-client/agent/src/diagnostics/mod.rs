@@ -1,4 +1,5 @@
-//! Opt-in runtime diagnostics (off by default). When the user enables it, warnings,
+//! User-controllable runtime diagnostics: a missing preference defaults on after
+//! configuration load; explicit opt-out remains off. While enabled, warnings,
 //! errors and a fixed set of business milestones are captured from tracing,
 //! redacted through a field allow-list, buffered (bounded, saved across restarts by
 //! [`persist`]) and uploaded by [`upload`]. Never captured: message text, nicknames,
@@ -124,13 +125,17 @@ impl Shared {
         }
     }
     /// Loads the persisted switch and, while enabled, the events an earlier run
-    /// had not uploaded; absence or corruption means disabled / nothing saved.
+    /// had not uploaded. A missing preference defaults on; explicit opt-out,
+    /// malformed settings and read failures remain off.
     pub fn load(&self, data_dir: &Path) {
         let path = data_dir.join(SWITCH_FILE);
-        let enabled = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .is_some_and(|value| value["enabled"] == true);
+        let enabled = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<Value>(&bytes)
+                .ok()
+                .and_then(|value| value["enabled"].as_bool())
+                .unwrap_or(false),
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        };
         let _ = self.state_file.set(path);
         let pending = data_dir.join(PENDING_FILE);
         self.enabled.store(enabled, Ordering::Release);

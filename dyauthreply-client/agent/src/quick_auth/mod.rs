@@ -476,6 +476,7 @@ impl Broker {
             if !child_running(&child)? {
                 anyhow::bail!("登录窗口已关闭");
             }
+            let mut poll_delay = Duration::from_secs(2);
             match cdp.collect().await {
                 Ok(mut capture) if capture.candidate.is_some() => {
                     let mut candidate = capture.candidate.take().context("采集结果缺失")?;
@@ -515,8 +516,8 @@ impl Broker {
                     }
                 }
                 Ok(capture) => {
-                    let missing = capture.completeness.missing_fields();
-                    let message = format!("正在初始化主站并补采：{missing}");
+                    poll_delay = cdp.poll_delay();
+                    let message = cdp.progress_message(&capture.completeness);
                     let logged_in = capture.completeness.cookie();
                     self.update(
                         &session_id,
@@ -541,7 +542,7 @@ impl Broker {
                 }
             }
             tokio::select! {
-                () = tokio::time::sleep(Duration::from_secs(2)) => {},
+                () = tokio::time::sleep(poll_delay) => {},
                 changed = stopped.changed() => {
                     if changed.is_err() || *stopped.borrow_and_update() { return Ok(()); }
                 }

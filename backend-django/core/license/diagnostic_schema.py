@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Schemas for opt-in client runtime diagnostics."""
+"""Schemas for user-controllable client runtime diagnostics."""
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -44,6 +44,9 @@ class DiagnosticDeviceOut(Schema):
     error_24h: int
     runtime_phase: Optional[str] = None
     accounts: List[Dict[str, Any]] = Field(default_factory=list)
+    runtime: Dict[str, Any] = Field(default_factory=dict)
+    storage_pressure: Optional[str] = None
+    protocol_parity: Optional[bool] = None
 
 
 class DiagnosticDeviceDetailOut(DiagnosticDeviceOut):

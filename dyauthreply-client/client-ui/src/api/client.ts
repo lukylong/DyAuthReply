@@ -730,7 +730,7 @@ export interface DiagnosticsState {
   status: { last_upload_at: string | null; last_error: string; uploaded_events: number };
 }
 
-/** 运行诊断上报（默认关闭）：读取开关与上报状态。 */
+/** 运行诊断上报（默认开启）：读取开关与上报状态。 */
 export function getDiagnostics() {
   return request<DiagnosticsState>('/diagnostics');
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Opt-in client runtime diagnostics (off by default on the client).
+"""Client runtime diagnostics (on by default; explicit opt-out is preserved).
 
 Only allow-listed, already-redacted fields are accepted from the client: no
 message text, nicknames, sec_uids, cookies, tokens or URLs with parameters.

@@ -499,7 +499,7 @@ DOWNLOAD_RELEASE_PAGE = os.environ.get(
 DOWNLOAD_MACOS_FILE = os.environ.get('DOWNLOAD_MACOS_FILE', 'DAssistant-macos-aarch64.dmg')
 DOWNLOAD_WINDOWS_FILE = os.environ.get('DOWNLOAD_WINDOWS_FILE', 'DAssistant-windows-x64-setup.exe')
 DOWNLOAD_EXTENSION_FILE = os.environ.get('DOWNLOAD_EXTENSION_FILE', 'douyin-cred-extractor.zip')
-DOWNLOAD_EXTENSION_VERSION = os.environ.get('DOWNLOAD_EXTENSION_VERSION') or '2.3.1'
+DOWNLOAD_EXTENSION_VERSION = os.environ.get('DOWNLOAD_EXTENSION_VERSION') or '2.3.2'
 
 # 自建服务器托管（国内直连，规避 GitHub 慢）：
 # 设置 DOWNLOAD_PUBLIC_BASE_URL（如 https://pro.zhenyangtang.com.cn）后，下载链接走
@@ -546,16 +546,16 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.41'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.42'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '修复大体积表情等消息卡住接收队列、账号反复重连或显示灰点的问题，保留有界内存与存储限制\n'
-    '超长展示正文显示明确占位，不再让显示失败拖垮整个账号接收\n'
-    '签名支持读取账号凭证中的 SDK 上下文，避免覆盖已采集的实际配置；不凭空补齐缺失环境信息\n'
-    '回复记录改为准确的处理时间，并区分本人消息、启用前历史消息和超过有效回复窗口的跳过原因\n'
-    '保留账号、聊天、规则和自动回复开关，不重发历史失败或结果不确定的消息\n'
-    '本机指定账号已完成正文实收往返与自动回复测试；SDK 上下文自动采集、跨系统和全账号验收尚未全部完成',
+    '修复快捷登录停在主站 UIFID 的问题：自动进入推荐流初始化正式字段，保留真实会话和签名校验\n'
+    '优化快捷登录并行读取与浏览器扩展预加载，显示采集等待时长和缺失项；扩展更新至 2.3.2\n'
+    '账号仍绑定自动回复规则时阻止删除，停用规则仍需解绑，保留全局规则及已有聊天记录\n'
+    '运行诊断默认开启，保留用户已明确关闭的选择；诊断上传继续脱敏、限量并可随时关闭\n'
+    '同步提供管理后台运行概览与分账号状态展示改进，服务器需部署本版代码后生效\n'
+    '本机 UIFID 采集与导入已验证；本次未新增真实消息发送测试，不重发历史失败消息',
 )

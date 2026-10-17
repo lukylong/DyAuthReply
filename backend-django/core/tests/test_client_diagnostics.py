@@ -116,3 +116,26 @@ class ClientDiagnosticsIngestTests(TestCase):
         self.assertEqual(rows[0]["device_name"], "Win11 Laptop")
         self.assertEqual(purge_expired(), 1)
         self.assertEqual(list_devices(os="macos"), [])
+
+    def test_device_summary_exposes_only_existing_operational_metrics(self):
+        snapshot = {
+            'runtime': {'phase': 'running', 'actor_count': 4, 'queue_depth': 2, 'queue_rejected': 7, 'open_circuit_count': 0, 'signer_failed': 1, 'not_public': 'ignored'},
+            'storage': {'pressure': 'high'}, 'protocol_parity': True,
+            'accounts': [{'account': 'anonymous', 'identity_verified': True, 'inbound': 'ws_healthy', 'send': 'unknown', 'nickname': 'not-public'}, 'malformed'],
+        }
+        self.assertEqual(self.post(self.payload(snapshot=snapshot)).status_code, 200)
+        row = list_devices()[0]
+        self.assertEqual(row['runtime']['queue_depth'], 2)
+        self.assertNotIn('not_public', row['runtime'])
+        self.assertEqual(row['storage_pressure'], 'high')
+        self.assertTrue(row['protocol_parity'])
+        self.assertEqual(len(row['accounts']), 1)
+        self.assertNotIn('nickname', row['accounts'][0])
+
+    def test_missing_summary_fields_are_unknown_not_zero_or_healthy(self):
+        self.assertEqual(self.post(self.payload(snapshot={})).status_code, 200)
+        row = list_devices()[0]
+        self.assertIsNone(row['runtime']['queue_depth'])
+        self.assertIsNone(row['runtime_phase'])
+        self.assertIsNone(row['protocol_parity'])
+        self.assertIsNone(row['storage_pressure'])

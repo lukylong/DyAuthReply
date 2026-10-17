@@ -1,6 +1,6 @@
 [package]
 name = "dyauthreply"
-version = "0.1.41"
+version = "0.1.42"
 description = "DyAuthReply Desktop Client"
 authors = ["DyAuthReply"]
 edition = "2021"

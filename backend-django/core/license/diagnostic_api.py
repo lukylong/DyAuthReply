@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Admin APIs for opt-in client runtime diagnostics."""
+"""Admin APIs for user-controllable client runtime diagnostics."""
 from typing import List
 
 from ninja import Router

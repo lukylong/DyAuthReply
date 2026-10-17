@@ -2,7 +2,7 @@ import type { PaginatedResponse } from './license';
 
 import { requestClient } from '#/api/request';
 
-/** 客户端运行诊断（客户端设置中手动开启，默认关闭；数据已脱敏）。 */
+/** 客户端运行诊断（默认开启，可在客户端设置中关闭；数据已脱敏）。 */
 export interface DiagnosticAccount {
   account: string;
   label?: string;
@@ -26,6 +26,9 @@ export interface DiagnosticDevice {
   error_24h: number;
   runtime_phase: null | string;
   accounts: DiagnosticAccount[];
+  runtime?: Record<string, unknown>;
+  storage_pressure?: null | string;
+  protocol_parity?: boolean | null;
 }
 
 export interface DiagnosticDeviceDetail extends DiagnosticDevice {

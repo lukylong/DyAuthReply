@@ -87,7 +87,7 @@ fn switch_persists_across_loads() {
     let dir = tempfile::tempdir().unwrap();
     let shared = Shared::new();
     shared.load(dir.path());
-    assert!(!shared.enabled());
+    assert!(shared.enabled());
     shared.set_enabled(true).unwrap();
     let reloaded = Shared::new();
     reloaded.load(dir.path());
@@ -197,4 +197,18 @@ fn a_corrupt_saved_file_is_ignored_and_replaced() {
     assert_eq!(shared.pending(), 1);
     shared.persist().unwrap();
     assert_eq!(reload(dir.path()).pending(), 1);
+}
+
+#[test]
+fn diagnostics_defaults_on_only_when_no_saved_choice_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let shared = Shared::new();
+    shared.load(dir.path());
+    assert!(shared.enabled());
+    shared.set_enabled(false).unwrap();
+    assert!(!reload(dir.path()).enabled());
+    std::fs::write(dir.path().join(SWITCH_FILE), b"{broken").unwrap();
+    assert!(!reload(dir.path()).enabled());
+    std::fs::write(dir.path().join(SWITCH_FILE), br#"{"enabled":"false"}"#).unwrap();
+    assert!(!reload(dir.path()).enabled());
 }

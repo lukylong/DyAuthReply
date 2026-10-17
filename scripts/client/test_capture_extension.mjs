@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 const root=new URL('../../browser-extension/douyin-cred-extractor/',import.meta.url);
 const core=readFileSync(new URL('capture-core.js',root),'utf8');
+const popupSource=readFileSync(process.env.DYCAPTURE_POPUP_PATH || new URL('popup.js',root),'utf8');
 const fixture=JSON.parse(readFileSync(new URL('../../dyauthreply-client/agent/tests/fixtures/native_signing.json',import.meta.url),'utf8'));
 const ctx=vm.createContext({URL,TextDecoder,Uint8Array,atob,btoa,crypto:webcrypto});vm.runInContext(core,ctx);
 const c=ctx.DyCapture, token='S'.repeat(164);
@@ -22,35 +23,54 @@ assert.equal(await c.selectMaterial([keys],[ticket.replace(fixture.ree_public,'o
 assert(await c.selectMaterial(['{}',keys],['{}',ticket],cookie));
 console.log('PASS core: real token scope, completeness, session conflicts, matching key/certificate');
 
-async function popupCase(mode){
+async function popupCase(mode, entry="creator"){
  const elements=new Map();const element=id=>{if(!elements.has(id))elements.set(id,{value:'',hidden:true,classList:{add(){},remove(){},toggle(){}},addEventListener(){}});return elements.get(id);};
- let now=100000, removed=[];
+ const needsWarmup=['warmup','never_ready'].includes(mode);
+ let now=100000, removed=[], mainStarted=entry==='www'&&!needsWarmup, recommendationOpened=false;
+ let mainId=entry==='www'?1:null;
+ const tabs=new Map([[1,{id:1,windowId:1,url:`https://${entry}.douyin.com/`,cookieStoreId:'0'}]]);
  const context=vm.createContext({URL,TextDecoder,Uint8Array,atob,btoa,crypto:webcrypto,console,unescape,encodeURIComponent,
    Date:class extends Date {static now(){now+=1000;return now;}},setTimeout(fn,delay){if(delay<5000)fn();return 1;},clearTimeout(){},
    document:{getElementById:element,addEventListener(){}},HTMLElement:class{},navigator:{}});
  const chrome={
-  tabs:{query:async()=>[{id:1,windowId:1,url:'https://creator.douyin.com/creator-micro/home',cookieStoreId:'0'}],
-    create:async()=>({id:2,windowId:1,url:'https://www.douyin.com/jingxuan',cookieStoreId:'0'}),
-    get:async id=>({id,cookieStoreId:'0',status:'loading'}),remove:async id=>removed.push(id)},
-  cookies:{getAllCookieStores:async()=>[{id:'0',tabIds:[1,2]}],getAll:async()=>cookie.split('; ').map(v=>{const[n,...rest]=v.split('=');return {name:n,value:rest.join('=')};})},
-  scripting:{executeScript:async({func,target})=>[{result:String(func).includes('document.readyState')?{ready:'interactive',host:'www.douyin.com'}:String(func).includes('media/user/info')?
-    (mode==='identity'?{error:'not authenticated'}:{nickname:'SAMPLE',sec_uid:'self'}):
-    {origin:target.tabId===1?'creator.douyin.com':'www.douyin.com',keys:[keys],tickets:target.tabId===1?[ticket]:[ticket.replace('ts.2.synthetic','ts.2.stale')],dtrait_blob:mode==='missing'?'':'synthetic-blob',dtrait_path:'/passport/token/beat/web/',ua:'Chrome/152.0',browser_profile:{platform:'MacIntel'}}}]},
-  storage:{session:{get:async list=>Object.fromEntries(list.map(k=>[k,{value:k.endsWith('_token')?token:k.endsWith('_ticket')?ticket:'dtrait',capturedAt:999999,storeId:'0',tabId:2,sourceHost:'www.douyin.com'}]))}}
+  tabs:{query:async()=>[tabs.get(1)],
+    create:async options=>{
+      const next={id:tabs.size+1,windowId:1,url:options.url,cookieStoreId:'0'};
+      if(new URL(options.url).hostname==='www.douyin.com'){
+        assert.equal(options.url,'https://www.douyin.com/?recommend=1','UIFID must bootstrap from recommendation feed');
+        recommendationOpened=true;mainStarted=true;mainId=next.id;
+      }
+      tabs.set(next.id,next);return next;
+    },
+    get:async id=>({...tabs.get(id),status:'loading'}),remove:async id=>removed.push(id)},
+  cookies:{getAllCookieStores:async()=>[{id:'0',tabIds:[...tabs.keys()]}],getAll:async()=>{
+    const raw=needsWarmup&&(!recommendationOpened||mode==='never_ready')?cookie.replace('UIFID=browser','UIFID_TEMP=temporary'):cookie;
+    return raw.split('; ').map(v=>{const[n,...rest]=v.split('=');return {name:n,value:rest.join('=')};});
+  }},
+  scripting:{executeScript:async({func,target})=>{
+    if(String(func).includes('media/user/info'))assert(mainStarted,'main-site warmup must start before the remote identity lookup');
+    const host=new URL(tabs.get(target.tabId).url).hostname;
+    return [{result:String(func).includes('document.readyState')?{ready:'interactive',host}:String(func).includes('media/user/info')?
+      (mode==='identity'?{error:'not authenticated'}:{nickname:'SAMPLE',sec_uid:'self'}):
+      {origin:host,keys:[keys],tickets:host==='creator.douyin.com'?[ticket]:[ticket.replace('ts.2.synthetic','ts.2.stale')],dtrait_blob:mode==='missing'?'':'synthetic-blob',dtrait_path:'/passport/token/beat/web/',ua:'Chrome/152.0',browser_profile:{platform:'MacIntel'}}}];
+  }},
+  storage:{session:{get:async list=>Object.fromEntries(list.map(k=>[k,{value:k.endsWith('_token')?token:k.endsWith('_ticket')?ticket:'dtrait',capturedAt:999999,storeId:'0',tabId:mainId,sourceHost:'www.douyin.com'}]))}}
  };
- context.chrome=chrome;vm.runInContext(core,context);vm.runInContext(readFileSync(new URL('popup.js',root),'utf8'),context);
+ context.chrome=chrome;vm.runInContext(core,context);vm.runInContext(popupSource,context);
  await vm.runInContext('grab()',context);
- if(mode==='success'){
+ if(['success','warmup'].includes(mode)){
   assert(element('bundle').value.startsWith('DYCRED1.'),element('tabHint').textContent);
   const payload=JSON.parse(Buffer.from(element('bundle').value.slice(8),'base64url'));
   assert.equal(payload.capture_version,2);assert.equal(payload.query_ms_token,token);assert.equal(payload.sec_uid,'self');
   assert.equal(element('result').hidden,false);
  } else {assert.equal(element('bundle').value,'');assert.equal(element('result').hidden,true);assert.equal(element('tabHint').hidden,false);}
+ if(needsWarmup)assert(recommendationOpened,'missing UIFID must initialize the recommendation feed');
  assert.equal(element('grabBtn').disabled,false);
- assert.deepEqual(removed,mode==='identity'?[]:[2]);
- console.log('PASS popup: '+mode+', no stale bundle, owned-tab cleanup');
+ assert.deepEqual(removed,[...tabs.keys()].filter(id=>id!==1));
+ assert.equal(tabs.get(1).url,`https://${entry}.douyin.com/`,'never navigate or close the user tab');
+ console.log('PASS popup: '+mode+' / '+entry+', real UIFID requirement and owned-tab cleanup');
 }
-await popupCase('success');await popupCase('missing');await popupCase('identity');
+await popupCase('success');await popupCase('success','www');await popupCase('warmup','www');await popupCase('never_ready','www');await popupCase('missing');await popupCase('identity');
 console.log('PASS extension capture regression suite');
 const listeners={}, saved={};
 const bg=vm.createContext({URL,TextDecoder,Uint8Array,atob,btoa,Date,crypto:webcrypto});

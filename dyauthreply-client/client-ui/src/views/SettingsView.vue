@@ -152,7 +152,7 @@ function handleReset() {
   }
 }
 
-// 运行诊断上报：默认关闭；开启后定期上报脱敏的运行状态与告警，便于远程排查问题
+// 运行诊断上报：默认开启；开启后定期上报脱敏的运行状态与告警，便于远程排查问题
 const diagnostics = ref<DiagnosticsState | null>(null);
 const diagnosticsBusy = ref(false);
 const diagnosticsError = ref("");
@@ -254,7 +254,7 @@ const updateStatusType = computed<"info" | "error" | "success" | "update">(
           @click="activeTab = 'diagnostics'; loadDiagnostics()"
         >
           <Activity :size="18" /><span
-            >运行诊断<small>协助排查问题（默认关闭）</small></span
+            >运行诊断<small>协助排查问题（默认开启）</small></span
           >
         </button>
         <p class="nav-note">
@@ -304,12 +304,12 @@ const updateStatusType = computed<"info" | "error" | "success" | "update">(
         <section v-if="activeTab === 'diagnostics'" class="settings-section">
           <header>
             <h2>运行诊断</h2>
-            <p>遇到问题时开启，可让技术支持直接看到客户端的运行状况，更快定位原因。</p>
+            <p>默认上报脱敏运行诊断，便于技术支持查看运行状况；已明确关闭的设置会保留。</p>
           </header>
           <label class="setting-row"
             ><span
               ><b>上报运行诊断数据</b
-              ><small>默认关闭。开启后约每 15 分钟上报一次，关闭后立即停止并丢弃未上报的数据。</small></span
+              ><small>默认开启，保留已关闭的选择。开启后约每 15 分钟上报一次，关闭后立即停止并丢弃未上报的数据。</small></span
             ><input
               type="checkbox"
               role="switch"
@@ -317,7 +317,7 @@ const updateStatusType = computed<"info" | "error" | "success" | "update">(
               :checked="diagnostics?.enabled ?? false"
               @change="onDiagnosticsChange"
           /></label>
-          <p v-if="diagnostics && !diagnostics.available" class="note">激活授权后才能开启。</p>
+          <p v-if="diagnostics && !diagnostics.available" class="note">激活授权后才能上报。</p>
           <div class="setting-row">
             <span
               ><b>会上报的内容</b

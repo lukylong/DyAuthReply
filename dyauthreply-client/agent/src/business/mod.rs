@@ -42,6 +42,41 @@ pub struct BusinessStore {
     current: RwLock<Arc<Snapshot>>,
 }
 impl Document {
+    /// Reject deletion while any explicit binding remains, including disabled rules.
+    /// Global fallback rules are not explicit bindings and are left untouched.
+    /// # Errors
+    /// Lists the rules the user must unbind before removing an account.
+    pub fn ensure_account_unbound(&self, account_id: &str) -> Result<()> {
+        let bound: Vec<_> = self
+            .rules
+            .iter()
+            .filter(|rule| {
+                rule["account_ids"]
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(account_id)))
+                    || rule["account_id"].as_str() == Some(account_id)
+            })
+            .collect();
+        if !bound.is_empty() {
+            let names = bound
+                .iter()
+                .take(8)
+                .map(|rule| {
+                    rule["name"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("未命名规则")
+                        .chars()
+                        .take(80)
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("、");
+            anyhow::bail!("账号仍绑定 {} 条自动回复规则：{}。请先在自动回复规则中取消绑定，再删除账号（停用规则不等于解绑）。", bound.len(), names);
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn seed(rules: Vec<Value>, policies: Vec<AutomationPolicy>) -> Self {
         Self {

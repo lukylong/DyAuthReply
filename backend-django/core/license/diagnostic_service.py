@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Opt-in client diagnostics: bounded ingest, retention and admin queries.
+"""User-controllable client diagnostics: bounded ingest, retention and admin queries.
 
 The client already redacts, but the server enforces the same allow-list so an
 old or modified client cannot store message text, identities or secrets here.
@@ -115,6 +115,7 @@ def _device_row(state: ClientDiagnosticState, warn: int, error: int) -> Dict[str
     snapshot = state.snapshot if isinstance(state.snapshot, dict) else {}
     runtime = snapshot.get("runtime") if isinstance(snapshot.get("runtime"), dict) else {}
     accounts = snapshot.get("accounts") if isinstance(snapshot.get("accounts"), list) else []
+    storage = snapshot.get("storage") if isinstance(snapshot.get("storage"), dict) else {}
     return {
         "device_id": str(state.device_id),
         "device_name": state.device.device_name,
@@ -126,8 +127,14 @@ def _device_row(state: ClientDiagnosticState, warn: int, error: int) -> Dict[str
         "report_count": state.report_count,
         "warn_24h": warn,
         "error_24h": error,
-        "runtime_phase": runtime.get("phase"),
-        "accounts": accounts,
+        "runtime_phase": runtime.get("phase") if isinstance(runtime.get("phase"), str) else None,
+        "accounts": [
+            {key: item[key] for key in ("account", "label", "lifecycle", "inbound", "send", "ownership", "identity_verified") if key in item}
+            for item in accounts if isinstance(item, dict)
+        ],
+        "runtime": {key: runtime.get(key) for key in ("phase", "actor_count", "queue_depth", "queue_rejected", "open_circuit_count", "signer_failed")},
+        "storage_pressure": storage.get("pressure") if isinstance(storage.get("pressure"), str) else None,
+        "protocol_parity": snapshot.get("protocol_parity") if isinstance(snapshot.get("protocol_parity"), bool) else None,
     }
 
 

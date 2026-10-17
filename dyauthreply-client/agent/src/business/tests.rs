@@ -349,3 +349,66 @@ fn failed_initial_import_can_retry_without_publishing_an_empty_configuration() {
         "preserved"
     );
 }
+
+#[test]
+fn account_removal_requires_unbinding_even_disabled_rules() {
+    let (_root, store) = fixture();
+    let rule = create(&store, "reply");
+    store
+        .change(|doc| {
+            Edit::Rule {
+                id: Some(rule["id"].as_str().unwrap().into()),
+                input: json!({"status":false}),
+            }
+            .apply(doc)
+        })
+        .unwrap();
+    let before = store.snapshot().unwrap();
+    let error = before
+        .document
+        .ensure_account_unbound("a")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("测试规则") && error.contains("取消绑定"));
+    assert_eq!(
+        store.snapshot().unwrap().document.revision,
+        before.document.revision
+    );
+    store
+        .change(|doc| {
+            Edit::Rule {
+                id: Some(rule["id"].as_str().unwrap().into()),
+                input: json!({"account_ids":[]}),
+            }
+            .apply(doc)
+        })
+        .unwrap();
+    store
+        .snapshot()
+        .unwrap()
+        .document
+        .ensure_account_unbound("a")
+        .unwrap();
+    assert_eq!(store.snapshot().unwrap().document.rules.len(), 1);
+}
+
+#[test]
+fn account_removal_does_not_confuse_global_or_other_account_rules_with_bindings() {
+    let doc = Document::seed(
+        vec![
+            json!({"name":"global","account_ids":[]}),
+            json!({"name":"other","account_ids":["b"]}),
+        ],
+        vec![policy()],
+    );
+    doc.ensure_account_unbound("a").unwrap();
+    let legacy = Document::seed(
+        vec![json!({"name":"legacy","account_id":"a"})],
+        vec![policy()],
+    );
+    assert!(legacy
+        .ensure_account_unbound("a")
+        .unwrap_err()
+        .to_string()
+        .contains("legacy"));
+}

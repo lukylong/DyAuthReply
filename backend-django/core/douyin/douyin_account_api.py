@@ -8,6 +8,7 @@
 """
 from typing import List
 
+from django.db import transaction
 from django.shortcuts import get_object_or_404
 from ninja import Query, Router
 from ninja.errors import HttpError
@@ -46,11 +47,26 @@ from core.douyin.douyin_session_schema import (
 router = Router()
 
 
+def _ensure_account_rules_unbound(account: DouyinAccount) -> None:
+    from core.douyin.douyin_rule_model import DouyinRule
+
+    account_id = str(account.id)
+    names = []
+    for rule in DouyinRule.objects.filter(is_deleted=False).only('name', 'account_id', 'account_ids').iterator():
+        if str(rule.account_id or '') == account_id or account_id in {str(value) for value in (rule.account_ids or [])}:
+            names.append(rule.name or '未命名规则')
+    if names:
+        raise HttpError(400, f"账号仍绑定 {len(names)} 条自动回复规则：{'、'.join(names[:8])}。请先取消规则绑定后再删除（停用规则不等于解绑）。")
+
+
+@transaction.atomic
 def _delete_douyin_account_with_storage(account: DouyinAccount) -> None:
     """删除账号并清理加密登录态 / scan cursor，避免 quick-create 失败留孤儿 .bin。"""
     from core.douyin.runtime.storage import delete_account_runtime_state
 
     account_id = str(account.id)
+    account = DouyinAccount.objects.select_for_update().get(id=account_id)
+    _ensure_account_rules_unbound(account)
     account.delete()
     delete_account_runtime_state(account_id)
 
@@ -465,6 +481,7 @@ def patch_douyin_account(request, account_id: str, data: DouyinAccountSchemaPatc
 
 
 @router.delete("/account/{account_id}", response=DouyinAccountSchemaOut, summary="删除抖音账号")
+@transaction.atomic
 def delete_douyin_account(request, account_id: str):
     """硬删除账号：在线账号需先登出/禁用。
 
@@ -474,7 +491,8 @@ def delete_douyin_account(request, account_id: str):
     """
     from contextlib import suppress
 
-    account = get_object_or_404(DouyinAccount, id=account_id)
+    account = get_object_or_404(DouyinAccount.objects.select_for_update(), id=account_id)
+    _ensure_account_rules_unbound(account)
     if account.auto_reply_enabled:
         raise HttpError(400, "请先关闭该账号的自动回复后再删除")
 
@@ -498,15 +516,17 @@ def batch_delete_douyin_account(request, data: DouyinAccountBatchDeleteIn):
     success = 0
     for aid in data.ids:
         try:
-            acc = DouyinAccount.objects.get(id=aid)
-            if acc.auto_reply_enabled:
-                failed_ids.append(aid)
-                continue
-            with suppress(Exception):
-                command_publisher.send_session_control(aid, 'stop')
-            _delete_douyin_account_with_storage(acc)
-            success += 1
-        except DouyinAccount.DoesNotExist:
+            with transaction.atomic():
+                acc = DouyinAccount.objects.select_for_update().get(id=aid)
+                _ensure_account_rules_unbound(acc)
+                if acc.auto_reply_enabled:
+                    failed_ids.append(aid)
+                    continue
+                with suppress(Exception):
+                    command_publisher.send_session_control(aid, 'stop')
+                _delete_douyin_account_with_storage(acc)
+                success += 1
+        except (DouyinAccount.DoesNotExist, HttpError):
             failed_ids.append(aid)
     return DouyinAccountBatchDeleteOut(count=success, failed_ids=failed_ids)
 

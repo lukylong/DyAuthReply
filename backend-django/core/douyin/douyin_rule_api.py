@@ -145,7 +145,7 @@ def _validate_accounts_exist(account_ids: list[str]) -> None:
     if not account_ids:
         return
     existing = set(
-        str(x) for x in DouyinAccount.objects.filter(id__in=account_ids).values_list('id', flat=True)
+        str(x) for x in DouyinAccount.objects.select_for_update().filter(id__in=account_ids, is_deleted=False).order_by('id').values_list('id', flat=True)
     )
     missing = [a for a in account_ids if a not in existing]
     if missing:
@@ -353,8 +353,8 @@ def patch_rule(request, rule_id: str, data: DouyinRuleSchemaPatch):
     rule = get_object_or_404(DouyinRule, id=rule_id)
     raw = data.dict(exclude_unset=True)
     force_move = bool(raw.pop('force_move', False))
-    has_account_ids = 'account_ids' in raw
-    account_ids = _normalize_account_ids(raw.pop('account_ids', None)) if has_account_ids else None
+    has_account_ids = 'account_ids' in raw or 'account_id' in raw
+    account_ids = _normalize_account_ids(raw.pop('account_ids', None), raw.get('account_id')) if has_account_ids else None
     updates = _normalize_rule_payload(raw)
     # _normalize_rule_payload 会注入 account_id/template_id 默认值，patch 下需剔除未显式传入的键
     if 'account_id' not in raw:
@@ -404,8 +404,9 @@ def batch_delete_rule(request, data: DouyinRuleBatchDeleteIn):
     response=DouyinRuleQuickEnableOut,
     summary="一键开启陌生人消息自动回复",
 )
+@transaction.atomic
 def quick_enable_rule(request, data: DouyinRuleQuickEnableIn):
-    account = DouyinAccount.objects.filter(id=data.account_id).first()
+    account = DouyinAccount.objects.select_for_update().filter(id=data.account_id, is_deleted=False).first()
     if not account:
         raise HttpError(400, "所属抖音账号不存在")
 

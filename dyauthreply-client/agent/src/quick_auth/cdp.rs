@@ -96,6 +96,8 @@ impl Completeness {
 
     pub fn missing_fields(&self) -> String {
         [
+            ("cookie", "登录会话"),
+            ("scoped_cookies", "分域登录会话"),
             ("main_uifid", "主站UIFID"),
             ("main_fingerprint", "主站指纹"),
             ("sdk_token", "SDK Token"),
@@ -158,6 +160,7 @@ pub struct CdpClient {
     creator_identity: Option<Value>,
     creator_session: Option<String>,
     creator_material: Value,
+    main_started: Option<tokio::time::Instant>,
 }
 
 impl CdpClient {
@@ -173,6 +176,7 @@ impl CdpClient {
             creator_identity: None,
             creator_session: None,
             creator_material: Value::Null,
+            main_started: None,
         })
     }
 
@@ -198,15 +202,28 @@ impl CdpClient {
     /// # Errors
     /// Returns malformed/oversized CDP, page or credential data without exposing secrets.
     pub async fn collect(&mut self) -> Result<Capture> {
-        let storage = self.command("Storage.getCookies", json!({})).await?;
-        let www = self.cookies_for("https://www.douyin.com/").await?;
-        let creator = self.cookies_for("https://creator.douyin.com/").await?;
-        let imapi = self.cookies_for("https://imapi.douyin.com/").await?;
-        let page = self
-            .command(
-                "Runtime.evaluate",
-                json!({"expression":PAGE_INFO,"awaitPromise":true,"returnByValue":true}),
-            )
+        // These read-only commands are independent. Pipeline them over the same
+        // socket, retaining per-origin cookies and dispatching replies by id.
+        let [storage, www, creator, imapi, page] = self
+            .commands([
+                ("Storage.getCookies", json!({})),
+                (
+                    "Network.getCookies",
+                    json!({"urls":["https://www.douyin.com/"]}),
+                ),
+                (
+                    "Network.getCookies",
+                    json!({"urls":["https://creator.douyin.com/"]}),
+                ),
+                (
+                    "Network.getCookies",
+                    json!({"urls":["https://imapi.douyin.com/"]}),
+                ),
+                (
+                    "Runtime.evaluate",
+                    json!({"expression":PAGE_INFO,"awaitPromise":true,"returnByValue":true}),
+                ),
+            ])
             .await?;
         let mut page = page
             .pointer("/result/value")
@@ -230,9 +247,12 @@ impl CdpClient {
                 };
                 self.send_only(
                     "Page.navigate",
-                    json!({"url":"https://www.douyin.com/user/self?from_tab_name=main"}),
+                    // The recommendation feed issues the formal UIFID. A self
+                    // profile (or jingxuan) may load fully with only UIFID_TEMP.
+                    json!({"url":"https://www.douyin.com/?recommend=1"}),
                 )
                 .await?;
+                self.main_started = Some(tokio::time::Instant::now());
             }
             return Ok(waiting_capture(cookie_value(&www, "sessionid").is_some()));
         }
@@ -256,23 +276,55 @@ impl CdpClient {
         self.command("Browser.close", json!({})).await.map(|_| ())
     }
 
-    async fn cookies_for(&mut self, url: &str) -> Result<Value> {
-        self.command("Network.getCookies", json!({"urls":[url]}))
-            .await
+    pub fn poll_delay(&self) -> std::time::Duration {
+        // Poll local state more responsively during initial main-site loading,
+        // not remote identity/verification APIs. Back off if the site stalls.
+        if self
+            .main_started
+            .is_some_and(|t| t.elapsed().as_secs() < 30)
+        {
+            std::time::Duration::from_millis(500)
+        } else {
+            std::time::Duration::from_secs(2)
+        }
+    }
+
+    pub fn progress_message(&self, completeness: &Completeness) -> String {
+        let Some(started) = self.main_started else {
+            return "登录已识别，正在读取创作者账号资料".into();
+        };
+        let seconds = started.elapsed().as_secs();
+        let missing = completeness.missing_fields();
+        if seconds >= 30 {
+            let uifid_hint = if completeness.0.get("main_uifid") == Some(&false) {
+                "临时 UIFID 不替代正式 UIFID；"
+            } else {
+                ""
+            };
+            format!("主站初始化已等待 {seconds} 秒，仍缺少：{missing}。请查看登录窗口是否有验证或加载错误；{uifid_hint}未完成前不会导入")
+        } else {
+            format!("正在读取主站信息（{seconds} 秒），等待：{missing}")
+        }
     }
 
     async fn command(&mut self, method: &str, params: Value) -> Result<Value> {
-        self.next_id = self.next_id.checked_add(1).context("CDP指令序号溢出")?;
-        let id = self.next_id;
-        self.socket
-            .send(Message::Text(
-                json!({"id":id,"method":method,"params":params})
-                    .to_string()
-                    .into(),
-            ))
-            .await?;
+        let [result] = self.commands([(method, params)]).await?;
+        Ok(result)
+    }
+
+    async fn commands<const N: usize>(
+        &mut self,
+        commands: [(&str, Value); N],
+    ) -> Result<[Value; N]> {
+        let mut ids = [0; N];
+        for (index, (method, params)) in commands.into_iter().enumerate() {
+            self.send_only(method, params).await?;
+            ids[index] = self.next_id;
+        }
         let response = tokio::time::timeout(COMMAND_TIMEOUT, async {
-            loop {
+            let mut results: [Value; N] = std::array::from_fn(|_| Value::Null);
+            let mut received = [false; N];
+            while received.contains(&false) {
                 let message = self.socket.next().await.context("CDP连接已关闭")??;
                 let text = match message {
                     Message::Text(text) => text,
@@ -289,14 +341,20 @@ impl CdpClient {
                     observe_event(&mut self.captured, &value);
                     continue;
                 }
-                if value["id"].as_u64() != Some(id) {
+                let Some(index) = ids.iter().position(|id| value["id"].as_u64() == Some(*id))
+                else {
+                    continue;
+                };
+                if received[index] {
                     continue;
                 }
                 if value.get("error").is_some() {
                     anyhow::bail!("浏览器采集指令执行失败");
                 }
-                return Ok(value["result"].clone());
+                results[index] = value["result"].clone();
+                received[index] = true;
             }
+            Ok::<_, anyhow::Error>(results)
         })
         .await
         .context("浏览器采集响应超时")??;
@@ -773,6 +831,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn collection_pipelines_five_reads_before_waiting_for_responses() {
+        // A CDP peer releases results only once the whole read batch arrives.
+        // This deterministically detects serial round trips without timing a real site.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let mut requests = Vec::new();
+            for _ in 0..5 {
+                let Some(Ok(Message::Text(text))) = socket.next().await else {
+                    return;
+                };
+                requests.push(serde_json::from_str::<Value>(&text).unwrap());
+            }
+            // Events and responses may arrive interleaved and out of order.
+            socket.send(Message::Text(json!({"method":"Network.requestWillBeSent","params":{
+                "requestId":"synthetic","request":{"url":"https://www.douyin.com/path?msToken=SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS"}
+            }}).to_string().into())).await.unwrap();
+            for request in requests.into_iter().rev() {
+                let result = if request["method"] == "Runtime.evaluate" {
+                    json!({"result":{"value":{"origin":"www.douyin.com"}}})
+                } else {
+                    cookies()
+                };
+                socket
+                    .send(Message::Text(
+                        json!({"id":request["id"],"result":result})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
+            .await
+            .unwrap();
+        client.creator_identity = Some(json!({"sec_uid":"synthetic","nickname":"SAMPLE"}));
+        client.creator_session = Some("session-one".into());
+        client.captured.main_site = true;
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(1), client.collect()).await;
+        task.abort();
+        let capture = result
+            .expect("five reads should be in flight together")
+            .unwrap();
+        assert!(capture.completeness.cookie());
+        assert!(capture.candidate.is_none()); // Missing signing keys still blocks completion.
+        assert_eq!(client.captured.query_ms_token, "S".repeat(32));
+    }
+
+    #[tokio::test]
     async fn fake_cdp_peer_produces_complete_bounded_candidate() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -798,6 +909,10 @@ mod tests {
                         .unwrap_or("")
                         .starts_with("https://www.douyin.com/")
                 {
+                    assert_eq!(
+                        request["params"]["url"], "https://www.douyin.com/?recommend=1",
+                        "UIFID bootstrap must load recommendation feed, not profile/select pages"
+                    );
                     host = "www.douyin.com";
                 }
                 let result = match method {
@@ -858,6 +973,97 @@ mod tests {
             build_candidate(&storage, &scoped, &scoped, &scoped, &page, &captured).unwrap();
         assert!(!result.completeness.ready());
         assert!(result.candidate.is_none());
+    }
+
+    #[test]
+    fn temporary_uifid_does_not_pass_main_site_completeness() {
+        let mut scoped = cookies();
+        for cookie in scoped["cookies"].as_array_mut().unwrap() {
+            if cookie["name"] == "UIFID" {
+                cookie["name"] = json!("UIFID_TEMP");
+            }
+        }
+        let capture = build_candidate(
+            &cookies(),
+            &scoped,
+            &scoped,
+            &scoped,
+            &json!({"ua":"synthetic","account":{"sec_uid":"self","nickname":"SAMPLE"}}),
+            &NetworkCapture::default(),
+        )
+        .unwrap();
+        assert!(!capture.completeness.0["main_uifid"]);
+        assert!(capture.candidate.is_none());
+        assert!(capture.completeness.missing_fields().contains("主站UIFID"));
+    }
+
+    #[tokio::test]
+    async fn capture_polling_backs_off_and_explains_missing_fields() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            accept_async(stream).await.unwrap()
+        });
+        let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
+            .await
+            .unwrap();
+        let _socket = peer.await.unwrap();
+        assert_eq!(client.poll_delay().as_millis(), 2000);
+        client.main_started = Some(tokio::time::Instant::now());
+        assert_eq!(client.poll_delay().as_millis(), 500);
+        client.main_started =
+            Some(tokio::time::Instant::now() - std::time::Duration::from_secs(31));
+        assert_eq!(client.poll_delay().as_millis(), 2000);
+        let message =
+            client.progress_message(&Completeness::new([true; 6]).with_main(false, true, true));
+        assert!(message.contains("31 秒"));
+        assert!(message.contains("主站UIFID"));
+        assert!(message.contains("未完成前不会导入"));
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_errors_and_ignores_late_replies() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let Some(Ok(Message::Text(first))) = socket.next().await else {
+                panic!("request missing");
+            };
+            let first: Value = serde_json::from_str(&first).unwrap();
+            socket
+                .send(Message::Text(
+                    json!({"id":first["id"],"error":{"code":-1}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            let Some(Ok(Message::Text(second))) = socket.next().await else {
+                panic!("request missing");
+            };
+            let second: Value = serde_json::from_str(&second).unwrap();
+            for response in [
+                json!({"id":first["id"],"result":{"stale":true}}),
+                json!({"id":second["id"],"result":{"fresh":true}}),
+            ] {
+                socket
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
+            .await
+            .unwrap();
+        assert!(client.command("Test.read", json!({})).await.is_err());
+        assert_eq!(
+            client.command("Test.read", json!({})).await.unwrap(),
+            json!({"fresh":true})
+        );
+        peer.await.unwrap();
     }
 
     #[test]

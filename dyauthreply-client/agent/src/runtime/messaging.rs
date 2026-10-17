@@ -491,35 +491,37 @@ impl ManualService {
     /// # Errors
     /// Quiesces admission and blocks active sends while retaining uncertain audit history.
     pub async fn retire_account(&self, id: &str) -> Result<()> {
-        if let Ok(slot) = self.slot(id) {
-            let _submission = slot.submission.lock().await;
-            let _configuration = self.inner.configuration_gate.write().await;
-            anyhow::ensure!(
-                !self
-                    .inner
-                    .business
-                    .snapshot()?
-                    .policies
-                    .get(id)
-                    .is_some_and(|p| p.enabled),
-                "请先关闭自动回复再移除账号"
-            );
-            anyhow::ensure!(
-                !self.inner.store.has_blocking_account_removal_work(id)?,
-                "账号仍有尚未发送或正在发送的任务，请等待处理后再移除；历史待核验记录不会阻止删除"
-            );
-            self.inner.registry.delete(id)?;
-            let account = AccountId::new(id)?;
-            if let Some(control) = self.inner.runtime.account_control(&account).await {
-                let mut value = *control.borrow();
-                value.state.lifecycle = crate::state::LifecycleState::Draining;
-                self.inner
-                    .runtime
-                    .update_account_control(&account, value)
-                    .await?;
-            }
-        } else {
-            self.inner.registry.delete(id)?;
+        let slot = self.slot(id).ok();
+        let _submission = match &slot {
+            Some(slot) => Some(slot.submission.lock().await),
+            None => None,
+        };
+        // Same gate as rule edits: check bindings before deletion and keep them
+        // immutable until the registry tombstone and policy removal are published.
+        let _configuration = self.inner.configuration_gate.write().await;
+        let snapshot = self.inner.business.snapshot()?;
+        snapshot.document.ensure_account_unbound(id)?;
+        anyhow::ensure!(
+            !snapshot.policies.get(id).is_some_and(|p| p.enabled),
+            "请先关闭自动回复再移除账号"
+        );
+        anyhow::ensure!(
+            !self.inner.store.has_blocking_account_removal_work(id)?,
+            "账号仍有尚未发送或正在发送的任务，请等待处理后再移除；历史待核验记录不会阻止删除"
+        );
+        self.inner.registry.delete(id)?;
+        self.inner.business.change(|doc| {
+            doc.policies.retain(|p| p.account_id != id);
+            Ok(serde_json::Value::Null)
+        })?;
+        let account = AccountId::new(id)?;
+        if let Some(control) = self.inner.runtime.account_control(&account).await {
+            let mut value = *control.borrow();
+            value.state.lifecycle = crate::state::LifecycleState::Draining;
+            self.inner
+                .runtime
+                .update_account_control(&account, value)
+                .await?;
         }
         Ok(())
     }

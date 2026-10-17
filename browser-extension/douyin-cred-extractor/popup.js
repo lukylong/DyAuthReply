@@ -689,10 +689,19 @@ async function grab() {
     const host=tab?.url ? new URL(tab.url).hostname : '';
     if(!tab || !['www.douyin.com','creator.douyin.com'].includes(host))throw new Error('请在已登录的抖音主站或创作者中心打开扩展');
     const storeId=await resolveCookieStoreId(tab);if(!storeId)throw new Error('未识别到当前窗口的 Cookie 存储');
+    const needsMainWarmup=!DyCapture.cookie(await cookieHeaderForUrl('https://www.douyin.com/',storeId),'UIFID');
+    // Warm both origins while the identity API is loading. Keep the creator
+    // document alive so its asynchronous device initialization is not cancelled.
+    const since=Date.now();
     let creator=tab;
     if(host!=='creator.douyin.com'){
-      creator=await chrome.tabs.create({windowId:tab.windowId,active:false,url:'https://creator.douyin.com/creator-micro/data/following/chat'});owned.push(creator.id);await waitLoaded(creator.id);
+      creator=await chrome.tabs.create({windowId:tab.windowId,active:false,url:'https://creator.douyin.com/creator-micro/data/following/chat'});owned.push(creator.id);
     }
+    // A loaded self/select page need not issue UIFID. Initialize the actual
+    // recommendation feed in an owned tab; never navigate the user's page.
+    const main=host==='www.douyin.com'&&!needsMainWarmup?tab:await chrome.tabs.create({windowId:tab.windowId,active:false,url:'https://www.douyin.com/?recommend=1'});if(main.id!==tab.id)owned.push(main.id);
+    await Promise.all([waitLoaded(creator.id),waitLoaded(main.id)]);
+    if(await resolveCookieStoreId(await chrome.tabs.get(main.id))!==storeId)throw new Error('主站页面与当前窗口不在同一 Cookie 存储');
     let account=null;
     for(let i=0;i<4;i++){
       account=await fetchLoggedInAccount(creator.id);
@@ -702,9 +711,6 @@ async function grab() {
     if(!account?.sec_uid || !account.nickname || account.error)throw new Error('创作者中心账号资料校验失败，请先确认该页面已登录；本次未生成凭证');
     const initialCreator=await cookieHeaderForUrl('https://creator.douyin.com/',storeId);
     const sid=DyCapture.session(initialCreator);if(!sid)throw new Error('创作者中心未取得登录会话');
-    const since=Date.now();
-    const main=host==='www.douyin.com'?tab:await chrome.tabs.create({windowId:tab.windowId,active:false,url:'https://www.douyin.com/user/self?from_tab_name=main'});if(main.id!==tab.id)owned.push(main.id);await waitLoaded(main.id);
-    if(await resolveCookieStoreId(await chrome.tabs.get(main.id))!==storeId)throw new Error('主站页面与当前窗口不在同一 Cookie 存储');
     const deadline=Date.now()+30000;let selected=null;let missing=[];
     while(Date.now()<deadline){
       const [headers,page,creatorPage,seen]=await Promise.all([collectScopedCookieHeaders(storeId),signingPageInfo(main.id),signingPageInfo(creator.id),observations(storeId,main.id,since)]);
@@ -717,8 +723,8 @@ async function grab() {
       const material=await DyCapture.selectMaterial([...(page.keys || []),...(creatorPage.keys || [])],[seen.ticket?.value,...(page.tickets || []),...(creatorPage.tickets || [])],headers['www.douyin.com']);
       if(!material)missing.push('当前会话配套票据/签名密钥');
       if(!missing.length){selected={headers,page,seen,token,material};break;}
-      $('tabHint').textContent=`正在等待浏览器生成：${missing.join('、')}。只采集真实值，不使用随机补值。`;$('tabHint').hidden=false;
-      await new Promise(r=>setTimeout(r,1000));
+      $('tabHint').textContent=`主站已初始化 ${Math.floor((Date.now()-since)/1000)} 秒，等待浏览器生成：${missing.join('、')}。只采集真实值，不使用临时值或随机补值。`;$('tabHint').hidden=false;
+      await new Promise(r=>setTimeout(r,Date.now()-since<10000?500:1000));
     }
     if(!selected)throw new Error(`采集未完成：${missing.join('、')}。请在主站完成加载/验证后重试；本次未生成导入串`);
     const {headers,page,seen,token,material}=selected;

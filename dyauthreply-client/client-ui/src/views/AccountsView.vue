@@ -16,6 +16,7 @@ import {
   inTauriRuntime,
   importCredential,
   listAccounts,
+  listRulesByAccount,
   patchAccount,
   quickCreateAccount,
   restartNativeService,
@@ -252,22 +253,38 @@ const showDelete = ref(false);
 const deleteTarget = ref<DouyinAccount | null>(null);
 const deleting = ref(false);
 const deleteError = ref('');
+const deleteBindings = ref<string[]>([]);
+const checkingDelete = ref(false);
+let deleteCheckSequence = 0;
 
-function openDelete(account: DouyinAccount) {
+async function openDelete(account: DouyinAccount) {
+  const sequence = ++deleteCheckSequence;
   deleteTarget.value = account;
   deleteError.value = '';
+  deleteBindings.value = [];
+  checkingDelete.value = true;
   showDelete.value = true;
+  try {
+    const rules = await listRulesByAccount(account.id);
+    if (sequence !== deleteCheckSequence || deleteTarget.value?.id !== account.id) return;
+    deleteBindings.value = rules.filter(rule => rule.account_ids?.includes(account.id) || rule.account_id === account.id).map(rule => rule.name || '未命名规则');
+  } catch (error) {
+    if (sequence === deleteCheckSequence && deleteTarget.value?.id === account.id) deleteError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (sequence === deleteCheckSequence && deleteTarget.value?.id === account.id) checkingDelete.value = false;
+  }
 }
 
 function closeDelete() {
   if (deleting.value) return;
+  ++deleteCheckSequence;
   showDelete.value = false;
   deleteTarget.value = null;
 }
 
 async function confirmDelete() {
   const acc = deleteTarget.value;
-  if (!acc) return;
+  if (!acc || checkingDelete.value || deleteBindings.value.length) return;
   deleting.value = true;
   deleteError.value = '';
   try {
@@ -776,6 +793,11 @@ onMounted(async () => {
         <p class="del-desc">
           确认删除该抖音号吗？删除后将停止托管并清除其本地登录凭证，此操作不可恢复。历史发送记录会保留；待核验消息仍标记为结果未知，不会再次发送。
         </p>
+        <p v-if="checkingDelete" class="msg-box warn-msg">正在检查账号绑定规则…</p>
+        <p v-if="deleteBindings.length" class="msg-box warn-msg">
+          仍绑定规则：{{ deleteBindings.join('、') }}。请先在自动回复规则中取消绑定，再删除账号；停用规则不等于解绑。
+          <router-link to="/rules" @click="closeDelete">前往规则解绑</router-link>
+        </p>
         <p v-if="deleteTarget?.auto_reply_enabled" class="msg-box warn-msg">
           该账号自动回复仍处于开启状态，请先在卡片上关闭「自动回复」后再删除。
         </p>
@@ -789,7 +811,7 @@ onMounted(async () => {
           <button
             type="button"
             class="btn-glass btn-danger-glass"
-            :disabled="deleting || deleteTarget?.auto_reply_enabled"
+            :disabled="deleting || checkingDelete || deleteBindings.length > 0 || !!deleteError || deleteTarget?.auto_reply_enabled"
             @click="confirmDelete"
           >
             {{ deleting ? '删除中...' : '确认删除' }}

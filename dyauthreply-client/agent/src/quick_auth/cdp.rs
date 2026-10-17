@@ -10,12 +10,41 @@ use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 const MAX_CDP_MESSAGE: usize = 2 * 1024 * 1024;
 const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
+// The site may redirect a direct recommendation URL to /jingxuan. Follow its
+// actual visible recommendation link with bounded retries. A click acknowledgement
+// is not evidence that the recommendation feed was mounted.
+// Resolve a click point from the actual visible navigation. Do not call DOM
+// .click(): the collector sends the normal browser mouse sequence below.
+const OPEN_RECOMMENDATION: &str = r"(() => {
+  if (location.origin !== 'https://www.douyin.com') return {status:'wrong_origin'};
+  if (!location.pathname.startsWith('/jingxuan')) return {status:'already'};
+  if (!['interactive','complete'].includes(document.readyState) || document.visibilityState !== 'visible') return {status:'not_ready'};
+  const link = Array.from(document.querySelectorAll('a[href]')).find(a => {
+    try {
+      const u = new URL(a.href, location.href);
+      return u.origin === 'https://www.douyin.com' && u.pathname === '/'
+        && u.searchParams.get('recommend') === '1' && a.getClientRects().length > 0;
+    } catch (_) { return false; }
+  });
+  if (!link) return {status:'not_ready'};
+  const r = link.getBoundingClientRect();
+  const x = r.left + r.width/2, y = r.top + r.height/2;
+  if (![x,y,r.width,r.height].every(Number.isFinite) || r.width <= 0 || r.height <= 0
+      || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return {status:'not_ready'};
+  const hit = document.elementFromPoint(x,y);
+  if (!hit || !link.contains(hit)) return {status:'not_ready'};
+  return {status:'target',x,y};
+})()";
+
 const DTRAIT_HOOK: &str = r"(() => {
   if (window.__dyauthreplyDtraitHookInstalled) return;
   const original = JSON.stringify;
   const publish = (value, path) => {
     window.__dyauthreplyLatestDtraitBlob = String(value || '');
     window.__dyauthreplyLatestDtraitPath = String(path || '');
+    if (typeof window.__dyauthreplyCaptureSample === 'function') {
+      try { window.__dyauthreplyCaptureSample(original({blob:String(value || ''),path:String(path || '')})); } catch (_) {}
+    }
   };
   const wrapped = function(value) {
     try {
@@ -31,12 +60,12 @@ const DTRAIT_HOOK: &str = r"(() => {
   window.__dyauthreplyDtraitHookInstalled = true;
 })();";
 
-const PAGE_INFO: &str = r"(async () => {
+const PAGE_INFO: &str = r"(async (readIdentity) => {
   const read = (names) => names.map(k => localStorage.getItem(k) || '').filter(Boolean);
   const keys = read(['security-sdk/s_sdk_crypt_sdk_new','security-sdk/s_sdk_crypt_sdk']);
   const protects = read(['security-sdk/s_sdk_sign_data_key/web_protect_new','security-sdk/s_sdk_sign_data_key_new/web_protect','security-sdk/s_sdk_sign_data_key/web_protect']);
   let account = {};
-  if (location.hostname === 'creator.douyin.com') {
+  if (readIdentity && location.hostname === 'creator.douyin.com') {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 3000);
@@ -52,13 +81,13 @@ const PAGE_INFO: &str = r"(async () => {
       } finally { clearTimeout(timer); }
     } catch (_) {}
   }
-  return {origin:location.hostname,keys:keys[0] || '',key_candidates:keys,
+  return {origin:location.hostname,pathname:location.pathname,keys:keys[0] || '',key_candidates:keys,
     web_protect:protects[0] || '',ticket_candidates:protects,
     ua:navigator.userAgent || '',account,
     browser_profile:{platform:navigator.platform,width:screen.width,height:screen.height,language:navigator.language,cpu_core_num:navigator.hardwareConcurrency,device_memory:navigator.deviceMemory,timezone_name:Intl.DateTimeFormat().resolvedOptions().timeZone,referer:'https://www.douyin.com/jingxuan',geo:[innerWidth,innerHeight,outerWidth,outerHeight,screen.availWidth,screen.availHeight,screen.width,screen.height]},
     dtrait_blob:String(window.__dyauthreplyLatestDtraitBlob || ''),
     dtrait_path:String(window.__dyauthreplyLatestDtraitPath || '')};
-})()";
+})";
 
 #[derive(Clone, Serialize)]
 #[serde(transparent)]
@@ -71,7 +100,7 @@ impl Default for Completeness {
 }
 
 impl Completeness {
-    fn new(checks: [bool; 6]) -> Self {
+    pub(super) fn new(checks: [bool; 6]) -> Self {
         let [cookie, scoped_cookies, server_data, private_key, dtrait, identity] = checks;
         let ready = checks.into_iter().all(std::convert::identity);
         Self(BTreeMap::from([
@@ -85,7 +114,7 @@ impl Completeness {
         ]))
     }
 
-    fn with_main(mut self, uifid: bool, fingerprint: bool, sdk_token: bool) -> Self {
+    pub(super) fn with_main(mut self, uifid: bool, fingerprint: bool, sdk_token: bool) -> Self {
         self.0.insert("main_uifid", uifid);
         self.0.insert("main_fingerprint", fingerprint);
         self.0.insert("sdk_token", sdk_token);
@@ -151,6 +180,9 @@ struct NetworkCapture {
     request_urls: HashMap<String, String>,
     query_ms_token: String,
     main_site: bool,
+    contexts: HashMap<i64, String>,
+    dtrait_blob: String,
+    dtrait_blob_path: String,
 }
 
 pub struct CdpClient {
@@ -161,6 +193,12 @@ pub struct CdpClient {
     creator_session: Option<String>,
     creator_material: Value,
     main_started: Option<tokio::time::Instant>,
+    closed: bool,
+    endpoint_base: String,
+    main_page: Option<Box<CdpClient>>,
+    current_path: String,
+    recommendation_attempts: u8,
+    recommendation_last_attempt: Option<tokio::time::Instant>,
 }
 
 impl CdpClient {
@@ -177,31 +215,105 @@ impl CdpClient {
             creator_session: None,
             creator_material: Value::Null,
             main_started: None,
+            closed: false,
+            endpoint_base: format!(
+                "ws://{}",
+                raw.parse::<wreq::Uri>()?
+                    .authority()
+                    .context("CDP地址无效")?
+            ),
+            main_page: None,
+            current_path: String::new(),
+            recommendation_attempts: 0,
+            recommendation_last_attempt: None,
         })
     }
 
     /// # Errors
     /// Requires the page target to support the bounded CDP domains used by the collector.
     pub async fn initialize(&mut self) -> Result<()> {
+        self.initialize_at("https://creator.douyin.com/creator-micro/data/following/chat")
+            .await
+    }
+
+    async fn initialize_at(&mut self, url: &str) -> Result<()> {
         self.command("Network.enable", json!({})).await?;
         self.command("Runtime.enable", json!({})).await?;
+        self.command(
+            "Runtime.addBinding",
+            json!({"name":"__dyauthreplyCaptureSample"}),
+        )
+        .await?;
         self.command("Page.enable", json!({})).await?;
         self.command(
             "Page.addScriptToEvaluateOnNewDocument",
             json!({"source":DTRAIT_HOOK}),
         )
         .await?;
-        self.send_only(
-            "Page.navigate",
-            json!({"url":"https://creator.douyin.com/creator-micro/im/message"}),
-        )
-        .await?;
+        self.navigate(url).await?;
         Ok(())
     }
 
     /// # Errors
     /// Returns malformed/oversized CDP, page or credential data without exposing secrets.
     pub async fn collect(&mut self) -> Result<Capture> {
+        let [_, creator_www, creator_cookies, _, creator_page] =
+            self.snapshot(self.creator_identity.is_none()).await?;
+        if self.creator_identity.is_none() {
+            let sid = cookie_value(&creator_cookies, "sessionid")
+                .or_else(|| cookie_value(&creator_cookies, "sessionid_ss"));
+            if creator_page["origin"] == "creator.douyin.com"
+                && !bounded(&creator_page["account"], "sec_uid", 256).is_empty()
+                && sid.is_some()
+            {
+                let main = self.open_main_page().await?;
+                self.creator_identity = Some(creator_page["account"].clone());
+                self.creator_session = sid;
+                self.main_page = Some(Box::new(main));
+                self.main_started = Some(tokio::time::Instant::now());
+            }
+            return Ok(waiting_capture(
+                cookie_value(&creator_www, "sessionid").is_some(),
+            ));
+        }
+        anyhow::ensure!(
+            creator_page["origin"] == "creator.douyin.com",
+            "创作者页面已跳转，请回到登录页面后重试"
+        );
+        anyhow::ensure!(
+            self.creator_session
+                .as_deref()
+                .is_some_and(|sid| same_session(&creator_cookies, sid)),
+            "采集期间登录会话发生变化，请重新登录"
+        );
+        // Keep the creator tab alive: IM device sampling can finish AFTER identity
+        // lookup. Re-read its material, but do not reissue the remote profile API.
+        self.creator_material = creator_page;
+        self.creator_material["captured_ticket"] = json!(self.captured.server_data);
+        let main = self.main_page.as_mut().context("主站采集页面未建立")?;
+        let result = main.snapshot(false).await;
+        if main.is_closed() {
+            self.closed = true;
+        }
+        let [storage, www, creator, imapi, mut page] = result?;
+        anyhow::ensure!(
+            page["origin"] == "www.douyin.com",
+            "主站页面已跳转，请完成验证后重试"
+        );
+        let sid = cookie_value(&www, "sessionid").or_else(|| cookie_value(&www, "sessionid_ss"));
+        anyhow::ensure!(
+            sid == self.creator_session,
+            "主站与创作者中心登录会话不一致，请统一账号后重试"
+        );
+        if !has_main_uifid(&www) && main.current_path.starts_with("/jingxuan") {
+            main.open_recommendation_if_redirected().await?;
+        }
+        page["account"] = self.creator_identity.clone().unwrap_or(Value::Null);
+        merge_session_material(&mut page, &self.creator_material);
+        build_candidate(&storage, &www, &creator, &imapi, &page, &main.captured)
+    }
+
+    async fn snapshot(&mut self, read_identity: bool) -> Result<[Value; 5]> {
         // These read-only commands are independent. Pipeline them over the same
         // socket, retaining per-origin cookies and dispatching replies by id.
         let [storage, www, creator, imapi, page] = self
@@ -221,52 +333,111 @@ impl CdpClient {
                 ),
                 (
                     "Runtime.evaluate",
-                    json!({"expression":PAGE_INFO,"awaitPromise":true,"returnByValue":true}),
+                    json!({"expression":format!("{PAGE_INFO}({read_identity})"),"awaitPromise":true,"returnByValue":true}),
                 ),
             ])
             .await?;
+        anyhow::ensure!(
+            page.get("exceptionDetails").is_none(),
+            "浏览器页面正在跳转或脚本读取失败，请完成页面加载/验证"
+        );
         let mut page = page
             .pointer("/result/value")
+            .filter(|value| value.is_object())
             .cloned()
-            .unwrap_or(Value::Null);
-        if self.creator_identity.is_none() {
-            let sid = cookie_value(&creator, "sessionid")
-                .or_else(|| cookie_value(&creator, "sessionid_ss"));
-            if page["origin"] == "creator.douyin.com"
-                && !bounded(&page["account"], "sec_uid", 256).is_empty()
-                && sid.is_some()
-            {
-                self.creator_identity = Some(page["account"].clone());
-                self.creator_session = sid;
-                self.creator_material = page.clone();
-                self.creator_material["captured_ticket"] = json!(self.captured.server_data);
+            .context("浏览器页面未返回有效采集结果")?;
+        if matches!(
+            page["origin"].as_str(),
+            Some("creator.douyin.com" | "www.douyin.com")
+        ) && bounded_text(&page, "dtrait_blob", 65_536).is_empty()
+            && !self.captured.dtrait_blob.is_empty()
+        {
+            page["dtrait_blob"] = json!(self.captured.dtrait_blob);
+            page["dtrait_path"] = json!(self.captured.dtrait_blob_path);
+        }
+        self.current_path = bounded_text(&page, "pathname", 512).into();
+        Ok([storage, www, creator, imapi, page])
+    }
 
-                self.captured = NetworkCapture {
-                    main_site: true,
-                    ..NetworkCapture::default()
-                };
-                self.send_only(
-                    "Page.navigate",
-                    // The recommendation feed issues the formal UIFID. A self
-                    // profile (or jingxuan) may load fully with only UIFID_TEMP.
-                    json!({"url":"https://www.douyin.com/?recommend=1"}),
-                )
-                .await?;
-                self.main_started = Some(tokio::time::Instant::now());
-            }
-            return Ok(waiting_capture(cookie_value(&www, "sessionid").is_some()));
+    async fn open_recommendation_if_redirected(&mut self) -> Result<()> {
+        if self
+            .recommendation_last_attempt
+            .is_some_and(|last| last.elapsed().as_secs() < 3)
+        {
+            return Ok(());
         }
-        if page["origin"] != "www.douyin.com" {
-            return Ok(waiting_capture(true));
-        }
-        let sid = cookie_value(&www, "sessionid").or_else(|| cookie_value(&www, "sessionid_ss"));
         anyhow::ensure!(
-            sid == self.creator_session,
-            "主站与创作者中心登录会话不一致，请统一账号后重试"
+            self.recommendation_attempts < 3,
+            "主站推荐切换未完成（已尝试3次），请检查页面加载或验证后重试"
         );
-        page["account"] = self.creator_identity.clone().unwrap_or(Value::Null);
-        merge_session_material(&mut page, &self.creator_material);
-        build_candidate(&storage, &www, &creator, &imapi, &page, &self.captured)
+        self.command("Page.bringToFront", json!({})).await?;
+        let result = self
+            .command(
+                "Runtime.evaluate",
+                json!({"expression":OPEN_RECOMMENDATION,"returnByValue":true}),
+            )
+            .await?;
+        anyhow::ensure!(
+            result.get("exceptionDetails").is_none(),
+            "主站推荐入口读取失败，请在登录窗口点击推荐"
+        );
+        let target = result
+            .pointer("/result/value")
+            .context("主站推荐入口未返回状态")?;
+        match target["status"].as_str() {
+            Some("target") => {
+                let (x, y) = recommendation_click_point(target)?;
+                // Count attempts before dispatch so failed sends cannot retry without limit.
+                self.recommendation_attempts += 1;
+                self.recommendation_last_attempt = Some(tokio::time::Instant::now());
+                for (kind, buttons) in
+                    [("mouseMoved", 0), ("mousePressed", 1), ("mouseReleased", 0)]
+                {
+                    self.command("Input.dispatchMouseEvent", json!({
+                        "type":kind,"x":x,"y":y,"button":if kind=="mouseMoved" {"none"} else {"left"},
+                        "buttons":buttons,"clickCount":i32::from(kind!="mouseMoved"),"pointerType":"mouse"
+                    })).await?;
+                }
+            }
+            Some("not_ready" | "already") => {}
+            _ => anyhow::bail!("主站推荐入口未就绪，请检查页面加载或验证状态"),
+        }
+        Ok(())
+    }
+
+    async fn open_main_page(&mut self) -> Result<Self> {
+        let created = self
+            .command(
+                "Target.createTarget",
+                json!({"url":"about:blank","background":false}),
+            )
+            .await?;
+        let target = created["targetId"]
+            .as_str()
+            .filter(|s| {
+                !s.is_empty()
+                    && s.len() <= 128
+                    && s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            })
+            .context("主站页面创建失败")?;
+        let endpoint = format!("{}/devtools/page/{target}", self.endpoint_base);
+        let result = async {
+            let mut main = tokio::time::timeout(COMMAND_TIMEOUT, Self::connect(&endpoint))
+                .await
+                .context("主站连接超时")??;
+            main.captured.main_site = true;
+            main.initialize_at("https://www.douyin.com/?recommend=1")
+                .await?;
+            Ok::<Self, anyhow::Error>(main)
+        }
+        .await;
+        if result.is_err() {
+            let _ = self
+                .command("Target.closeTarget", json!({"targetId":target}))
+                .await;
+        }
+        result
     }
 
     /// Requests graceful shutdown of the exact browser endpoint.
@@ -289,11 +460,44 @@ impl CdpClient {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn sample_observation(&self) -> (usize, bool, &'static str, u8) {
+        let route = self.main_page.as_ref().map_or("not_open", |main| {
+            if main.current_path.starts_with("/jingxuan") {
+                "selected"
+            } else if main.current_path == "/" {
+                "main_root"
+            } else {
+                "other"
+            }
+        });
+        (
+            self.captured.contexts.len(),
+            !self.captured.dtrait_blob.is_empty(),
+            route,
+            self.main_page
+                .as_ref()
+                .map_or(0, |main| main.recommendation_attempts),
+        )
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+
     pub fn progress_message(&self, completeness: &Completeness) -> String {
         let Some(started) = self.main_started else {
             return "登录已识别，正在读取创作者账号资料".into();
         };
         let seconds = started.elapsed().as_secs();
+        if self
+            .main_page
+            .as_ref()
+            .is_some_and(|main| main.current_path.starts_with("/jingxuan"))
+            && completeness.0.get("main_uifid") == Some(&false)
+        {
+            return "主站停留在精选页，正在自动点击推荐并核对切换结果".into();
+        }
         let missing = completeness.missing_fields();
         if seconds >= 30 {
             let uifid_hint = if completeness.0.get("main_uifid") == Some(&false) {
@@ -312,27 +516,42 @@ impl CdpClient {
         Ok(result)
     }
 
+    async fn navigate(&mut self, url: &str) -> Result<()> {
+        let result = self.command("Page.navigate", json!({"url":url})).await?;
+        anyhow::ensure!(
+            result["errorText"].as_str().is_none_or(str::is_empty),
+            "登录页面导航失败，请检查网络后重试"
+        );
+        Ok(())
+    }
+
     async fn commands<const N: usize>(
         &mut self,
         commands: [(&str, Value); N],
     ) -> Result<[Value; N]> {
-        let mut ids = [0; N];
-        for (index, (method, params)) in commands.into_iter().enumerate() {
-            self.send_only(method, params).await?;
-            ids[index] = self.next_id;
-        }
         let response = tokio::time::timeout(COMMAND_TIMEOUT, async {
+            let mut ids = [0; N];
+            for (index, (method, params)) in commands.into_iter().enumerate() {
+                self.send_only(method, params).await?;
+                ids[index] = self.next_id;
+            }
             let mut results: [Value; N] = std::array::from_fn(|_| Value::Null);
             let mut received = [false; N];
             while received.contains(&false) {
-                let message = self.socket.next().await.context("CDP连接已关闭")??;
+                let Some(Ok(message)) = self.socket.next().await else {
+                    self.closed = true;
+                    anyhow::bail!("CDP连接已关闭");
+                };
                 let text = match message {
                     Message::Text(text) => text,
                     Message::Ping(value) => {
                         self.socket.send(Message::Pong(value)).await?;
                         continue;
                     }
-                    Message::Close(_) => anyhow::bail!("CDP连接已关闭"),
+                    Message::Close(_) => {
+                        self.closed = true;
+                        anyhow::bail!("CDP连接已关闭");
+                    }
                     _ => continue,
                 };
                 anyhow::ensure!(text.len() <= MAX_CDP_MESSAGE, "CDP响应过大");
@@ -363,13 +582,18 @@ impl CdpClient {
 
     async fn send_only(&mut self, method: &str, params: Value) -> Result<()> {
         self.next_id = self.next_id.checked_add(1).context("CDP指令序号溢出")?;
-        self.socket
+        let sent = self
+            .socket
             .send(Message::Text(
                 json!({"id":self.next_id,"method":method,"params":params})
                     .to_string()
                     .into(),
             ))
-            .await?;
+            .await;
+        if sent.is_err() {
+            self.closed = true;
+            anyhow::bail!("CDP发送失败，连接已关闭");
+        }
         Ok(())
     }
 }
@@ -383,7 +607,65 @@ fn validate_ws(raw: &str) -> Result<()> {
     Ok(())
 }
 
+// Only samples from default-world execution contexts belonging to this owned
+// page and explicitly allowed login origins may supplement top-frame readings.
+fn observe_sample(capture: &mut NetworkCapture, event: &Value) -> bool {
+    let params = &event["params"];
+    match event["method"].as_str().unwrap_or_default() {
+        "Runtime.executionContextCreated" => {
+            let context = &params["context"];
+            if let (Some(id), Some(origin)) = (context["id"].as_i64(), context["origin"].as_str()) {
+                if context.pointer("/auxData/isDefault") == Some(&Value::Bool(true))
+                    && matches!(
+                        origin,
+                        "https://creator.douyin.com"
+                            | "https://www.douyin.com"
+                            | "https://passport.douyin.com"
+                    )
+                {
+                    if capture.contexts.len() >= 128 {
+                        capture.contexts.clear();
+                    }
+                    capture.contexts.insert(id, origin.into());
+                }
+            }
+        }
+        "Runtime.executionContextDestroyed" => {
+            if let Some(id) = params["executionContextId"].as_i64() {
+                capture.contexts.remove(&id);
+            }
+        }
+        "Runtime.executionContextsCleared" => {
+            capture.contexts.clear();
+        }
+        "Runtime.bindingCalled" => {
+            if params["name"] != "__dyauthreplyCaptureSample"
+                || !params["executionContextId"]
+                    .as_i64()
+                    .is_some_and(|id| capture.contexts.contains_key(&id))
+            {
+                return true;
+            }
+            if let Some(raw) = params["payload"].as_str().filter(|s| s.len() <= 128 * 1024) {
+                if let Ok(sample) = serde_json::from_str::<Value>(raw) {
+                    let blob = bounded_text(&sample, "blob", 65_536);
+                    let path = bounded_text(&sample, "path", 512);
+                    if blob.len() > 20 && path.starts_with('/') && !path.starts_with("//") {
+                        capture.dtrait_blob = blob.into();
+                        capture.dtrait_blob_path = path.into();
+                    }
+                }
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
 fn observe_event(capture: &mut NetworkCapture, event: &Value) {
+    if observe_sample(capture, event) {
+        return;
+    }
     let method = event["method"].as_str().unwrap_or_default();
     let params = &event["params"];
     if method == "Network.requestWillBeSent" {
@@ -556,7 +838,7 @@ fn build_candidate(
         && same_session(creator, &session)
         && same_session(imapi, &session);
     let sdk_token = captured_sdk_token(www, captured);
-    let uifid = cookie_value(www, "UIFID").is_some_and(|s| !s.is_empty());
+    let uifid = has_main_uifid(www);
     let fingerprint = cookie_value(www, "s_v_web_id").is_some_and(|s| !s.is_empty());
     // A whole dtrait header is encrypted for one path and timestamp. Accepting
     // a QR/check header as send-ready caused message/send to be rejected as
@@ -776,6 +1058,20 @@ fn cookie_header(value: &Value) -> Result<String> {
         .join("; "))
 }
 
+fn recommendation_click_point(value: &Value) -> Result<(f64, f64)> {
+    let coordinate = |key: &str| {
+        value[key]
+            .as_f64()
+            .filter(|v| v.is_finite() && (0.0..=32_768.0).contains(v))
+            .context("主站推荐入口位置无效")
+    };
+    Ok((coordinate("x")?, coordinate("y")?))
+}
+
+fn has_main_uifid(www: &Value) -> bool {
+    cookie_value(www, "UIFID").is_some_and(|value| !value.is_empty())
+}
+
 fn cookie_value(value: &Value, name: &str) -> Option<String> {
     value["cookies"]
         .as_array()?
@@ -838,6 +1134,174 @@ mod tests {
         ]})
     }
 
+    #[test]
+    fn frame_samples_require_a_live_default_context_on_an_allowed_origin() {
+        let mut capture = NetworkCapture::default();
+        let context = |id, origin, default| json!({"method":"Runtime.executionContextCreated","params":{"context":{"id":id,"origin":origin,"auxData":{"isDefault":default}}}});
+        let binding = |id, blob: &str, path: &str| json!({"method":"Runtime.bindingCalled","params":{"name":"__dyauthreplyCaptureSample","executionContextId":id,"payload":json!({"blob":blob,"path":path}).to_string()}});
+        let blob = "synthetic-device-sample-abcdefghijklmnopqrstuvwxyz";
+        for (id, origin, default) in [
+            (1, "https://foreign.example", true),
+            (2, "https://passport.douyin.com", false),
+        ] {
+            observe_event(&mut capture, &context(id, origin, default));
+            observe_event(&mut capture, &binding(id, blob, "/passport/example/"));
+            assert!(capture.dtrait_blob.is_empty());
+        }
+        observe_event(
+            &mut capture,
+            &context(3, "https://passport.douyin.com", true),
+        );
+        for (value, path) in [("short", "/example"), (blob, "//foreign.example/")] {
+            observe_event(&mut capture, &binding(3, value, path));
+            assert!(capture.dtrait_blob.is_empty());
+        }
+        observe_event(&mut capture, &binding(3, blob, "/passport/example/"));
+        assert_eq!(capture.dtrait_blob, blob);
+        observe_event(
+            &mut capture,
+            &json!({"method":"Runtime.executionContextDestroyed","params":{"executionContextId":3}}),
+        );
+        observe_event(
+            &mut capture,
+            &binding(
+                3,
+                "another-device-sample-abcdefghijklmnopqrstuvwxyz",
+                "/different",
+            ),
+        );
+        assert_eq!(capture.dtrait_blob, blob);
+        observe_event(&mut capture, &context(4, "https://www.douyin.com", true));
+        observe_event(
+            &mut capture,
+            &json!({"method":"Runtime.executionContextsCleared","params":{}}),
+        );
+        assert!(capture.contexts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn navigation_failure_does_not_advance_or_erase_creator_material() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(raw))) = socket.next().await {
+                let request: Value = serde_json::from_str(&raw).unwrap();
+                let result = match request["method"].as_str().unwrap() {
+                    "Runtime.evaluate" => {
+                        json!({"result":{"value":{"origin":"creator.douyin.com","account":{"sec_uid":"self","nickname":"SAMPLE"}}}})
+                    }
+                    "Page.navigate" => json!({"errorText":"synthetic-private-error"}),
+                    _ => cookies(),
+                };
+                if socket
+                    .send(Message::Text(
+                        json!({"id":request["id"],"result":result})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
+            .await
+            .unwrap();
+        client.captured.server_data = "synthetic-creator-ticket".into();
+        assert!(client.initialize().await.is_err());
+        assert!(client.collect().await.is_err());
+        assert!(client.creator_identity.is_none());
+        assert!(!client.captured.main_site);
+        assert_eq!(client.captured.server_data, "synthetic-creator-ticket");
+        peer.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_cdp_batch_has_one_bounded_deadline() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _socket = accept_async(stream).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
+            .await
+            .unwrap();
+        let started = tokio::time::Instant::now();
+        let result = client
+            .commands([("Test.read", json!({})), ("Test.second", json!({}))])
+            .await;
+        assert!(result.is_err());
+        assert_eq!(started.elapsed(), COMMAND_TIMEOUT);
+        peer.abort();
+    }
+
+    #[tokio::test]
+    async fn peer_closure_is_terminal_instead_of_repeated_polling() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let _ = socket.next().await;
+            let _ = socket.close(None).await;
+        });
+        let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
+            .await
+            .unwrap();
+        assert!(client.command("Test.read", json!({})).await.is_err());
+        assert!(client.is_closed());
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn page_evaluation_exception_is_reported_instead_of_silent_waiting() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let result = if request["method"] == "Runtime.evaluate" {
+                    json!({"exceptionDetails":{"text":"synthetic-private-page-error"}})
+                } else {
+                    cookies()
+                };
+                if socket
+                    .send(Message::Text(
+                        json!({"id":request["id"],"result":result})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
+            .await
+            .unwrap();
+        let result = client.collect().await;
+        peer.abort();
+        assert!(
+            result.is_err(),
+            "page JS failures must not look like missing UIFID"
+        );
+        assert!(!result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("synthetic-private-page-error"));
+    }
+
     #[tokio::test]
     async fn collection_pipelines_five_reads_before_waiting_for_responses() {
         // A CDP peer releases results only once the whole read batch arrives.
@@ -881,14 +1345,80 @@ mod tests {
         client.creator_session = Some("session-one".into());
         client.captured.main_site = true;
         let result =
-            tokio::time::timeout(std::time::Duration::from_secs(1), client.collect()).await;
+            tokio::time::timeout(std::time::Duration::from_secs(1), client.snapshot(false)).await;
         task.abort();
         let capture = result
             .expect("five reads should be in flight together")
             .unwrap();
-        assert!(capture.completeness.cookie());
-        assert!(capture.candidate.is_none()); // Missing signing keys still blocks completion.
+        assert!(cookie_value(&capture[1], "sessionid").is_some());
+        assert_eq!(capture[4]["origin"], "www.douyin.com");
         assert_eq!(client.captured.query_ms_token, "S".repeat(32));
+    }
+
+    async fn serve_capture_peer(stream: TcpStream, private: String, server_data: String) {
+        let mut host = "about:blank";
+        let mut reads = 0;
+        let mut socket = accept_async(stream).await.unwrap();
+        while let Some(Ok(Message::Text(text))) = socket.next().await {
+            let request: Value = serde_json::from_str(&text).unwrap();
+            let method = request["method"].as_str().unwrap();
+            if method == "Page.navigate" {
+                let url = request["params"]["url"].as_str().unwrap();
+                host = if url.starts_with("https://www.douyin.com/") {
+                    assert_eq!(url, "https://www.douyin.com/?recommend=1");
+                    "www.douyin.com"
+                } else {
+                    assert_eq!(
+                        url,
+                        "https://creator.douyin.com/creator-micro/data/following/chat"
+                    );
+                    "creator.douyin.com"
+                };
+            }
+            let result = match method {
+                "Target.createTarget" => json!({"targetId":"synthetic-main"}),
+                "Storage.getCookies" => json!({"cookies":[
+                    {"name":"bd_ticket_guard_server_data","value":server_data,"domain":".douyin.com"}
+                ]}),
+                "Network.getCookies" => cookies(),
+                "Runtime.evaluate" => {
+                    reads += 1;
+                    // Creator sampling deliberately arrives after the first identity
+                    // read. Main never supplies it: navigating creator away would stall.
+                    let dtrait = if host == "creator.douyin.com" && reads >= 2 {
+                        "abcdefghijklmnopqrstuvwxyz"
+                    } else {
+                        ""
+                    };
+                    if host == "creator.douyin.com" && reads >= 2 {
+                        assert!(
+                            request["params"]["expression"]
+                                .as_str()
+                                .unwrap()
+                                .ends_with("(false)"),
+                            "do not re-fetch remote identity every poll"
+                        );
+                    }
+                    json!({"result":{"value":{
+                        "origin":host,"keys":json!({"ec_privateKey":private}).to_string(),"web_protect":"","ua":"Chrome/140",
+                        "dtrait_blob":dtrait,"dtrait_path":"/identity",
+                        "account":{"sec_uid":"scope-one","nickname":"测试账号","unique_id":"douyin-one","avatar":"https://example.com/a.png"}
+                    }}})
+                }
+                _ => json!({}),
+            };
+            if socket
+                .send(Message::Text(
+                    json!({"id":request["id"],"result":result})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
     }
 
     #[tokio::test]
@@ -905,44 +1435,17 @@ mod tests {
         let server_data =
             json!({"ticket":"one","ts_sign":"ts.1.ok","client_cert":cert}).to_string();
         let task = tokio::spawn(async move {
-            let mut host = "creator.douyin.com";
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = accept_async(stream).await.unwrap();
-            while let Some(Ok(Message::Text(text))) = socket.next().await {
-                let request: Value = serde_json::from_str(&text).unwrap();
-                let method = request["method"].as_str().unwrap();
-                if method == "Page.navigate"
-                    && request["params"]["url"]
-                        .as_str()
-                        .unwrap_or("")
-                        .starts_with("https://www.douyin.com/")
-                {
-                    assert_eq!(
-                        request["params"]["url"], "https://www.douyin.com/?recommend=1",
-                        "UIFID bootstrap must load recommendation feed, not profile/select pages"
-                    );
-                    host = "www.douyin.com";
-                }
-                let result = match method {
-                    "Storage.getCookies" => json!({"cookies":[
-                        {"name":"bd_ticket_guard_server_data","value":server_data,"domain":".douyin.com"}
-                    ]}),
-                    "Network.getCookies" => cookies(),
-                    "Runtime.evaluate" => json!({"result":{"value":{
-                        "origin":host,"keys":json!({"ec_privateKey":private}).to_string(),"web_protect":"","ua":"Chrome/140",
-                        "dtrait_blob":"abcdefghijklmnopqrstuvwxyz","dtrait_path":"/identity",
-                        "account":{"sec_uid":"scope-one","nickname":"测试账号","unique_id":"douyin-one","avatar":"https://example.com/a.png"}
-                    }}}),
-                    _ => json!({}),
-                };
-                socket
-                    .send(Message::Text(
-                        json!({"id":request["id"],"result":result})
-                            .to_string()
-                            .into(),
-                    ))
-                    .await
-                    .unwrap();
+            let mut peers = tokio::task::JoinSet::new();
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                peers.spawn(serve_capture_peer(
+                    stream,
+                    private.clone(),
+                    server_data.clone(),
+                ));
+            }
+            while let Some(result) = peers.join_next().await {
+                result.unwrap();
             }
         });
         let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/one"))
@@ -981,6 +1484,99 @@ mod tests {
             build_candidate(&storage, &scoped, &scoped, &scoped, &page, &captured).unwrap();
         assert!(!result.completeness.ready());
         assert!(result.candidate.is_none());
+    }
+
+    #[tokio::test]
+    async fn recommendation_click_acknowledgement_is_not_navigation_success() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            for _ in 0..3 {
+                for method in [
+                    "Page.bringToFront",
+                    "Runtime.evaluate",
+                    "Input.dispatchMouseEvent",
+                    "Input.dispatchMouseEvent",
+                    "Input.dispatchMouseEvent",
+                ] {
+                    let message = socket.next().await.unwrap().unwrap();
+                    let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                    assert_eq!(value["method"], method);
+                    let response = if method == "Runtime.evaluate" {
+                        json!({"result":{"value":{"status":"target","x":70,"y":55}}})
+                    } else {
+                        json!({})
+                    };
+                    if method == "Input.dispatchMouseEvent" {
+                        assert_eq!(value["params"]["x"], 70.0);
+                        assert_eq!(value["params"]["y"], 55.0);
+                    }
+                    socket
+                        .send(Message::Text(
+                            json!({"id":value["id"],"result":response})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
+            .await
+            .unwrap();
+        client.open_recommendation_if_redirected().await.unwrap();
+        client.open_recommendation_if_redirected().await.unwrap();
+        assert_eq!(
+            client.recommendation_attempts, 1,
+            "immediate retry must back off"
+        );
+        for expected in 2..=3 {
+            client.recommendation_last_attempt =
+                Some(tokio::time::Instant::now() - std::time::Duration::from_secs(3));
+            client.open_recommendation_if_redirected().await.unwrap();
+            assert_eq!(client.recommendation_attempts, expected);
+        }
+        client.recommendation_last_attempt =
+            Some(tokio::time::Instant::now() - std::time::Duration::from_secs(3));
+        assert!(client
+            .open_recommendation_if_redirected()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("已尝试3次"));
+        peer.await.unwrap();
+    }
+
+    #[test]
+    fn recommendation_coordinates_are_bounded_and_typed() {
+        assert_eq!(
+            recommendation_click_point(&json!({"x":70,"y":55})).unwrap(),
+            (70.0, 55.0)
+        );
+        for value in [
+            json!({}),
+            json!({"x":"70","y":55}),
+            json!({"x":-1,"y":55}),
+            json!({"x":1,"y":32769}),
+        ] {
+            assert!(recommendation_click_point(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn empty_main_uifid_requires_bootstrap_and_does_not_pass_completeness() {
+        let mut scoped = cookies();
+        for cookie in scoped["cookies"].as_array_mut().unwrap() {
+            if cookie["name"] == "UIFID" {
+                cookie["value"] = json!("");
+            }
+        }
+        assert!(!has_main_uifid(&scoped));
+        assert!(has_main_uifid(&cookies()));
+        assert!(!has_main_uifid(&json!({"cookies":[]})));
     }
 
     #[test]

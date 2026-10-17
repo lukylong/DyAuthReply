@@ -296,7 +296,8 @@ async fn import(app: App, target: Option<String>, input: Input) -> Result<Value>
             None
         },
     )?;
-    app.service.store_imported_profile(&record, &policy)?;
+    app.service
+        .store_imported_profile(&record, &policy, &verified)?;
     let reload = hot_reload_required(&app, &record.id, changed).await;
     Ok(
         json!({"success":true,"id":record.id,"nickname":record.nickname,"sec_uid":record.sec_uid,"status":0,"credential_state":"unknown","generation":record.generation,"_runtime_reload":reload,"message":"账号身份已验证，发送能力以实际回执为准"}),

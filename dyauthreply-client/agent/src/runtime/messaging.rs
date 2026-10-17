@@ -475,10 +475,17 @@ impl ManualService {
         &self,
         record: &crate::credential_store::registry::AccountRecord,
         policy: &AutomationPolicy,
+        verified: &crate::protocol::VerifiedSelf,
     ) -> Result<()> {
-        self.inner
-            .workbench
-            .set_account_profile(&record.id, &record.sec_uid, &record.nickname)?;
+        anyhow::ensure!(
+            record.sec_uid == verified.sec_uid && policy.account_id == record.id,
+            "imported public profile identity mismatch"
+        );
+        self.inner.workbench.set_account_profile_details(
+            &record.id,
+            verified,
+            crate::workbench::now_ms(),
+        )?;
         let snapshot = self.inner.business.snapshot()?;
         if !snapshot.policies.contains_key(&record.id) {
             self.inner.business.change(|doc| {

@@ -18,14 +18,20 @@ const SESSION_DTRAIT_STORAGE_PREFIX = 'session_dtrait_';
 
 const $ = (id) => document.getElementById(id);
 
-async function executeBounded(details) {
+async function boundedRead(read, message) {
   let timer;
   try {
     return await Promise.race([
-      chrome.scripting.executeScript({...details,injectImmediately:true}),
-      new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('页面脚本执行超时，请完成页面加载或验证后重试')),8000);}),
+      Promise.resolve().then(read),
+      new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error(message)),8000);}),
     ]);
-  } finally { clearTimeout(timer); }
+  } catch { throw new Error(message); }
+  finally { clearTimeout(timer); }
+}
+
+async function executeBounded(details) {
+  return boundedRead(()=>chrome.scripting.executeScript({...details,injectImmediately:true}),
+    '页面读取失败或超时，请完成页面加载或验证后重试');
 }
 
 function showToast(msg) {
@@ -134,11 +140,15 @@ async function collectCookies(tabUrl, cookieStoreId) {
 }
 
 async function cookieHeaderForUrl(url, cookieStoreId) {
-  const cookies = await chrome.cookies.getAll({ url, storeId: cookieStoreId }).catch(() => []);
-  return cookies
-    .filter((cookie) => cookie?.name)
-    .map((cookie) => `${cookie.name}=${cookie.value}`)
-    .join('; ');
+  const cookies = await boundedRead(()=>chrome.cookies.getAll({url,storeId:cookieStoreId}),
+    '读取浏览器 Cookie 失败或超时，请检查扩展权限后重试');
+  if(!Array.isArray(cookies)||cookies.length>512)throw new Error('浏览器 Cookie 响应无效或数量超限');
+  return cookies.filter(cookie=>{
+    if(typeof cookie?.name!=='string'||typeof cookie?.value!=='string')throw new Error('浏览器 Cookie 字段类型无效');
+    if(!cookie.name)return false;
+    if(cookie.name.length>256||cookie.value.length>32768||/[\u0000-\u001f\u007f-\u009f]/.test(cookie.name+cookie.value))throw new Error('浏览器 Cookie 字段格式无效');
+    return true;
+  }).map(cookie=>`${cookie.name}=${cookie.value}`).join('; ');
 }
 
 async function collectScopedCookieHeaders(cookieStoreId) {
@@ -641,10 +651,61 @@ function flashOk(msg) {
 
 let grabbing = false;
 
+function captureTabScope() {
+  const port = chrome.runtime.connect({name:'dy-capture-owned-v1'});
+  const pending = new Map();
+  let next = 0, disconnected = false;
+  const heartbeat = setInterval(() => {
+    try { port.postMessage({op:'ping'}); } catch { /* onDisconnect rejects pending calls. */ }
+  }, 5000);
+  port.onMessage.addListener(message => {
+    const waiter = pending.get(message.id);
+    if (!waiter) return;
+    pending.delete(message.id);
+    if (message.ok) waiter.resolve(message.value);
+    else waiter.reject(new Error('临时采集标签创建或清理失败，请重新打开扩展后重试'));
+  });
+  port.onDisconnect.addListener(() => {
+    disconnected = true;
+    clearInterval(heartbeat);
+    for (const waiter of pending.values()) waiter.reject(new Error('采集窗口已关闭'));
+    pending.clear();
+  });
+  const request = async (op, options={}) => {
+    if (disconnected) throw new Error('采集窗口已关闭');
+    const id = ++next;
+    try {
+      return await boundedRead(() => new Promise((resolve,reject) => {
+        pending.set(id,{resolve,reject});port.postMessage({id,op,...options});
+      }), '临时采集标签操作超时，请重新打开扩展后重试');
+    } finally { pending.delete(id); }
+  };
+  return {
+    create: options => request('create',options),
+    async close() { try { if (!disconnected) await request('finish'); }
+      finally { clearInterval(heartbeat);port.disconnect(); } },
+  };
+}
+
+function navigateToRecommendation() {
+  if (location.origin !== 'https://www.douyin.com') return 'wrong_origin';
+  if (!location.pathname.startsWith('/jingxuan')) return 'already';
+  const link = Array.from(document.querySelectorAll('a[href]')).find(a => {
+    try {
+      const u = new URL(a.href, location.href);
+      return u.origin === 'https://www.douyin.com' && u.pathname === '/'
+        && u.searchParams.get('recommend') === '1' && a.getClientRects().length > 0;
+    } catch (_) { return false; }
+  });
+  if (!link) return 'not_ready';
+  link.click();
+  return 'clicked';
+}
+
 async function signingPageInfo(tabId) {
   const [{result} = {}] = await executeBounded({target:{tabId},world:'MAIN',func:()=>{
     const read=names=>names.map(n=>localStorage.getItem(n)||'').filter(Boolean);
-    return {origin:location.hostname,ua:navigator.userAgent,
+    return {origin:location.hostname,pathname:location.pathname,ua:navigator.userAgent,
       keys:read(['security-sdk/s_sdk_crypt_sdk_new','security-sdk/s_sdk_crypt_sdk']),
       tickets:read(['security-sdk/s_sdk_sign_data_key/web_protect_new','security-sdk/s_sdk_sign_data_key_new/web_protect','security-sdk/s_sdk_sign_data_key/web_protect']),
       dtrait_blob:String(window.__dyauthreplyLatestDtraitBlob || ''),
@@ -654,16 +715,16 @@ async function signingPageInfo(tabId) {
   return result || {};
 }
 
-async function waitLoaded(tabId) {
+async function waitLoaded(tabId, expectedHost) {
   // Video/stream requests can keep tab.status="loading" after the SDK is usable.
   // Wait for an initialized document, not every media resource to finish.
   const deadline=Date.now()+20000;
   while(Date.now()<deadline){
-    const tab=await chrome.tabs.get(tabId);
-    if(tab.status==='complete')return;
+    const tab=await boundedRead(()=>chrome.tabs.get(tabId),'登录标签页已关闭或读取超时');
+    if(tab.status==='complete' && tab.url && new URL(tab.url).hostname===expectedHost)return;
     try {
       const [{result}={}]=await executeBounded({target:{tabId},func:()=>({ready:document.readyState,host:location.hostname})});
-      if(['interactive','complete'].includes(result?.ready)&&['creator.douyin.com','www.douyin.com'].includes(result?.host))return;
+      if(['interactive','complete'].includes(result?.ready)&&result?.host===expectedHost)return;
     } catch { /* A just-created document may not be available yet. */ }
     await new Promise(r=>setTimeout(r,500));
   }
@@ -672,7 +733,7 @@ async function waitLoaded(tabId) {
 
 async function observations(storeId, tabId, since) {
   const keys=['ticket','token','dtrait'].map(kind=>`dy_capture_v2_${storeId}_${tabId}_www.douyin.com_${kind}`);
-  const values=await chrome.storage.session.get(keys);const result={};
+  const values=await boundedRead(()=>chrome.storage.session.get(keys),'读取浏览器网络采样失败或超时');const result={};
   for(let i=0;i<keys.length;i++){
     const v=values[keys[i]];
     if(v?.storeId===storeId&&v.tabId===tabId&&v.sourceHost==='www.douyin.com'&&v.capturedAt>=since)result[['ticket','token','dtrait'][i]]=v;
@@ -682,8 +743,9 @@ async function observations(storeId, tabId, since) {
 
 async function grab() {
   if(grabbing)return;grabbing=true;const btn=$('grabBtn');btn.disabled=true;btn.classList.add('loading');btn.textContent='初始化主站并采集中…';
-  const owned=[];
+  let scope;
   try {
+    scope=captureTabScope();
     clearResult();$('tabHint').hidden=true;
     const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
     const host=tab?.url ? new URL(tab.url).hostname : '';
@@ -695,13 +757,15 @@ async function grab() {
     const since=Date.now();
     let creator=tab;
     if(host!=='creator.douyin.com'){
-      creator=await chrome.tabs.create({windowId:tab.windowId,active:false,url:'https://creator.douyin.com/creator-micro/data/following/chat'});owned.push(creator.id);
+      creator=await scope.create({windowId:tab.windowId,url:'https://creator.douyin.com/creator-micro/data/following/chat'});
     }
     // A loaded self/select page need not issue UIFID. Initialize the actual
     // recommendation feed in an owned tab; never navigate the user's page.
-    const main=host==='www.douyin.com'&&!needsMainWarmup?tab:await chrome.tabs.create({windowId:tab.windowId,active:false,url:'https://www.douyin.com/?recommend=1'});if(main.id!==tab.id)owned.push(main.id);
-    await Promise.all([waitLoaded(creator.id),waitLoaded(main.id)]);
+    const main=host==='www.douyin.com'&&!needsMainWarmup?tab:await scope.create({windowId:tab.windowId,url:'https://www.douyin.com/?recommend=1'});
+    await Promise.all([waitLoaded(creator.id,'creator.douyin.com'),waitLoaded(main.id,'www.douyin.com')]);
     if(await resolveCookieStoreId(await chrome.tabs.get(main.id))!==storeId)throw new Error('主站页面与当前窗口不在同一 Cookie 存储');
+    const initialCreator=await cookieHeaderForUrl('https://creator.douyin.com/',storeId);
+    const sid=DyCapture.session(initialCreator);if(!sid)throw new Error('创作者中心未取得登录会话');
     let account=null;
     for(let i=0;i<4;i++){
       account=await fetchLoggedInAccount(creator.id);
@@ -709,12 +773,29 @@ async function grab() {
       await new Promise(r=>setTimeout(r,750));
     }
     if(!account?.sec_uid || !account.nickname || account.error)throw new Error('创作者中心账号资料校验失败，请先确认该页面已登录；本次未生成凭证');
-    const initialCreator=await cookieHeaderForUrl('https://creator.douyin.com/',storeId);
-    const sid=DyCapture.session(initialCreator);if(!sid)throw new Error('创作者中心未取得登录会话');
-    const deadline=Date.now()+30000;let selected=null;let missing=[];
+    if(DyCapture.session(await cookieHeaderForUrl('https://creator.douyin.com/',storeId))!==sid)throw new Error('账号资料读取期间切换了登录会话，请重新采集');
+    const deadline=Date.now()+30000;let selected=null;let missing=[];let readFailures=0;let recommendationAttempts=0;let recommendationLastAttempt=0;
     while(Date.now()<deadline){
-      const [headers,page,creatorPage,seen]=await Promise.all([collectScopedCookieHeaders(storeId),signingPageInfo(main.id),signingPageInfo(creator.id),observations(storeId,main.id,since)]);
+      let sample;
+      try {
+        sample=await Promise.all([collectScopedCookieHeaders(storeId),signingPageInfo(main.id),signingPageInfo(creator.id),observations(storeId,main.id,since)]);
+        readFailures=0;
+      } catch(error) {
+        if(++readFailures>=3)throw error;
+        $('tabHint').textContent=`页面读取暂时失败，正在重试 ${readFailures}/3`;$('tabHint').hidden=false;
+        await new Promise(r=>setTimeout(r,500));continue;
+      }
+      const [headers,page,creatorPage,seen]=sample;
       if(page.origin!=='www.douyin.com')throw new Error('主站跳转到登录或验证页面，请完成主站登录后重试');
+      if(!DyCapture.cookie(headers['www.douyin.com'],'UIFID') && page.pathname?.startsWith('/jingxuan') ){
+        const now=Date.now();
+        if(now-recommendationLastAttempt>=3000){
+          if(recommendationAttempts>=3)throw new Error('主站推荐切换未完成（已尝试3次），请检查页面加载或验证后重试');
+        const [{result}={}]=await executeBounded({target:{tabId:main.id},world:'MAIN',func:navigateToRecommendation});
+        if(result==='clicked'){recommendationAttempts++;recommendationLastAttempt=now;}
+        else if(!['not_ready','already'].includes(result))throw new Error('主站推荐入口未就绪，请回到主站后重试');
+        }
+      }
       const token=seen.token?.value || DyCapture.cookie(headers['www.douyin.com'],'msToken') || DyCapture.cookie(headers['www.douyin.com'],'msToken_ss');
       missing=DyCapture.missing(headers,token,sid);
       if(creatorPage.origin!=='creator.douyin.com')throw new Error('创作者中心页面已跳转，请重新采集');
@@ -728,8 +809,8 @@ async function grab() {
     }
     if(!selected)throw new Error(`采集未完成：${missing.join('、')}。请在主站完成加载/验证后重试；本次未生成导入串`);
     const {headers,page,seen,token,material}=selected;
-    const finalCreator=await cookieHeaderForUrl('https://creator.douyin.com/',storeId);
-    if(DyCapture.session(finalCreator)!==sid)throw new Error('采集期间切换了账号，请重新抓取');
+    const finalHeaders=await collectScopedCookieHeaders(storeId);
+    if(['www.douyin.com','creator.douyin.com','imapi.douyin.com'].some(host=>DyCapture.session(finalHeaders[host])!==sid))throw new Error('采集期间切换了账号，请重新抓取');
     const payload={capture_version:2,cookie:headers['www.douyin.com'],cookie_headers:headers,
       query_ms_token:token,query_ms_token_captured_at_ms:seen.token?.capturedAt || Date.now(),
       browser_profile:page.browser_profile,ticket_guard_server_data:material.serverData,web_protect:material.serverData,
@@ -745,7 +826,8 @@ async function grab() {
   } catch(e) {
     clearResult();$('tabHint').textContent=e instanceof Error?e.message:String(e);$('tabHint').hidden=false;
   } finally {
-    for(const id of owned)await chrome.tabs.remove(id).catch(()=>{});
+    try { await scope?.close(); }
+    catch { $('tabHint').textContent='临时采集标签清理未完成，请重新打开扩展后重试';$('tabHint').hidden=false; }
     grabbing=false;btn.disabled=false;btn.classList.remove('loading');btn.textContent='补齐主站并抓取登录态';
   }
 }

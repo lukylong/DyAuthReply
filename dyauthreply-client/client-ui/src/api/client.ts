@@ -592,6 +592,7 @@ export interface QuickAuthSession {
   started_at_ms: number;
   expires_at_ms: number;
   completeness: QuickAuthCompleteness;
+  progress_fresh?: boolean;
   account?: QuickAuthAccount | null;
   component: QuickAuthComponent;
 }

@@ -405,7 +405,7 @@ fn validate_profile(
             .take(128)
             .collect(),
         avatar: first_image(user, &["avatar_thumb", "avatar_larger", "avatar_medium"]),
-        unique_id: bounded_text(user, "unique_id", 128),
+        unique_id: public_handle(user),
         follower_count: unsigned(user.get("follower_count")),
         following_count: unsigned(user.get("following_count")),
         aweme_count: unsigned(user.get("aweme_count")),
@@ -427,6 +427,30 @@ fn validate_bound_profile(
         return Err(AccountRequestError::AccountMismatch);
     }
     Ok(profile)
+}
+
+// The public Douyin handle is distinct from the authenticated internal uid.
+// Accounts without a custom unique_id expose their public number as short_id.
+fn public_handle(user: &Value) -> String {
+    let custom = bounded_text(user, "unique_id", 128);
+    let custom = custom.trim();
+    if !custom.is_empty() && custom != "0" {
+        return custom.to_owned();
+    }
+    let short = match &user["short_id"] {
+        Value::String(value) => value.trim().to_owned(),
+        Value::Number(value) => value.as_u64().map(|v| v.to_string()).unwrap_or_default(),
+        _ => String::new(),
+    };
+    if short.len() <= 128
+        && !short.is_empty()
+        && short.bytes().all(|b| b.is_ascii_digit())
+        && short.bytes().any(|b| b != b'0')
+    {
+        short
+    } else {
+        String::new()
+    }
 }
 
 fn bounded_text(value: &Value, key: &str, limit: usize) -> String {
@@ -864,6 +888,55 @@ mod tests {
             Err(AccountRequestError::AccountMismatch)
         ));
     }
+    #[test]
+    fn public_handle_uses_short_id_only_when_custom_id_is_missing() {
+        for (custom, short, expected) in [
+            (
+                serde_json::json!(""),
+                serde_json::json!("12345678901"),
+                "12345678901",
+            ),
+            (
+                serde_json::Value::Null,
+                serde_json::json!(12_345_678_901_u64),
+                "12345678901",
+            ),
+            (
+                serde_json::json!("custom.name"),
+                serde_json::json!(123),
+                "custom.name",
+            ),
+            (serde_json::json!("  "), serde_json::json!("123"), "123"),
+            (serde_json::json!("0"), serde_json::json!("123"), "123"),
+        ] {
+            let value = serde_json::json!({"user":{"uid":"42","sec_uid":"self","nickname":"sample","unique_id":custom,"short_id":short}});
+            assert_eq!(
+                validate_profile("self", &value).unwrap().unwrap().unique_id,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn public_handle_rejects_invalid_short_ids_and_never_uses_internal_uid() {
+        for short in [
+            serde_json::json!(0),
+            serde_json::json!("0"),
+            serde_json::json!("000"),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("x\n123"),
+            serde_json::json!("x".repeat(129)),
+            serde_json::Value::Null,
+        ] {
+            let value = serde_json::json!({"user":{"uid":"42","sec_uid":"self","nickname":"sample","short_id":short}});
+            assert_eq!(
+                validate_profile("self", &value).unwrap().unwrap().unique_id,
+                ""
+            );
+        }
+    }
+
     fn owner() -> VerifiedSelf {
         VerifiedSelf {
             user_id: "42".into(),

@@ -152,7 +152,7 @@ impl Workbench {
         self.ensure_account(id, &profile.sec_uid)?;
         let synced = iso(at_ms).context("invalid profile timestamp")?;
         let changed = self.lock()?.execute(
-            "UPDATE accounts SET data=json_set(data,'$.nickname',?1,'$.avatar',?2,'$.unique_id',?3,'$.follower_count',?4,'$.following_count',?5,'$.aweme_count',?6,'$.total_favorited',?7,'$.last_profile_sync_at',?8,'$.last_profile_sync_at_ms',?9) WHERE id=?10 AND sec_uid=?11",
+            "UPDATE accounts SET data=json_set(data,'$.nickname',?1,'$.avatar',?2,'$.unique_id',CASE WHEN ?3<>'' THEN ?3 ELSE coalesce(json_extract(data,'$.unique_id'),'') END,'$.follower_count',?4,'$.following_count',?5,'$.aweme_count',?6,'$.total_favorited',?7,'$.last_profile_sync_at',?8,'$.last_profile_sync_at_ms',?9) WHERE id=?10 AND sec_uid=?11",
             params![profile.nickname,profile.avatar,profile.unique_id,profile.follower_count,profile.following_count,profile.aweme_count,profile.total_favorited,synced,at_ms,id,profile.sec_uid],
         )?;
         anyhow::ensure!(changed == 1, "account profile identity changed");

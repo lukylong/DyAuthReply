@@ -151,6 +151,8 @@ jobs:
           node scripts/client/test_abogus_user_agent.mjs
           node scripts/client/test_current_abogus.mjs
           node scripts/client/test_capture_extension.mjs
+          node scripts/client/test_capture_bootstrap.mjs
+          node scripts/client/test_capture_lifecycle.mjs
           node scripts/client/test_reply_log_presentation.mjs
 
       - name: Run Clippy
@@ -264,7 +266,9 @@ jobs:
           npm ci --prefix dyauthreply-client/desktop
 
       - name: Verify send status presentation
-        run: node scripts/client/test_send_status_presentation.mjs
+        run: |
+          node scripts/client/test_send_status_presentation.mjs
+          node scripts/client/test_quick_auth_state.mjs
 
       # 去掉 GitHub Secret 常见的尾随换行/空格，写回 GITHUB_ENV 供 tauri build 签名
       - name: Prepare minisign private key

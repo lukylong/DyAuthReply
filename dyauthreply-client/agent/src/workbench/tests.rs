@@ -600,3 +600,36 @@ fn oversized_display_text_inbound_has_bounded_placeholder() {
         .iter()
         .any(|m| m["content"] == "[消息内容过长，请在抖音查看]"));
 }
+
+#[test]
+fn public_handle_missing_refresh_keeps_last_verified_value_across_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Workbench::open(root.path()).unwrap();
+    let mut profile = crate::protocol::VerifiedSelf {
+        user_id: "42".into(),
+        sec_uid: "self".into(),
+        nickname: "sample".into(),
+        avatar: String::new(),
+        unique_id: "12345678901".into(),
+        follower_count: 1,
+        following_count: 2,
+        aweme_count: 3,
+        total_favorited: 4,
+    };
+    db.set_account_profile_details("a", &profile, now_ms())
+        .unwrap();
+    profile.unique_id.clear();
+    db.set_account_profile_details("a", &profile, now_ms() + 1)
+        .unwrap();
+    assert_eq!(db.account("a").unwrap()["unique_id"], "12345678901");
+    profile.unique_id = "new.name".into();
+    db.set_account_profile_details("a", &profile, now_ms() + 2)
+        .unwrap();
+    profile.sec_uid = "other".into();
+    assert!(db
+        .set_account_profile_details("a", &profile, now_ms() + 3)
+        .is_err());
+    drop(db);
+    let db = Workbench::open(root.path()).unwrap();
+    assert_eq!(db.account("a").unwrap()["unique_id"], "new.name");
+}

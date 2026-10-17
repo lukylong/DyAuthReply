@@ -3,6 +3,8 @@ pub mod api;
 mod cdp;
 mod component;
 mod installer;
+#[cfg(test)]
+mod live_probe;
 mod sources;
 
 use crate::onboarding::Importer;
@@ -63,6 +65,7 @@ pub struct SessionView {
     pub started_at_ms: u64,
     pub expires_at_ms: u64,
     pub completeness: Completeness,
+    pub progress_fresh: bool,
     pub account: Option<IdentityView>,
     pub component: ComponentView,
 }
@@ -78,6 +81,112 @@ struct Session {
     browser_ws: Arc<StdMutex<Option<String>>>,
     profile: PathBuf,
     cancel: watch::Sender<bool>,
+}
+
+type SessionResources = (
+    Arc<StdMutex<Option<Child>>>,
+    Arc<StdMutex<Option<String>>>,
+    PathBuf,
+);
+
+impl Session {
+    fn resources(&self) -> SessionResources {
+        (
+            self.child.clone(),
+            self.browser_ws.clone(),
+            self.profile.clone(),
+        )
+    }
+
+    fn apply_progress(
+        &mut self,
+        state: &'static str,
+        message: &str,
+        completeness: Option<Completeness>,
+    ) {
+        if terminal(self.view.state)
+            || matches!(self.view.state, "importing" | "awaiting_confirmation")
+        {
+            return;
+        }
+        self.view.state = state;
+        self.view.message = message.into();
+        self.view.progress_fresh = completeness.is_some();
+        if let Some(completeness) = completeness {
+            self.view.completeness = completeness;
+        }
+    }
+
+    fn begin_import(&mut self, now: u64) -> Result<(String, Option<String>)> {
+        anyhow::ensure!(
+            self.view.state == "awaiting_confirmation" && !*self.cancel.borrow(),
+            "账号资料尚未完成校验"
+        );
+        anyhow::ensure!(
+            now < self.view.expires_at_ms,
+            "快捷登录确认已超时，请重新登录"
+        );
+        anyhow::ensure!(
+            self.view.progress_fresh && self.view.completeness.ready(),
+            "采集字段尚未完成校验"
+        );
+        let bundle = self
+            .secret
+            .as_ref()
+            .context("快捷登录凭证已释放")?
+            .bundle
+            .clone();
+        self.view.state = "importing";
+        self.view.message = "正在安全导入账号".into();
+        Ok((bundle, self.view.target_account_id.clone()))
+    }
+
+    fn cancel_capture(&mut self) -> Result<bool> {
+        if terminal(self.view.state) {
+            return Ok(false);
+        }
+        anyhow::ensure!(
+            self.view.state != "importing",
+            "账号正在导入，请等待结果后关闭"
+        );
+        self.cancel.send_replace(true);
+        self.secret = None;
+        self.view.account = None;
+        self.view.progress_fresh = false;
+        self.view.state = "cancelled";
+        self.view.message = "已取消快捷登录".into();
+        Ok(true)
+    }
+
+    fn mark_failed(&mut self, error: String) -> bool {
+        if terminal(self.view.state) || self.view.state == "importing" {
+            return false;
+        }
+        self.cancel.send_replace(true);
+        self.secret = None;
+        self.view.account = None;
+        self.view.progress_fresh = false;
+        self.view.state = if error.contains("超时") {
+            "timed_out"
+        } else if error.contains("窗口已关闭") {
+            "browser_exited"
+        } else {
+            "failed"
+        };
+        self.view.message = error;
+        true
+    }
+}
+
+async fn cancelled(stopped: &mut watch::Receiver<bool>) {
+    loop {
+        if *stopped.borrow_and_update() {
+            return;
+        }
+        if stopped.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 struct State {
@@ -315,6 +424,7 @@ impl Broker {
             started_at_ms,
             expires_at_ms,
             completeness: Completeness::default(),
+            progress_fresh: false,
             account: None,
             component: resolved.view.clone(),
         };
@@ -384,19 +494,8 @@ impl Broker {
         let (bundle, target) = {
             let mut state = self.state.lock().await;
             let session = current_mut(&mut state, session_id)?;
-            anyhow::ensure!(
-                session.view.state == "awaiting_confirmation",
-                "账号资料尚未完成校验"
-            );
-            let bundle = session
-                .secret
-                .as_ref()
-                .context("快捷登录凭证已释放")?
-                .bundle
-                .clone();
-            session.view.state = "importing";
-            session.view.message = "正在安全导入账号".into();
-            (bundle, session.view.target_account_id.clone())
+            anyhow::ensure!(child_running(&session.child)?, "登录窗口已关闭，请重新登录");
+            session.begin_import(now_ms()?)?
         };
         self.importer.notify_quick_auth(session_id);
         let result = match self.importer.import_bundle(target, bundle).await {
@@ -432,20 +531,17 @@ impl Broker {
     /// Rejects stale IDs; repeated cancellation is idempotent for the same terminal session.
     pub async fn cancel(&self, session_id: &str) -> Result<SessionView> {
         validate_session_id(session_id)?;
-        {
+        let (resources, view) = {
             let mut state = self.state.lock().await;
             let session = current_mut(&mut state, session_id)?;
-            if terminal(session.view.state) {
+            if !session.cancel_capture()? {
                 return Ok(session.view.clone());
             }
-            session.cancel.send_replace(true);
-            session.secret = None;
-            session.view.state = "cancelled";
-            session.view.message = "已取消快捷登录".into();
-        }
-        self.cleanup(session_id).await;
+            (session.resources(), session.view.clone())
+        };
+        self.cleanup_resources(resources).await;
         self.importer.notify_quick_auth(session_id);
-        self.status(session_id).await
+        Ok(view)
     }
 
     async fn run(
@@ -457,7 +553,14 @@ impl Broker {
         browser_ws: Arc<StdMutex<Option<String>>>,
         mut stopped: watch::Receiver<bool>,
     ) -> Result<()> {
-        let launched = launch(&executable, &profile, &child, &browser_ws).await?;
+        let expires_at_ms = self.status(&session_id).await?.expires_at_ms;
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_millis(expires_at_ms.saturating_sub(now_ms()?));
+        let launched = tokio::select! {
+            biased;
+            () = cancelled(&mut stopped) => return Ok(()),
+            result = tokio::time::timeout_at(deadline, launch(&executable, &profile, &child, &browser_ws)) => result.context("快捷登录已超时")??,
+        };
         self.update(
             &session_id,
             "awaiting_login",
@@ -465,9 +568,17 @@ impl Broker {
             None,
         )
         .await?;
-        let mut cdp = CdpClient::connect(&launched.page_ws).await?;
-        cdp.initialize().await?;
-        let deadline = tokio::time::Instant::now() + SESSION_TIMEOUT;
+        let mut cdp = tokio::select! {
+            biased;
+            () = cancelled(&mut stopped) => return Ok(()),
+            result = tokio::time::timeout(START_TIMEOUT, CdpClient::connect(&launched.page_ws)) => result.context("浏览器连接超时")??,
+        };
+        tokio::select! {
+            biased;
+            () = cancelled(&mut stopped) => return Ok(()),
+            result = cdp.initialize() => result?,
+        }
+        let mut capture_failures = 0_u32;
         loop {
             if *stopped.borrow_and_update() {
                 return Ok(());
@@ -477,31 +588,28 @@ impl Broker {
                 anyhow::bail!("登录窗口已关闭");
             }
             let mut poll_delay = Duration::from_secs(2);
-            match cdp.collect().await {
+            let collected = tokio::select! {
+                biased;
+                () = cancelled(&mut stopped) => return Ok(()),
+                result = tokio::time::timeout_at(deadline, cdp.collect()) => result.context("快捷登录已超时")?,
+            };
+            if collected.is_ok() {
+                capture_failures = 0;
+            }
+            match collected {
                 Ok(mut capture) if capture.candidate.is_some() => {
                     let mut candidate = capture.candidate.take().context("采集结果缺失")?;
-                    self.update(
-                        &session_id,
-                        "collecting",
-                        "登录成功，正在校验账号和发送凭证",
-                        Some(candidate.completeness.clone()),
-                    )
-                    .await?;
-                    let target = self.status(&session_id).await?.target_account_id;
-                    match self
-                        .importer
-                        .verify_bundle(target.as_deref(), &candidate.bundle)
-                        .await
-                    {
-                        Ok(verified) => {
-                            candidate.identity = CandidateIdentity {
-                                sec_uid: verified.sec_uid,
-                                nickname: verified.nickname,
-                                unique_id: verified.unique_id,
-                                avatar: verified.avatar,
-                            };
+                    let verified = tokio::select! {
+                        biased;
+                        () = cancelled(&mut stopped) => return Ok(()),
+                        result = tokio::time::timeout_at(deadline, self.verify_candidate(&session_id, &mut candidate)) => result.context("快捷登录已超时")?,
+                    };
+                    match verified {
+                        Ok(()) => {
                             self.ready(&session_id, candidate).await?;
-                            return Ok(());
+                            return self
+                                .watch_confirmation(&session_id, &child, &mut stopped, deadline)
+                                .await;
                         }
                         Err(error) => {
                             let detail = format!("账号校验未通过：{error}");
@@ -517,26 +625,20 @@ impl Broker {
                 }
                 Ok(capture) => {
                     poll_delay = cdp.poll_delay();
-                    let message = cdp.progress_message(&capture.completeness);
-                    let logged_in = capture.completeness.cookie();
-                    self.update(
-                        &session_id,
-                        if logged_in {
-                            "collecting"
-                        } else {
-                            "awaiting_login"
-                        },
-                        if logged_in {
-                            &message
-                        } else {
-                            "请完成登录，系统会自动识别账号"
-                        },
-                        Some(capture.completeness),
-                    )
-                    .await?;
+                    self.report_waiting(&session_id, &cdp, capture.completeness)
+                        .await?;
                 }
                 Err(error) => {
-                    let detail = format!("采集尚未完成：{error}");
+                    anyhow::ensure!(
+                        !cdp.is_closed(),
+                        "登录窗口已关闭或连接已中断，请重新打开登录窗口"
+                    );
+                    capture_failures = capture_failures.saturating_add(1);
+                    anyhow::ensure!(
+                        capture_failures < 30,
+                        "连续采集失败，请检查登录页面后重试：{error}"
+                    );
+                    let detail = format!("本轮读取失败，旧字段状态已暂停显示：{error}（正在重试 {capture_failures}/30）");
                     self.update(&session_id, "collecting", &detail, None)
                         .await?;
                 }
@@ -550,18 +652,67 @@ impl Broker {
         }
     }
 
+    async fn report_waiting(
+        &self,
+        session_id: &str,
+        cdp: &CdpClient,
+        completeness: Completeness,
+    ) -> Result<()> {
+        let message = cdp.progress_message(&completeness);
+        let logged_in = completeness.cookie();
+        self.update(
+            session_id,
+            if logged_in {
+                "collecting"
+            } else {
+                "awaiting_login"
+            },
+            if logged_in {
+                &message
+            } else {
+                "请完成登录，系统会自动识别账号"
+            },
+            Some(completeness),
+        )
+        .await
+    }
+
+    async fn verify_candidate(&self, session_id: &str, candidate: &mut Candidate) -> Result<()> {
+        self.update(
+            session_id,
+            "collecting",
+            "登录成功，正在校验账号和发送凭证",
+            Some(candidate.completeness.clone()),
+        )
+        .await?;
+        let target = self.status(session_id).await?.target_account_id;
+        let verified = self
+            .importer
+            .verify_bundle(target.as_deref(), &candidate.bundle)
+            .await?;
+        candidate.identity = CandidateIdentity {
+            sec_uid: verified.sec_uid,
+            nickname: verified.nickname,
+            unique_id: verified.unique_id,
+            avatar: verified.avatar,
+        };
+        Ok(())
+    }
+
     async fn ready(&self, session_id: &str, candidate: Candidate) -> Result<()> {
         let mut state = self.state.lock().await;
         let session = current_mut(&mut state, session_id)?;
-        if *session.cancel.borrow() {
+        if *session.cancel.borrow() || terminal(session.view.state) {
             return Ok(());
         }
+        anyhow::ensure!(now_ms()? < session.view.expires_at_ms, "快捷登录已超时");
         session.secret = Some(SecretCandidate {
             bundle: candidate.bundle,
         });
         session.view.state = "awaiting_confirmation";
         session.view.message = "请确认识别到的抖音账号".into();
         session.view.completeness = candidate.completeness;
+        session.view.progress_fresh = true;
         session.view.account = Some(candidate.identity.into());
         drop(state);
         self.importer.notify_quick_auth(session_id);
@@ -577,62 +728,78 @@ impl Broker {
     ) -> Result<()> {
         let mut state = self.state.lock().await;
         let session = current_mut(&mut state, session_id)?;
-        if terminal(session.view.state) {
-            return Ok(());
-        }
-        session.view.state = state_name;
-        session.view.message = message.into();
-        if let Some(completeness) = completeness {
-            session.view.completeness = completeness;
-        }
+        session.apply_progress(state_name, message, completeness);
         drop(state);
         self.importer.notify_quick_auth(session_id);
         Ok(())
     }
 
     async fn fail_and_cleanup(&self, session_id: &str, error: String) {
-        {
+        let resources = {
             let mut state = self.state.lock().await;
-            if let Ok(session) = current_mut(&mut state, session_id) {
-                if terminal(session.view.state) {
-                    return;
-                }
-                session.secret = None;
-                session.view.state = if error.contains("超时") {
-                    "timed_out"
-                } else if error.contains("窗口已关闭") {
-                    "browser_exited"
+            let Ok(session) = current_mut(&mut state, session_id) else {
+                return;
+            };
+            if !session.mark_failed(error) {
+                return;
+            }
+            session.resources()
+        };
+        self.cleanup_resources(resources).await;
+        self.importer.notify_quick_auth(session_id);
+    }
+
+    async fn watch_confirmation(
+        &self,
+        session_id: &str,
+        child: &Arc<StdMutex<Option<Child>>>,
+        stopped: &mut watch::Receiver<bool>,
+        deadline: tokio::time::Instant,
+    ) -> Result<()> {
+        loop {
+            let state = self.status(session_id).await?.state;
+            if terminal(state) {
+                return Ok(());
+            }
+            // Once import starts, only its durable result may finish the session.
+            if state != "importing" {
+                let error = if tokio::time::Instant::now() >= deadline {
+                    Some("快捷登录确认已超时，请重新登录")
+                } else if !child_running(child)? {
+                    Some("登录窗口已关闭，请重新登录")
                 } else {
-                    "failed"
+                    None
                 };
-                session.view.message = error;
+                if let Some(error) = error {
+                    self.fail_and_cleanup(session_id, error.into()).await;
+                    continue;
+                }
+            }
+            tokio::select! {
+                () = cancelled(stopped) => return Ok(()),
+                () = tokio::time::sleep(Duration::from_millis(250)) => {},
             }
         }
-        self.cleanup(session_id).await;
-        self.importer.notify_quick_auth(session_id);
     }
 
     async fn cleanup(&self, session_id: &str) {
         let resources = {
             let state = self.state.lock().await;
             state.session.as_ref().and_then(|session| {
-                (session.view.session_id == session_id).then(|| {
-                    (
-                        session.child.clone(),
-                        session.browser_ws.clone(),
-                        session.profile.clone(),
-                    )
-                })
+                (session.view.session_id == session_id).then(|| session.resources())
             })
         };
-        if let Some((child, browser_ws, profile)) = resources {
-            let ws = browser_ws.lock().ok().and_then(|guard| guard.clone());
-            if let Some(ws) = ws {
-                let _ = close_browser(&ws).await;
-            }
-            let _ =
-                tokio::task::spawn_blocking(move || stop_child_and_remove(&child, &profile)).await;
+        if let Some(resources) = resources {
+            self.cleanup_resources(resources).await;
         }
+    }
+
+    async fn cleanup_resources(&self, (child, browser_ws, profile): SessionResources) {
+        let ws = browser_ws.lock().ok().and_then(|guard| guard.clone());
+        if let Some(ws) = ws {
+            let _ = close_browser(&ws).await;
+        }
+        let _ = tokio::task::spawn_blocking(move || stop_child_and_remove(&child, &profile)).await;
     }
 }
 
@@ -847,6 +1014,123 @@ fn write_owner(profile: &Path, pid: u32, executable: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session(root: &Path) -> Session {
+        let (cancel, _) = watch::channel(false);
+        Session {
+            view: SessionView {
+                session_id: uuid::Uuid::new_v4().to_string(),
+                mode: Mode::Create,
+                target_account_id: None,
+                state: "collecting",
+                message: String::new(),
+                started_at_ms: 1,
+                expires_at_ms: 100,
+                completeness: Completeness::new([true; 6]).with_main(true, true, true),
+                progress_fresh: true,
+                account: None,
+                component: component::status(root),
+            },
+            secret: Some(SecretCandidate {
+                bundle: "synthetic-private-bundle".into(),
+            }),
+            child: Arc::new(StdMutex::new(None)),
+            browser_ws: Arc::new(StdMutex::new(None)),
+            profile: root.join("owned"),
+            cancel,
+        }
+    }
+
+    #[test]
+    fn failed_read_marks_old_progress_stale_and_success_repairs_it() {
+        let root = tempfile::tempdir().unwrap();
+        let mut s = session(root.path());
+        s.apply_progress("collecting", "read failed", None);
+        assert!(!s.view.progress_fresh);
+        s.apply_progress("collecting", "recovered", Some(Completeness::default()));
+        assert!(s.view.progress_fresh);
+        assert!(!s.view.completeness.ready());
+        let projection = serde_json::to_string(&s.view).unwrap();
+        assert!(!projection.contains("synthetic-private-bundle"));
+    }
+
+    #[test]
+    fn expired_or_stale_confirmation_never_starts_import() {
+        let root = tempfile::tempdir().unwrap();
+        let mut s = session(root.path());
+        s.view.state = "awaiting_confirmation";
+        assert!(s.begin_import(100).is_err());
+        assert_eq!(s.view.state, "awaiting_confirmation");
+        s.view.progress_fresh = false;
+        assert!(s.begin_import(99).is_err());
+        s.view.progress_fresh = true;
+        assert!(s.begin_import(99).is_ok());
+        assert!(s.begin_import(99).is_err()); // no double submit
+    }
+
+    #[test]
+    fn in_flight_import_cannot_be_cancelled_or_overwritten_by_late_events() {
+        let root = tempfile::tempdir().unwrap();
+        let mut s = session(root.path());
+        s.view.state = "awaiting_confirmation";
+        s.begin_import(2).unwrap();
+        assert!(s.cancel_capture().is_err());
+        assert!(!s.mark_failed("登录窗口已关闭".into()));
+        s.apply_progress("collecting", "late response", None);
+        assert_eq!(s.view.state, "importing");
+        assert!(!*s.cancel.borrow());
+        assert!(s.secret.is_some());
+    }
+
+    #[test]
+    fn cancelled_and_failed_sessions_release_secrets_and_ignore_late_progress() {
+        let root = tempfile::tempdir().unwrap();
+        for error in [None, Some("快捷登录确认已超时"), Some("登录窗口已关闭")] {
+            let mut s = session(root.path());
+            if let Some(error) = error {
+                assert!(s.mark_failed(error.into()));
+            } else {
+                assert!(s.cancel_capture().unwrap());
+            }
+            let terminal_state = s.view.state;
+            assert!(s.secret.is_none());
+            assert!(!s.view.progress_fresh);
+            s.apply_progress("collecting", "late response", Some(Completeness::default()));
+            assert_eq!(s.view.state, terminal_state);
+            assert!(!s.cancel_capture().unwrap());
+        }
+    }
+
+    #[test]
+    fn saved_cleanup_handles_do_not_remove_a_replacement_session() {
+        let root = tempfile::tempdir().unwrap();
+        let mut s = session(root.path());
+        create_private_dir(&s.profile).unwrap();
+        let (old_child, _, old_profile) = s.resources();
+        s.cancel_capture().unwrap();
+        s.profile = root.path().join("replacement");
+        create_private_dir(&s.profile).unwrap();
+        stop_child_and_remove(&old_child, &old_profile).unwrap();
+        assert!(!old_profile.exists());
+        assert!(s.profile.exists());
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_a_pending_operation_and_already_cancelled_work() {
+        let (tx, mut rx) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                () = cancelled(&mut rx) => true,
+                () = std::future::pending::<()>() => false,
+            }
+        });
+        tx.send_replace(true);
+        assert!(task.await.unwrap());
+        let mut rx = tx.subscribe();
+        tokio::time::timeout(Duration::from_millis(100), cancelled(&mut rx))
+            .await
+            .unwrap();
+    }
 
     #[test]
     fn modes_require_the_correct_target_shape() {

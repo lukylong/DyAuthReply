@@ -4,6 +4,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { Ellipsis, KeyRound, LoaderCircle, Plus, Search, ShieldCheck, Smartphone, TriangleAlert } from 'lucide-vue-next';
 import AppModal from '../components/AppModal.vue';
 import { hasUnavailableLease } from '../utils/accountLease';
+import { acceptsQuickAuthResponse, freshQuickAuthProgress } from '../utils/quickAuthProgress';
 import AccountProfileDrawer from '../components/AccountProfileDrawer.vue';
 import {
   deleteAccount,
@@ -53,6 +54,8 @@ const quickPendingTarget = ref<DouyinAccount | undefined>();
 const quickAuthTarget = ref<DouyinAccount | undefined>();
 let quickAuthRepairTimer: ReturnType<typeof setInterval> | null = null;
 let componentRepairTimer: ReturnType<typeof setInterval> | null = null;
+let quickAuthReadSequence = 0;
+let componentReadSequence = 0;
 
 const quickAuthTerminal = computed(() =>
   ['completed', 'cancelled', 'timed_out', 'browser_exited', 'failed'].includes(quickAuth.value?.state || ''),
@@ -68,6 +71,7 @@ function quickAuthMode(account?: DouyinAccount): QuickAuthMode {
 }
 
 function stopQuickAuthRepair() {
+  quickAuthReadSequence++;
   if (quickAuthRepairTimer) clearInterval(quickAuthRepairTimer);
   quickAuthRepairTimer = null;
 }
@@ -78,6 +82,7 @@ function startQuickAuthRepair() {
 }
 
 function stopComponentRepair() {
+  componentReadSequence++;
   if (componentRepairTimer) clearInterval(componentRepairTimer);
   componentRepairTimer = null;
 }
@@ -88,8 +93,11 @@ async function beginQuickAuth(account?: DouyinAccount) {
 }
 
 async function refreshQuickComponent() {
+  const sequence = ++componentReadSequence;
   try {
-    quickComponent.value = await getQuickAuthComponent();
+    const component = await getQuickAuthComponent();
+    if (sequence !== componentReadSequence || !showQuickAuth.value) return;
+    quickComponent.value = component;
     if (quickComponent.value.state === 'ready') {
       stopComponentRepair();
       const target = quickPendingTarget.value;
@@ -99,6 +107,7 @@ async function refreshQuickComponent() {
       stopComponentRepair();
     }
   } catch (e) {
+    if (sequence !== componentReadSequence || !showQuickAuth.value) return;
     stopComponentRepair();
     quickAuthError.value = e instanceof Error ? e.message : String(e);
   }
@@ -122,11 +131,15 @@ async function refreshQuickAuth() {
   if (quickAuthBusy.value) return;
   const id = quickAuth.value?.session_id;
   if (!id) return;
+  const sequence = ++quickAuthReadSequence;
   try {
-    quickAuth.value = await getQuickAuthSession(id);
+    const response = await getQuickAuthSession(id);
+    if (!acceptsQuickAuthResponse(id, quickAuth.value?.session_id, sequence, quickAuthReadSequence, quickAuthBusy.value)) return;
+    quickAuth.value = response;
+    quickAuthError.value = '';
     if (quickAuthTerminal.value) stopQuickAuthRepair();
   } catch (e) {
-    if (quickAuthBusy.value) return;
+    if (!acceptsQuickAuthResponse(id, quickAuth.value?.session_id, sequence, quickAuthReadSequence, quickAuthBusy.value)) return;
     quickAuthError.value = e instanceof Error ? e.message : String(e);
   }
 }
@@ -154,6 +167,8 @@ async function openQuickAuth(account?: DouyinAccount) {
     return;
   }
   quickAuthBusy.value = true;
+  stopQuickAuthRepair();
+  stopComponentRepair();
   quickAuthError.value = '';
   quickAuth.value = null;
   quickAuthTarget.value = account;
@@ -176,14 +191,19 @@ async function openQuickAuth(account?: DouyinAccount) {
 }
 
 async function closeQuickAuth() {
-  if (quickAuthBusy.value) return;
+  if (quickAuthBusy.value || quickAuth.value?.state === 'importing') return;
   const session = quickAuth.value;
+  if (session && !quickAuthTerminal.value) {
+    quickAuthBusy.value = true;
+    try { await cancelQuickAuth(session.session_id); }
+    catch (e) {
+      quickAuthError.value = e instanceof Error ? e.message : String(e);
+      return;
+    } finally { quickAuthBusy.value = false; }
+  }
   showQuickAuth.value = false;
   stopQuickAuthRepair();
   stopComponentRepair();
-  if (session && !quickAuthTerminal.value) {
-    try { await cancelQuickAuth(session.session_id); } catch { /* owned session timeout also cleans up */ }
-  }
   quickAuth.value = null;
   quickComponent.value = null;
   quickPendingTarget.value = undefined;
@@ -696,7 +716,7 @@ onMounted(async () => {
           <p v-if="!quickAuthTerminal" class="session-time">本次授权窗口剩余约 {{ quickAuthRemainingMinutes }} 分钟</p>
         </div>
 
-        <div v-if="quickAuth" class="credential-checks">
+        <div v-if="quickAuth && freshQuickAuthProgress(quickAuth)" class="credential-checks">
           <span :class="{ done: quickAuth.completeness.cookie }">登录状态</span>
           <span :class="{ done: quickAuth.completeness.scoped_cookies }">账号会话</span>
           <span :class="{ done: quickAuth.completeness.server_data }">发送认证</span>
@@ -708,6 +728,10 @@ onMounted(async () => {
           <span :class="{ done: quickAuth.completeness.sdk_token }">SDK Token</span>
         </div>
 
+        <p v-if="quickAuth && !freshQuickAuthProgress(quickAuth) && !quickAuthTerminal" class="msg-box">
+          正在重新读取字段，暂不显示上一轮状态；请以上方实时提示为准。
+        </p>
+
         <p v-if="quickAuthError" class="msg-box error-msg">{{ quickAuthError }}</p>
         <p v-else-if="quickAuthTerminal && quickAuth?.state !== 'completed'" class="msg-box error-msg">
           {{ quickAuth?.message }}
@@ -717,7 +741,7 @@ onMounted(async () => {
         </p>
 
         <div v-if="quickAuth" class="actions">
-          <button type="button" class="btn-glass" :disabled="quickAuthBusy" @click="closeQuickAuth">
+          <button type="button" class="btn-glass" :disabled="quickAuthBusy || quickAuth.state === 'importing'" @click="closeQuickAuth">
             {{ quickAuth?.state === 'completed' ? '关闭' : '取消登录' }}
           </button>
           <button

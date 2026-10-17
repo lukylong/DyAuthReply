@@ -1,5 +1,6 @@
 /* Per-tab, per-store and per-origin observations; never export stale cross-account data. */
 importScripts('capture-core.js');
+importScripts('capture-lifecycle.js');
 const CAPTURE_PREFIX='dy_capture_v2_';
 async function storeObservation(details, kind, value) {
   if (details.tabId < 0 || !value) return;

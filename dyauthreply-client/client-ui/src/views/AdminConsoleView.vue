@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
+import AppModal from '../components/AppModal.vue';
 import {
   adminEmergencyStop,
   adminLogout,
@@ -27,6 +28,8 @@ const logLoading = ref(false);
 const autoRefresh = ref(true);
 const stopping = ref(false);
 const stopResult = ref('');
+const showStopConfirm = ref(false);
+const stopError = ref('');
 
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -84,16 +87,30 @@ async function loadLogFiles() {
   }
 }
 
-async function onEmergencyStop() {
-  if (!window.confirm('确认急停？将关闭所有账号自动回复、暂停会话并清空待发命令。')) return;
+function onEmergencyStop() {
+  if (stopping.value) return;
+  stopError.value = '';
+  stopResult.value = '';
+  showStopConfirm.value = true;
+}
+
+function closeStopConfirm() {
+  if (stopping.value) return;
+  showStopConfirm.value = false;
+}
+
+async function confirmEmergencyStop() {
+  if (stopping.value || !showStopConfirm.value) return;
   stopping.value = true;
+  stopError.value = '';
   stopResult.value = '';
   try {
     const res = await adminEmergencyStop('管理员手动急停');
     stopResult.value = `已急停：${res.accounts_stopped} 个账号，清空 ${res.commands_cleared} 条命令，标记 ${res.messages_marked_processed} 条消息`;
+    showStopConfirm.value = false;
     await loadDashboard();
   } catch (e) {
-    stopResult.value = e instanceof Error ? e.message : String(e);
+    stopError.value = e instanceof Error ? e.message : String(e);
   } finally {
     stopping.value = false;
   }
@@ -209,6 +226,15 @@ onUnmounted(() => {
       </button>
       <p v-if="stopResult" class="stop-result">{{ stopResult }}</p>
     </section>
+
+    <AppModal :open="showStopConfirm" title="确认急停" dialog-role="alertdialog" @close="closeStopConfirm">
+      <p>将关闭所有账号自动回复、暂停会话并清空待发命令。确认执行急停吗？</p>
+      <p v-if="stopError" class="banner error" role="alert">{{ stopError }}</p>
+      <button type="button" class="btn" :disabled="stopping" @click="closeStopConfirm">取消</button>
+      <button type="button" class="btn danger" :disabled="stopping" @click="confirmEmergencyStop">
+        {{ stopping ? '执行中…' : '确认急停' }}
+      </button>
+    </AppModal>
 
     <section v-if="tab === 'process' && processes" class="panel">
       <h3>API 进程</h3>

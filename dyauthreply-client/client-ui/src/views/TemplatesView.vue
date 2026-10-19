@@ -8,6 +8,7 @@ import {
   type DouyinTemplate,
 } from '../api/client';
 import { useClientLicense } from '../composables/useClientLicense';
+import AppModal from '../components/AppModal.vue';
 
 const loading = ref(true);
 const error = ref('');
@@ -17,6 +18,11 @@ const showForm = ref(false);
 const editing = ref<DouyinTemplate | null>(null);
 const submitting = ref(false);
 const formError = ref('');
+const togglingIds = ref(new Set<string>());
+const deleteTarget = ref<DouyinTemplate | null>(null);
+const deleting = ref(false);
+const deleteError = ref('');
+const notice = ref('');
 
 const form = ref({
   name: '',
@@ -101,29 +107,64 @@ async function submitForm() {
 }
 
 async function toggleStatus(tpl: DouyinTemplate) {
+  if (togglingIds.value.has(tpl.id)) return;
   if (!license.value?.can_use_business) {
     error.value = `当前授权状态为「${license.value?.state_label || '未激活'}」，无法修改模板`;
     return;
   }
+  const status = !tpl.status;
+  togglingIds.value.add(tpl.id);
+  error.value = '';
   try {
-    await patchTemplate(tpl.id, { status: !tpl.status });
-    tpl.status = !tpl.status;
+    const updated = await patchTemplate(tpl.id, { status });
+    if (typeof updated.status !== 'boolean') throw new Error('状态更新未确认，请重试');
+    tpl.status = updated.status;
+    const current = templates.value.find(item => item.id === tpl.id);
+    if (current) current.status = updated.status;
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    togglingIds.value.delete(tpl.id);
   }
 }
 
-async function removeTemplate(tpl: DouyinTemplate) {
+function removeTemplate(tpl: DouyinTemplate) {
+  if (deleting.value || togglingIds.value.has(tpl.id)) return;
+  notice.value = '';
   if (!license.value?.can_use_business) {
     error.value = `当前授权状态为「${license.value?.state_label || '未激活'}」，无法删除模板`;
     return;
   }
-  if (!confirm(`删除模板「${tpl.name}」？`)) return;
+  error.value = '';
+  deleteError.value = '';
+  deleteTarget.value = tpl;
+}
+
+function closeDelete() {
+  if (deleting.value) return;
+  deleteTarget.value = null;
+  deleteError.value = '';
+}
+
+async function confirmDelete() {
+  if (deleting.value || !deleteTarget.value) return;
+  if (!license.value?.can_use_business) {
+    deleteError.value = `当前授权状态为「${license.value?.state_label || '未激活'}」，无法删除模板`;
+    return;
+  }
+  const tpl = deleteTarget.value;
+  deleting.value = true;
+  deleteError.value = '';
   try {
-    await deleteTemplate(tpl.id);
-    await load();
+    const result = await deleteTemplate(tpl.id);
+    if (!result.success) throw new Error('删除未确认，请重试');
+    templates.value = templates.value.filter(item => item.id !== tpl.id);
+    deleteTarget.value = null;
+    notice.value = `已删除模板「${tpl.name}」`;
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e);
+    deleteError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    deleting.value = false;
   }
 }
 
@@ -143,6 +184,7 @@ onMounted(load);
       <button type="button" class="btn primary" :disabled="license ? !license.can_use_business : false" @click="openCreate">+ 新建模板</button>
     </div>
 
+    <p v-if="notice" role="status">{{ notice }}</p>
     <section v-if="loading" class="card">加载中…</section>
     <section v-else-if="error" class="card error">{{ error }}</section>
     <section v-else-if="templates.length === 0" class="card empty">
@@ -158,14 +200,25 @@ onMounted(load);
         <p class="content">{{ tpl.content }}</p>
         <p class="meta">已用 {{ tpl.use_count ?? 0 }} 次</p>
         <div class="actions">
-          <button type="button" class="btn ghost sm" @click="toggleStatus(tpl)">
+          <button type="button" class="btn ghost sm" :disabled="togglingIds.has(tpl.id) || deleting" @click="toggleStatus(tpl)">
             {{ tpl.status ? '停用' : '启用' }}
           </button>
-          <button type="button" class="btn ghost sm" @click="openEdit(tpl)">编辑</button>
-          <button type="button" class="btn ghost sm danger" @click="removeTemplate(tpl)">删除</button>
+          <button type="button" class="btn ghost sm" :disabled="togglingIds.has(tpl.id) || deleting" @click="openEdit(tpl)">编辑</button>
+          <button type="button" class="btn ghost sm danger" :disabled="togglingIds.has(tpl.id) || deleting" @click="removeTemplate(tpl)">删除</button>
         </div>
       </article>
     </section>
+
+    <AppModal :open="!!deleteTarget" title="删除模板" dialog-role="alertdialog" @close="closeDelete">
+      <p>确定删除模板「{{ deleteTarget?.name }}」吗？删除后不可恢复。</p>
+      <p v-if="deleteError" class="msg error" role="alert">{{ deleteError }}</p>
+      <div class="actions-bottom">
+        <button type="button" class="btn ghost" :disabled="deleting" @click="closeDelete">取消</button>
+        <button type="button" class="btn ghost danger" :disabled="deleting" @click="confirmDelete">
+          {{ deleting ? '删除中…' : '确认删除' }}
+        </button>
+      </div>
+    </AppModal>
 
     <div v-if="showForm" class="overlay" @click.self="closeForm">
       <div class="modal">

@@ -271,6 +271,7 @@ jobs:
           node scripts/client/test_quick_auth_state.mjs
           node scripts/client/test_browser_component_management.mjs
           node scripts/client/test_card_deletion.mjs
+          node scripts/client/test_client_audit_regressions.mjs
 
       # 去掉 GitHub Secret 常见的尾随换行/空格，写回 GITHUB_ENV 供 tauri build 签名
       - name: Prepare minisign private key

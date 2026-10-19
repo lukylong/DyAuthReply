@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from "vue";
+import { ref, computed, nextTick, onMounted, watch } from "vue";
 import { useRoute } from "vue-router";
 import {
   Bell,
@@ -19,6 +19,7 @@ import {
 import { useVersionUpdate } from "../composables/useVersionUpdate";
 import CapacityPanel from "../components/CapacityPanel.vue";
 import BrowserComponentPanel from "../components/BrowserComponentPanel.vue";
+import AppModal from "../components/AppModal.vue";
 import {
   openExternalUrl,
   getDiagnostics,
@@ -149,12 +150,28 @@ async function handleToggleAutoStart(enabled: boolean) {
   }
 }
 
+const showResetConfirm = ref(false);
+const resetError = ref("");
+
 function handleReset() {
-  if (confirm("确定要恢复默认设置吗？")) {
+  resetError.value = "";
+  showResetConfirm.value = true;
+}
+
+function closeResetConfirm() {
+  showResetConfirm.value = false;
+}
+
+function confirmReset() {
+  if (!showResetConfirm.value) return;
+  try {
     const autoStart = settings.value.runtime.auto_start;
     resetSettings();
     settings.value.runtime.auto_start = autoStart;
     mirrorsText.value = DEFAULT_UPDATE_MIRRORS.join("\n");
+    showResetConfirm.value = false;
+  } catch (error) {
+    resetError.value = error instanceof Error ? error.message : String(error);
   }
 }
 
@@ -173,16 +190,30 @@ async function loadDiagnostics() {
 }
 
 async function onDiagnosticsChange(event: Event) {
-  const enabled = (event.target as HTMLInputElement).checked;
+  const target = event.target as HTMLInputElement;
+  const previous = diagnostics.value;
+  if (diagnosticsBusy.value) {
+    target.checked = previous?.enabled ?? false;
+    return;
+  }
+  const enabled = target.checked;
   diagnosticsBusy.value = true;
   try {
     diagnostics.value = await setDiagnostics(enabled);
     diagnosticsError.value = "";
   } catch (error) {
-    diagnosticsError.value = error instanceof Error ? error.message : String(error);
-    await loadDiagnostics();
+    const operationError = error instanceof Error ? error.message : String(error);
+    try {
+      diagnostics.value = await getDiagnostics();
+      diagnosticsError.value = operationError;
+    } catch (readError) {
+      diagnostics.value = null;
+      diagnosticsError.value = `${operationError}；读取当前状态失败：${readError instanceof Error ? readError.message : String(readError)}`;
+    }
   } finally {
     diagnosticsBusy.value = false;
+    await nextTick();
+    target.checked = diagnostics.value?.enabled ?? previous?.enabled ?? false;
   }
 }
 
@@ -473,6 +504,12 @@ const updateStatusType = computed<"info" | "error" | "success" | "update">(
         </footer>
       </div>
     </div>
+    <AppModal :open="showResetConfirm" title="恢复默认偏好设置" dialog-role="alertdialog" @close="closeResetConfirm">
+      <p>确定恢复默认偏好设置吗？账号、登录资料和回复规则不会被删除，系统自启状态和承载设置保持不变。</p>
+      <p v-if="resetError" class="feedback error" role="alert">{{ resetError }}</p>
+      <button type="button" class="btn-glass" @click="closeResetConfirm">取消</button>
+      <button type="button" class="btn-glass" @click="confirmReset">确认恢复</button>
+    </AppModal>
   </div>
 </template>
 <style scoped>

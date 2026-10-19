@@ -40,6 +40,9 @@ const submitting = ref(false);
 const formError = ref('');
 const pendingDelete = ref<DouyinRule | null>(null);
 const deleting = ref(false);
+const togglingIds = ref(new Set<string>());
+let rulesRequest = 0;
+let rulesDisposed = false;
 
 const form = ref({
   name: '',
@@ -132,20 +135,23 @@ async function loadCards() {
 }
 
 async function loadRules() {
+  if (rulesDisposed) return;
+  const request = ++rulesRequest;
+  const accountId = filterAccountId.value;
+  const current = () => !rulesDisposed && request === rulesRequest && accountId === filterAccountId.value;
   loading.value = true;
   error.value = '';
   try {
-    if (filterAccountId.value) {
-      rules.value = await listRulesByAccount(filterAccountId.value);
-    } else {
-      const page = await listRules({ page: 1, pageSize: 200 });
-      rules.value = page.items ?? [];
-    }
+    const rows = accountId
+      ? await listRulesByAccount(accountId)
+      : (await listRules({ page: 1, pageSize: 200 })).items ?? [];
+    if (current()) rules.value = rows;
   } catch (e) {
+    if (!current()) return;
     error.value = e instanceof Error ? e.message : String(e);
     rules.value = [];
   } finally {
-    loading.value = false;
+    if (current()) loading.value = false;
   }
 }
 
@@ -176,7 +182,7 @@ function openEdit(rule: DouyinRule) {
   form.value = {
     name: rule.name,
     match_type: rule.match_type,
-    keywordsText: (rule.keywords || []).join('\n'),
+    keywordsText: rule.match_type === 'regex' ? rule.regex_pattern || '' : (rule.keywords || []).join('\n'),
     reply_text: rule.reply_text || '',
     links: normalizeLinks(rule.links),
     card_ids: Array.isArray(rule.card_ids) ? [...rule.card_ids] : [],
@@ -241,6 +247,8 @@ onBeforeRouteLeave(() => {
 });
 
 onUnmounted(() => {
+  rulesDisposed = true;
+  ++rulesRequest;
   document.removeEventListener('keydown', onEscapeKey);
 });
 
@@ -368,11 +376,24 @@ function cancelMoveAccounts() {
 }
 
 async function toggleStatus(rule: DouyinRule) {
+  if (togglingIds.value.has(rule.id)) return;
+  if (!license.value?.can_use_business) {
+    error.value = `当前授权状态为「${license.value?.state_label || '未激活'}」，无法修改规则`;
+    return;
+  }
+  const status = !rule.status;
+  togglingIds.value.add(rule.id);
+  error.value = '';
   try {
-    await patchRule(rule.id, { status: !rule.status });
-    rule.status = !rule.status;
+    const updated = await patchRule(rule.id, { status });
+    if (typeof updated.status !== 'boolean') throw new Error('状态更新未确认，请重试');
+    rule.status = updated.status;
+    const current = rules.value.find(item => item.id === rule.id);
+    if (current) current.status = updated.status;
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    togglingIds.value.delete(rule.id);
   }
 }
 
@@ -458,7 +479,7 @@ function weekdayLabel(mask: string): string {
   return '周' + on.join('、');
 }
 
-watch(filterAccountId, loadRules);
+watch(filterAccountId, loadRules, { flush: 'sync' });
 
 watch(
   () => form.value.links,
@@ -596,13 +617,14 @@ onMounted(async () => {
               class="toggle-btn"
               :class="{ 'toggle-on': rule.status }"
               :title="rule.status ? '点击停用' : '点击启用'"
+              :disabled="togglingIds.has(rule.id)"
               @click="toggleStatus(rule)"
             >
               <span class="toggle-knob"></span>
             </button>
-            <button type="button" class="btn-glass btn-action" @click="openEdit(rule)">编辑</button>
+            <button type="button" class="btn-glass btn-action" :disabled="togglingIds.has(rule.id)" @click="openEdit(rule)">编辑</button>
             <button type="button" class="btn-glass btn-action" @click="onCloneRule(rule)" title="复制规则">复制</button>
-            <button type="button" class="btn-glass btn-action danger-btn" @click="askRemoveRule(rule)">删除</button>
+            <button type="button" class="btn-glass btn-action danger-btn" :disabled="togglingIds.has(rule.id)" @click="askRemoveRule(rule)">删除</button>
           </div>
         </div>
 

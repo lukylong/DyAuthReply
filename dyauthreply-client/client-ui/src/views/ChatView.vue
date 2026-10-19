@@ -47,7 +47,9 @@ const loadingAccounts = ref(true);
 const loadingConversations = ref(false);
 const loadingMoreConvs = ref(false);
 const loadingMessages = ref(false);
-const syncing = ref(false);
+const conversationSyncing = ref(false);
+const messageSyncing = ref(false);
+const syncing = computed(() => conversationSyncing.value || messageSyncing.value);
 const sending = ref(false);
 const error = ref('');
 const toast = ref('');
@@ -80,6 +82,8 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 let convSearchTimer: ReturnType<typeof setTimeout> | null = null;
 let convSig = '';
 let msgSig = '';
+let conversationsRequest = 0;
+let chatDisposed = false;
 
 // 缺失真实昵称的会话：自动调 refresh-user 拉取抖音真实昵称/头像后重渲染。
 // 每个会话只尝试一次（成功或失败都记录），避免对未公开资料的用户反复打接口。
@@ -483,71 +487,68 @@ function resetConversationsScroll() {
   if (el) el.scrollTop = 0;
 }
 
+function resetConversationScope() {
+  ++conversationsRequest;
+  if (convSearchTimer) clearTimeout(convSearchTimer);
+  convSearchTimer = null;
+  loadingConversations.value = false;
+  loadingMoreConvs.value = false;
+  conversationSyncing.value = false;
+  conversations.value = [];
+  activeConversationId.value = '';
+  messages.value = [];
+  convPage.value = 1;
+  convTotal.value = 0;
+  convHasMore.value = false;
+  convSig = '';
+  msgSig = '';
+}
+
 async function loadConversations(silent = false, append = false) {
+  if (chatDisposed) return;
   if (!activeAccountId.value) {
-    conversations.value = [];
-    convTotal.value = 0;
-    convHasMore.value = false;
+    resetConversationScope();
     return;
   }
+  if (append && (!convHasMore.value || loadingMoreConvs.value || loadingConversations.value)) return;
 
-  if (append) {
-    if (!convHasMore.value || loadingMoreConvs.value || loadingConversations.value) return;
-    loadingMoreConvs.value = true;
-    try {
-      const nextPage = convPage.value + 1;
-      const res = await listConversations(activeAccountId.value, {
-        page: nextPage,
-        page_size: CONV_PAGE_SIZE,
-        keyword: convKeyword.value.trim() || undefined,
-      });
-      const existing = new Set(conversations.value.map((c) => c.id));
-      for (const item of res.items) {
-        if (!existing.has(item.id)) conversations.value.push(item);
-      }
-      conversations.value = sortConversations(conversations.value);
-      convPage.value = nextPage;
-      convTotal.value = res.total;
-      convHasMore.value = res.has_more;
-    } catch (e) {
-      if (!silent) toast.value = e instanceof Error ? e.message : String(e);
-    } finally {
-      loadingMoreConvs.value = false;
-    }
-    return;
-  }
-
-  if (!silent) loadingConversations.value = true;
-  else syncing.value = true;
+  const accountId = activeAccountId.value;
+  const keyword = convKeyword.value.trim();
+  const request = ++conversationsRequest;
+  const current = () => !chatDisposed && request === conversationsRequest &&
+    accountId === activeAccountId.value && keyword === convKeyword.value.trim();
+  const page = append ? convPage.value + 1 : 1;
+  const pageSize = !append && silent ? Math.max(CONV_PAGE_SIZE, conversations.value.length) : CONV_PAGE_SIZE;
+  loadingMoreConvs.value = append;
+  loadingConversations.value = !silent && !append;
+  conversationSyncing.value = silent;
   try {
-    const refreshSize =
-      silent && conversations.value.length > CONV_PAGE_SIZE
-        ? conversations.value.length
-        : CONV_PAGE_SIZE;
-    const res = await listConversations(activeAccountId.value, {
-      page: 1,
-      page_size: refreshSize,
-      keyword: convKeyword.value.trim() || undefined,
-    });
-    const items = sortConversations(res.items);
-    const sig = conversationsSignature(items);
-    if (sig !== convSig) {
-      convSig = sig;
-      conversations.value = items;
-      if (!silent) {
-        await nextTick();
-        resetConversationsScroll();
+    const res = await listConversations(accountId, { page, page_size: pageSize, keyword: keyword || undefined });
+    if (!current()) return;
+    if (append) {
+      const rows = [...conversations.value];
+      const existing = new Set(rows.map(c => c.id));
+      for (const item of res.items) {
+        if (!existing.has(item.id)) {
+          rows.push(item);
+          existing.add(item.id);
+        }
       }
+      conversations.value = sortConversations(rows);
+      convSig = conversationsSignature(conversations.value);
+      convPage.value = page;
+    } else {
+      const items = sortConversations(res.items);
+      const sig = conversationsSignature(items);
+      if (sig !== convSig) {
+        convSig = sig;
+        conversations.value = items;
+      }
+      convPage.value = Math.max(1, Math.ceil(items.length / CONV_PAGE_SIZE));
     }
     convTotal.value = res.total;
     convHasMore.value = res.has_more;
-    if (!silent) {
-      convPage.value = Math.max(1, Math.ceil(items.length / CONV_PAGE_SIZE));
-    }
-    if (
-      activeConversationId.value &&
-      !conversations.value.some((c) => c.id === activeConversationId.value)
-    ) {
+    if (activeConversationId.value && !conversations.value.some(c => c.id === activeConversationId.value)) {
       activeConversationId.value = '';
       messages.value = [];
       msgSig = '';
@@ -555,13 +556,22 @@ async function loadConversations(silent = false, append = false) {
     if (!activeConversationId.value && conversations.value.length > 0) {
       activeConversationId.value = conversations.value[0].id;
     }
+    if (!silent && !append) {
+      await nextTick();
+      if (!current()) return;
+      resetConversationsScroll();
+    }
     void resolveMissingPeerInfo();
   } catch (e) {
+    if (!current()) return;
     if (!silent) toast.value = e instanceof Error ? e.message : String(e);
-    if (!silent) conversations.value = [];
+    if (!silent && !append) conversations.value = [];
   } finally {
-    if (!silent) loadingConversations.value = false;
-    syncing.value = false;
+    if (current()) {
+      loadingConversations.value = false;
+      loadingMoreConvs.value = false;
+      conversationSyncing.value = false;
+    }
   }
 }
 
@@ -572,7 +582,7 @@ function onConvsScroll() {
 }
 
 function onConvSearchInput() {
-  if (convSearchTimer) clearTimeout(convSearchTimer);
+  resetConversationScope();
   convSearchTimer = setTimeout(() => {
     convPage.value = 1;
     convSig = '';
@@ -630,7 +640,7 @@ async function loadMessages(silent = false, force = false) {
     return;
   }
   if (!silent) loadingMessages.value = true;
-  else syncing.value = true;
+  else messageSyncing.value = true;
   const shouldScroll = !silent || stickToBottom.value;
   const accountId = activeAccountId.value;
   const conversationId = activeConversationId.value;
@@ -653,12 +663,13 @@ async function loadMessages(silent = false, force = false) {
     if (!silent) toast.value = e instanceof Error ? e.message : String(e);
   } finally {
     if (!silent) loadingMessages.value = false;
-    syncing.value = false;
+    messageSyncing.value = false;
   }
 }
 
 function selectAccount(id: string) {
   if (activeAccountId.value === id) return;
+  resetConversationScope();
   activeAccountId.value = id;
   activeConversationId.value = '';
   messages.value = [];
@@ -830,6 +841,9 @@ function stopPolling() {
   }
 }
 
+// Invalidate before Vue's queued watcher runs, including A → B → A changes.
+watch([activeAccountId, convKeyword], resetConversationScope, { flush: 'sync' });
+
 watch(activeAccountId, () => {
   convSig = '';
   loadConversations();
@@ -854,7 +868,9 @@ function onKeydown(e: KeyboardEvent) {
 
 onMounted(async () => {
   await loadAccounts();
+  if (chatDisposed) return;
   await loadConversations();
+  if (chatDisposed) return;
   startPolling();
   setupRealtime();
   document.addEventListener('visibilitychange', onVisibilityChange);
@@ -862,6 +878,8 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  chatDisposed = true;
+  ++conversationsRequest;
   releaseDecryptedMedia();
   stopPolling();
   unsubscribeRealtime?.();

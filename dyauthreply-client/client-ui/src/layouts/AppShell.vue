@@ -56,6 +56,8 @@ const updating = ref(false); // 是否正在下载/安装
 const updateProgress = ref(0); // 0-100，-1 表示进度未知
 const updateProgressText = ref('');
 const updateError = ref('');
+let startupUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+let updateViewDisposed = false;
 const updateNoteLines = computed(() =>
   (updateInfo.value?.notes || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
 );
@@ -126,8 +128,12 @@ function setNoUpdateHint(manual: boolean) {
   }, 2500);
 }
 
+function automaticUpdatesAllowed() {
+  return settings.value.version_update.enabled && settings.value.version_update.check_frequency !== 'manual';
+}
+
 async function runUpdateCheck(manual: boolean) {
-  if (checkingUpdate.value || updating.value) return;
+  if (updateViewDisposed || checkingUpdate.value || updating.value || (!manual && !automaticUpdatesAllowed())) return;
   checkingUpdate.value = true;
   if (manual) updateHint.value = '正在检查更新…';
   // 重置应用内更新临时状态
@@ -144,10 +150,12 @@ async function runUpdateCheck(manual: boolean) {
   }
 
   try {
+    if (updateViewDisposed || (!manual && !automaticUpdatesAllowed())) return;
     // 优先走应用内 updater（仅桌面壳）
     if (inTauriRuntime()) {
       try {
         const tauri = await checkUpdateViaTauri(getUpdateMirrors());
+        if (updateViewDisposed || (!manual && !automaticUpdatesAllowed())) return;
         if (tauri.available) {
           inAppUpdate.value = true;
           updateInfo.value = {
@@ -173,6 +181,7 @@ async function runUpdateCheck(manual: boolean) {
     }
 
     // 回退：用授权服务器结果走外链下载弹窗
+    if (updateViewDisposed || (!manual && !automaticUpdatesAllowed())) return;
     if (serverInfo?.has_update) {
       inAppUpdate.value = false;
       updateInfo.value = serverInfo;
@@ -213,10 +222,18 @@ function dismissUpdate() {
 onMounted(() => {
   startRealtime();
   ensureStatus();
-  window.setTimeout(() => runUpdateCheck(false), 3000);
+  if (automaticUpdatesAllowed()) {
+    startupUpdateTimer = window.setTimeout(() => {
+      startupUpdateTimer = null;
+      void runUpdateCheck(false);
+    }, 3000);
+  }
 });
 
 onUnmounted(() => {
+  updateViewDisposed = true;
+  if (startupUpdateTimer !== null) window.clearTimeout(startupUpdateTimer);
+  startupUpdateTimer = null;
   stopRealtime();
 });
 

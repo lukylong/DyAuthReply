@@ -43,7 +43,9 @@ function getIntervalMs(frequency: string): number {
 async function checkUpdate(force = false): Promise<void> {
   const { settings } = useClientSettings();
 
-  if (isChecking.value || (!force && !settings.value.version_update.enabled)) {
+  if (isChecking.value || (!force && (
+    !settings.value.version_update.enabled || settings.value.version_update.check_frequency === 'manual'
+  ))) {
     return;
   }
 
@@ -91,7 +93,7 @@ export function useVersionUpdate() {
 
   // 启动时检查
   onMounted(() => {
-    if (settings.value.version_update.enabled) {
+    if (settings.value.version_update.enabled && settings.value.version_update.check_frequency !== 'manual') {
       checkUpdate();
     }
   });

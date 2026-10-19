@@ -9,6 +9,7 @@ import {
   type DouyinCard,
 } from '../api/client';
 import { useClientLicense } from '../composables/useClientLicense';
+import AppModal from '../components/AppModal.vue';
 
 const loading = ref(true);
 const error = ref('');
@@ -19,6 +20,10 @@ const editing = ref<DouyinCard | null>(null);
 const submitting = ref(false);
 const uploading = ref(false);
 const formError = ref('');
+const deleteTarget = ref<DouyinCard | null>(null);
+const deleting = ref(false);
+const deleteError = ref('');
+const notice = ref('');
 
 const form = ref({
   title: '',
@@ -140,17 +145,43 @@ async function submitForm() {
   }
 }
 
-async function removeCard(card: DouyinCard) {
+function removeCard(card: DouyinCard) {
+  if (deleting.value) return;
+  notice.value = '';
   if (!license.value?.can_use_business) {
     error.value = `当前授权状态为「${license.value?.state_label || '未激活'}」，无法删除卡片`;
     return;
   }
-  if (!confirm(`删除卡片「${card.title}」？`)) return;
+  error.value = '';
+  deleteError.value = '';
+  deleteTarget.value = card;
+}
+
+function closeDelete() {
+  if (deleting.value) return;
+  deleteTarget.value = null;
+  deleteError.value = '';
+}
+
+async function confirmDelete() {
+  if (deleting.value || !deleteTarget.value) return;
+  if (!license.value?.can_use_business) {
+    deleteError.value = `当前授权状态为「${license.value?.state_label || '未激活'}」，无法删除卡片`;
+    return;
+  }
+  const card = deleteTarget.value;
+  deleting.value = true;
+  deleteError.value = '';
   try {
-    await deleteCard(card.id);
-    await load();
+    const result = await deleteCard(card.id);
+    if (!result.success) throw new Error('删除未确认，请重试');
+    cards.value = cards.value.filter(item => item.id !== card.id);
+    deleteTarget.value = null;
+    notice.value = `已删除卡片「${card.title}」`;
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e);
+    deleteError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    deleting.value = false;
   }
 }
 
@@ -174,6 +205,7 @@ onMounted(load);
       <button type="button" class="btn primary" :disabled="license ? !license.can_use_business : false" @click="openCreate">+ 新建卡片</button>
     </div>
 
+    <p v-if="notice" class="msg success" role="status">{{ notice }}</p>
     <section v-if="loading" class="card">加载中…</section>
     <section v-else-if="error" class="card error">{{ error }}</section>
     <section v-else-if="cards.length === 0" class="card empty">
@@ -194,10 +226,22 @@ onMounted(load);
         <p class="meta">{{ card.target_url }}</p>
         <div class="actions">
           <button type="button" class="btn ghost sm" @click="openEdit(card)">编辑</button>
-          <button type="button" class="btn ghost sm danger" @click="removeCard(card)">删除</button>
+          <button type="button" class="btn ghost sm danger" :disabled="deleting" @click="removeCard(card)">删除</button>
         </div>
       </article>
     </section>
+
+    <AppModal :open="!!deleteTarget" title="删除卡片" dialog-role="alertdialog" @close="closeDelete">
+      <p class="delete-description">确定删除卡片「{{ deleteTarget?.title }}」吗？</p>
+      <p class="sub">删除后将同时移除公网卡片，操作不可撤销。如有回复规则正在使用，请先解除关联。</p>
+      <p v-if="deleteError" class="msg error" role="alert">{{ deleteError }}</p>
+      <div class="actions-bottom">
+        <button type="button" class="btn ghost" :disabled="deleting" @click="closeDelete">取消</button>
+        <button type="button" class="btn ghost danger" :disabled="deleting" @click="confirmDelete">
+          {{ deleting ? '删除中…' : '确认删除' }}
+        </button>
+      </div>
+    </AppModal>
 
     <div v-if="showForm" class="overlay" @click.self="closeForm">
       <div class="modal">
@@ -420,6 +464,15 @@ onMounted(load);
 
 .btn.ghost.danger {
   color: #dc2626;
+}
+
+.delete-description {
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+}
+
+.msg.success {
+  color: #047857;
 }
 
 .overlay {

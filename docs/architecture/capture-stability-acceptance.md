@@ -154,3 +154,24 @@
 - 本机安装候选（dy-agent `499a423e…`）后两次真实快捷登录自动完成导入：第一次入口未重定向而停在推荐页，看门狗 4 次自动返回精选并重新点击后取得 UIFID；第二次点击推荐后 7 秒完成导入。
 - 581 项 Rust 测试、clippy、fmt；推荐入口定位 6 项（含遮挡/隐藏/加载中走链接处理器）、扩展 29 场景、生命周期 6 项通过。
 - 未做：扩展真实采集验收、Windows 真实扫码验收、新增真实消息发送测试。
+
+## 0.1.46：主站页面可见性与精选页 UIFID
+
+### 根因
+
+- 主站脚本 `pre-build-util` 的 `generateFingerprint/preProcessUrl` 挂在 `getInlinePlayerConfig`（精选页内联播放器）；指纹为内嵌 FingerprintJS，音频探针在 `document.hidden` 时重试计数不增长、不会完成。
+- Chrome 152 实测（未登录，同一抖音页）：窗口被完全遮挡时旧启动参数下 `visibility=hidden`、requestAnimationFrame 冻结、24 秒 0 视频 0 个 `/aweme/` 请求；加入 `--disable-backgrounding-occluded-windows`、`--disable-renderer-backgrounding`、`--disable-background-timer-throttling`、`--disable-features=CalculateNativeWinOcclusion` 后保持 visible 并出视频与接口。最小化仍为 hidden，参数无效。
+- 0.1.45 现场（macOS）：精选页 8 秒后切推荐，推荐页播放 3 个视频 60 秒无 UIFID；回到新的精选文档 5 秒内 UIFID 到齐，就绪 72.8 秒。
+
+### 修复
+
+- 启动参数如上；主站页 `visibility=hidden` 时经页面级 CDP `Browser.getWindowForTarget` + `setWindowBounds(normal)` + `Page.bringToFront` 恢复，间隔至少 5 秒，冻结时间不计入当前文档等待。
+- 入口 `/jingxuan`；无 UIFID 时重载 `/jingxuan`（有播放器 8 秒、无播放器 20 秒、第 3 次后每 15 秒），每第 4 次尝试站内切推荐，其他路由 15 秒后回精选；不整页加载推荐页。
+- 诊断白名单新增快捷登录阶段事件，字段映射到服务器已有 `attempt/phase/count/elapsed_ms`，无需改服务器。
+
+### 验收
+
+- macOS 本机安装候选（dy-agent `3eb2241f…`）真实快捷登录：精选页重载 2 次，UIFID 19.4 秒、采集 20.0 秒就绪并导入。
+- CI 测试构建 run 39189003180（Windows/macOS 安装包、质量门通过，未发布）。
+- 584 项 Rust 测试、clippy、fmt、协议校验、8 个 CI JS 回归通过。
+- 未做：Windows 真实扫码验收、扩展改动（扩展主站标签为后台标签，全新配置下同样可能冻结，待后续）、新增真实消息发送测试。

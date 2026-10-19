@@ -546,17 +546,16 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.45'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.46'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '修复快捷登录卡在“正在自动点击推荐”：推荐入口被遮挡或窗口不在前台时也会自动切换，无需手动点击\n'
-    '修复推荐页一直“加载中”导致主站 UIFID 缺失：检测到停滞自动返回精选页重新切换，直到成功或会话超时\n'
-    '推荐切换改为全自动轮换：真实点击、页面自身推荐链接、重新加载精选页，不再试 3 次后报错\n'
-    '扩展更新至 2.3.4：推荐切换同样改为自动重试，不再要求手动操作\n'
-    '本地日志记录推荐切换步骤，仅含次数与动作，不含账号或凭证\n'
-    'macOS 本机两次真实快捷登录均自动完成导入；未新增真实消息发送测试\n'
-    'Windows 纳入 CI 构建、安装和运行中升级回归；未进行 Windows 真实扫码采集验收'
+    '修复 Windows 快捷登录扫码后一直等待主站 UIFID：登录窗口被其他窗口遮挡时页面会冻结，现在保持正常运行\n'
+    '登录窗口被最小化或切到后台时自动恢复并继续采集，无需手动操作\n'
+    '主站 UIFID 改为在精选页自动刷新获取，不再长时间停在推荐页等待，macOS 实测从约 73 秒缩短到约 20 秒\n'
+    '进度提示显示自动刷新次数，不再提示检查登录窗口；采集各阶段耗时随运行诊断上报便于排查\n'
+    '浏览器扩展本版无改动（扩展更新至 2.3.4 后保持不变）\n'
+    'macOS 本机真实快捷登录验证通过；Windows 已出测试包，正式版未做 Windows 真实扫码验收；未新增真实消息发送测试'
 )

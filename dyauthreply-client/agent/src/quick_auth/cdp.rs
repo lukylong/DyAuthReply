@@ -10,25 +10,26 @@ use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 const MAX_CDP_MESSAGE: usize = 2 * 1024 * 1024;
 const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
-// The site computes the formal UIFID (a fingerprint) while setting up its video
-// player. /jingxuan loads normally and carries a player; in a freshly logged-in
-// profile a full document load of the recommendation feed (even the navigation
-// link's own `?recommend=1&from_nav=1`) sat on "加载中" for a minute without
-// UIFID, and `?recommend=1` does not always redirect. Enter on /jingxuan, never
-// load the recommendation feed as a document, and switch in-app only if needed.
+// The site writes the formal UIFID from the fingerprint hook of its /jingxuan
+// inline player config. Observed live: the first /jingxuan document after login
+// often issues none, a recommendation feed playing videos issued none for 60s,
+// and a fresh /jingxuan document issued it within 5s. A full load of the
+// recommendation feed can also sit on "加载中". So stay on /jingxuan and reload
+// it until a document issues UIFID; never load the recommendation feed itself.
 const SELECTED_URL: &str = "https://www.douyin.com/jingxuan";
-// Let a /jingxuan document produce UIFID by itself before switching routes.
-const SELECTED_SETTLE_SECS: u64 = 8;
+// Give a /jingxuan document this long to issue UIFID once its player exists,
+// longer on a slow machine that has not mounted a player yet, and space later
+// attempts further apart.
+const SELECTED_RELOAD_SECS: u64 = 8;
+const SELECTED_RELOAD_NO_PLAYER_SECS: u64 = 20;
+const SELECTED_RELOAD_LATER_SECS: u64 = 15;
+// Any other main-site route returns to /jingxuan after this long.
+const OTHER_ROUTE_SECS: u64 = 15;
 // A hidden page does not render, so the fingerprint never runs. Restore it, but
 // do not fight a user who keeps minimizing the window.
 const RESTORE_INTERVAL_SECS: u64 = 5;
-// The recommendation feed reached by a full load can sit on "加载中" with no
-// video, or play without issuing the formal UIFID.
-const STALLED_FEED_SECS: u64 = 25;
-const STALLED_UIFID_SECS: u64 = 60;
 
-// Follow the actual visible recommendation link with automatic retries. A click
-// acknowledgement is not evidence that the recommendation feed was mounted.
+// Every fourth attempt also tries the in-app switch to the recommendation feed.
 // Resolve a click point from the actual visible navigation; the collector sends
 // the normal browser mouse sequence below.
 const OPEN_RECOMMENDATION: &str = r"(() => {
@@ -52,8 +53,8 @@ const OPEN_RECOMMENDATION: &str = r"(() => {
   return {status:'target',x,y};
 })()";
 
-// Fallback when the link is covered, the window is hidden or a real click did not
-// switch: let the site's own link handler perform the in-app route change.
+// Fallback when the link is covered: let the site's own link handler perform the
+// in-app route change.
 const CLICK_RECOMMENDATION: &str = r"(() => {
   if (location.origin !== 'https://www.douyin.com') return {status:'wrong_origin'};
   if (!location.pathname.startsWith('/jingxuan')) return {status:'already'};
@@ -230,12 +231,10 @@ pub struct CdpClient {
     endpoint_base: String,
     main_page: Option<Box<CdpClient>>,
     current_path: String,
-    recommendation_attempts: u32,
-    recommendation_last_attempt: Option<tokio::time::Instant>,
+    uifid_attempts: u32,
+    uifid_reported: bool,
     route_action_at: Option<tokio::time::Instant>,
-    switch_step: u8,
     feed_videos: u64,
-    recovery_attempts: u32,
     page_hidden: bool,
     restored_at: Option<tokio::time::Instant>,
     restore_attempts: u32,
@@ -264,12 +263,10 @@ impl CdpClient {
             ),
             main_page: None,
             current_path: String::new(),
-            recommendation_attempts: 0,
-            recommendation_last_attempt: None,
+            uifid_attempts: 0,
+            uifid_reported: false,
             route_action_at: None,
-            switch_step: 0,
             feed_videos: 0,
-            recovery_attempts: 0,
             page_hidden: false,
             restored_at: None,
             restore_attempts: 0,
@@ -352,14 +349,22 @@ impl CdpClient {
             sid == self.creator_session,
             "主站与创作者中心登录会话不一致，请统一账号后重试"
         );
-        if main.page_hidden {
-            main.restore_hidden_window().await?;
-        } else if !has_main_uifid(&www) {
-            if main.current_path.starts_with("/jingxuan") {
-                main.open_recommendation_if_redirected().await?;
-            } else if main.current_path == "/" {
-                main.recover_stalled_recommendation().await?;
+        if has_main_uifid(&www) {
+            if !main.uifid_reported {
+                main.uifid_reported = true;
+                let elapsed_ms = self.main_started.map_or(0, |at| {
+                    u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX)
+                });
+                tracing::info!(
+                    elapsed_ms,
+                    attempt = main.uifid_attempts,
+                    "quick-auth main site UIFID ready"
+                );
             }
+        } else if main.page_hidden {
+            main.restore_hidden_window().await?;
+        } else {
+            main.advance_towards_uifid().await?;
         }
         page["account"] = self.creator_identity.clone().unwrap_or(Value::Null);
         merge_session_material(&mut page, &self.creator_material);
@@ -414,58 +419,52 @@ impl CdpClient {
         Ok([storage, www, creator, imapi, page])
     }
 
-    // Retry automatically until the session deadline, never asking the user to
-    // click. Per loaded /jingxuan document: a real mouse click on the visible link,
-    // then the link's own handler, then reload /jingxuan and start over.
-    async fn open_recommendation_if_redirected(&mut self) -> Result<()> {
-        let interval = if self.recommendation_attempts < 3 {
-            3
+    // Runs until the session deadline without asking the user: reload /jingxuan
+    // when a document has not issued UIFID, try the in-app recommendation switch
+    // on every fourth attempt, and bring any other route back to /jingxuan.
+    async fn advance_towards_uifid(&mut self) -> Result<()> {
+        let on_selected = self.current_path.starts_with("/jingxuan");
+        let due = if !on_selected {
+            OTHER_ROUTE_SECS
+        } else if self.uifid_attempts >= 3 {
+            SELECTED_RELOAD_LATER_SECS
+        } else if self.feed_videos > 0 {
+            SELECTED_RELOAD_SECS
         } else {
-            10
+            SELECTED_RELOAD_NO_PLAYER_SECS
         };
-        if self
-            .recommendation_last_attempt
-            .is_some_and(|last| last.elapsed().as_secs() < interval)
-        {
-            return Ok(());
-        }
-        // Back off read failures too, so they interleave with successful polls.
-        self.recommendation_last_attempt = Some(tokio::time::Instant::now());
-        self.command("Page.bringToFront", json!({})).await?;
-        let target = self.evaluate_status(OPEN_RECOMMENDATION).await?;
-        let status = target["status"].as_str();
-        if !matches!(status, Some("target" | "not_ready")) {
-            anyhow::ensure!(
-                status == Some("already"),
-                "主站推荐入口未就绪，正在等待页面加载或验证"
-            );
-            return Ok(());
-        }
         if self
             .route_action_at
-            .is_some_and(|at| at.elapsed().as_secs() < SELECTED_SETTLE_SECS)
+            .is_some_and(|at| at.elapsed().as_secs() < due)
         {
             return Ok(());
         }
-        let mouse = status == Some("target") && self.switch_step == 0;
-        let action = if mouse {
-            "mouse_click"
-        } else if self.switch_step <= 1 {
-            "link_handler"
-        } else {
-            "reload_selected"
-        };
-        // Count attempts before dispatch so a failing send still backs off.
-        self.recommendation_attempts = self.recommendation_attempts.saturating_add(1);
+        // Count and time the attempt first, so failures back off as well.
+        self.uifid_attempts = self.uifid_attempts.saturating_add(1);
         self.route_action_at = Some(tokio::time::Instant::now());
+        let switch = on_selected && self.uifid_attempts.is_multiple_of(4);
         tracing::info!(
-            attempt = self.recommendation_attempts,
-            action,
-            "quick-auth main site on selected feed; switching to recommendation"
+            attempt = self.uifid_attempts,
+            videos = self.feed_videos,
+            action = if switch {
+                "switch_recommendation"
+            } else {
+                "reload_selected"
+            },
+            "quick-auth main site waiting for UIFID; retrying"
         );
-        match action {
-            "mouse_click" => {
-                self.switch_step = 1;
+        if switch {
+            self.switch_to_recommendation().await
+        } else {
+            self.navigate(SELECTED_URL).await
+        }
+    }
+
+    async fn switch_to_recommendation(&mut self) -> Result<()> {
+        self.command("Page.bringToFront", json!({})).await?;
+        let target = self.evaluate_status(OPEN_RECOMMENDATION).await?;
+        match target["status"].as_str() {
+            Some("target") => {
                 let (x, y) = recommendation_click_point(&target)?;
                 for (kind, buttons) in
                     [("mouseMoved", 0), ("mousePressed", 1), ("mouseReleased", 0)]
@@ -477,35 +476,10 @@ impl CdpClient {
                 }
                 Ok(())
             }
-            "link_handler" => {
-                self.switch_step = 2;
-                self.evaluate_status(CLICK_RECOMMENDATION).await.map(|_| ())
-            }
-            _ => self.navigate(SELECTED_URL).await,
+            Some("not_ready") => self.evaluate_status(CLICK_RECOMMENDATION).await.map(|_| ()),
+            Some("already") => Ok(()),
+            _ => anyhow::bail!("主站推荐入口未就绪，正在等待页面加载或验证"),
         }
-    }
-
-    // A recommendation feed reached by a full load can stall. Without asking the
-    // user, go back to /jingxuan and switch in-app again, until the deadline.
-    async fn recover_stalled_recommendation(&mut self) -> Result<()> {
-        let grace = if self.feed_videos == 0 {
-            STALLED_FEED_SECS
-        } else {
-            STALLED_UIFID_SECS
-        };
-        if self
-            .route_action_at
-            .is_some_and(|at| at.elapsed().as_secs() < grace)
-        {
-            return Ok(());
-        }
-        self.recovery_attempts = self.recovery_attempts.saturating_add(1);
-        tracing::info!(
-            attempt = self.recovery_attempts,
-            videos = self.feed_videos,
-            "quick-auth recommendation feed stalled without UIFID; returning to selected feed"
-        );
-        self.navigate(SELECTED_URL).await
     }
 
     // Covered windows stay live via launch flags; a minimized window or a
@@ -535,7 +509,7 @@ impl CdpClient {
         )
         .await?;
         self.command("Page.bringToFront", json!({})).await?;
-        // The frozen time must not count as a stalled feed.
+        // The frozen time must not count against the current document.
         self.route_action_at = Some(tokio::time::Instant::now());
         Ok(())
     }
@@ -628,7 +602,7 @@ impl CdpClient {
             route,
             self.main_page
                 .as_ref()
-                .map_or(0, |main| main.recommendation_attempts),
+                .map_or(0, |main| main.uifid_attempts),
         )
     }
 
@@ -636,16 +610,14 @@ impl CdpClient {
         self.closed
     }
 
-    /// Main-site time and automatic actions (route switches, stall recoveries,
+    /// Main-site time and automatic actions (document reloads, route switches,
     /// window restores) spent before the capture became ready.
     pub fn main_site_effort(&self) -> (u64, u32) {
         let elapsed = self.main_started.map_or(0, |at| {
             u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX)
         });
         let actions = self.main_page.as_ref().map_or(0, |main| {
-            main.recommendation_attempts
-                .saturating_add(main.recovery_attempts)
-                .saturating_add(main.restore_attempts)
+            main.uifid_attempts.saturating_add(main.restore_attempts)
         });
         (elapsed, actions)
     }
@@ -663,16 +635,10 @@ impl CdpClient {
             if main.page_hidden {
                 return "登录窗口被最小化或切到后台，正在自动恢复并继续采集，无需手动操作".into();
             }
-            if main.current_path.starts_with("/jingxuan") && main.recommendation_attempts > 0 {
+            if main.uifid_attempts > 0 {
                 return format!(
-                    "主站停留在精选页，正在自动切换到推荐页（已尝试 {} 次），无需手动操作",
-                    main.recommendation_attempts
-                );
-            }
-            if main.recovery_attempts > 0 {
-                return format!(
-                    "推荐页加载停滞，已自动刷新或重新切换 {} 次，正在等待主站UIFID（{seconds} 秒），无需手动操作",
-                    main.recovery_attempts
+                    "正在等待主站生成 UIFID：已自动刷新主站 {} 次（{seconds} 秒），无需手动操作",
+                    main.uifid_attempts
                 );
             }
         }
@@ -696,7 +662,6 @@ impl CdpClient {
 
     async fn navigate(&mut self, url: &str) -> Result<()> {
         self.route_action_at = Some(tokio::time::Instant::now());
-        self.switch_step = 0;
         let result = self.command("Page.navigate", json!({"url":url})).await?;
         anyhow::ensure!(
             result["errorText"].as_str().is_none_or(str::is_empty),
@@ -1666,164 +1631,163 @@ mod tests {
         assert!(result.candidate.is_none());
     }
 
-    // Serves one scripted recommendation attempt per round: bring the page to
-    // front, report the link status, then expect the chosen switching action.
-    async fn serve_recommendation_rounds(
-        listener: TcpListener,
-        rounds: Vec<(&'static str, &'static str)>,
-    ) {
+    // Serves scripted CDP replies in order and then expects silence. A reload
+    // must target /jingxuan; the recommendation feed is never loaded itself.
+    async fn serve_script(listener: TcpListener, script: Vec<(&'static str, Value)>) {
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = accept_async(stream).await.unwrap();
-        for (status, action) in rounds {
-            let methods: &[&str] = match action {
-                "mouse" => &["Input.dispatchMouseEvent"; 3],
-                "link" => &["Runtime.evaluate"],
-                _ => &["Page.navigate"],
-            };
-            for (index, method) in ["Page.bringToFront", "Runtime.evaluate"]
-                .iter()
-                .chain(methods)
-                .enumerate()
-            {
-                let message = socket.next().await.unwrap().unwrap();
-                let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
-                assert_eq!(value["method"], *method);
-                let response = match (*method, index) {
-                    ("Runtime.evaluate", 1) => {
-                        assert_eq!(value["params"]["expression"], OPEN_RECOMMENDATION);
-                        json!({"result":{"value":{"status":status,"x":70,"y":55}}})
-                    }
-                    ("Runtime.evaluate", _) => {
-                        assert_eq!(value["params"]["expression"], CLICK_RECOMMENDATION);
-                        json!({"result":{"value":{"status":"clicked"}}})
-                    }
-                    ("Input.dispatchMouseEvent", _) => {
-                        assert_eq!(value["params"]["x"], 70.0);
-                        assert_eq!(value["params"]["y"], 55.0);
-                        json!({})
-                    }
-                    ("Page.navigate", _) => {
-                        assert_eq!(value["params"]["url"], SELECTED_URL);
-                        json!({"frameId":"synthetic"})
-                    }
-                    _ => json!({}),
-                };
-                socket
-                    .send(Message::Text(
-                        json!({"id":value["id"],"result":response})
-                            .to_string()
-                            .into(),
-                    ))
-                    .await
-                    .unwrap();
+        for (method, result) in script {
+            let message = socket.next().await.unwrap().unwrap();
+            let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+            assert_eq!(value["method"], method);
+            match method {
+                "Page.navigate" => assert_eq!(value["params"]["url"], SELECTED_URL),
+                "Input.dispatchMouseEvent" => assert_eq!(value["params"]["x"], 70.0),
+                "Runtime.evaluate" => {
+                    let script =
+                        if result.pointer("/result/value/status") == Some(&json!("clicked")) {
+                            CLICK_RECOMMENDATION
+                        } else {
+                            OPEN_RECOMMENDATION
+                        };
+                    assert_eq!(value["params"]["expression"], script);
+                }
+                _ => {}
             }
+            socket
+                .send(Message::Text(
+                    json!({"id":value["id"],"result":result}).to_string().into(),
+                ))
+                .await
+                .unwrap();
         }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), socket.next())
+                .await
+                .is_err()
+        );
     }
 
-    fn rewind_recommendation(client: &mut CdpClient, seconds: u64) {
-        let past = tokio::time::Instant::now() - std::time::Duration::from_secs(seconds);
-        client.recommendation_last_attempt = Some(past);
-        client.route_action_at = client.route_action_at.map(|_| past);
+    async fn scripted(
+        script: Vec<(&'static str, Value)>,
+    ) -> (CdpClient, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(serve_script(listener, script));
+        let client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
+            .await
+            .unwrap();
+        (client, peer)
+    }
+
+    fn ago(seconds: u64) -> tokio::time::Instant {
+        tokio::time::Instant::now() - std::time::Duration::from_secs(seconds)
     }
 
     #[tokio::test]
-    async fn recommendation_click_acknowledgement_is_not_navigation_success() {
-        // A real click that does not switch is followed by the link's own handler,
-        // then a fresh /jingxuan document. Never a full load of the feed itself.
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let peer = tokio::spawn(serve_recommendation_rounds(
-            listener,
-            vec![
-                ("target", "mouse"),
-                ("target", "link"),
-                ("target", "reload"),
-                ("target", "mouse"),
-            ],
-        ));
-        let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
-            .await
-            .unwrap();
-        client.open_recommendation_if_redirected().await.unwrap();
-        client.open_recommendation_if_redirected().await.unwrap();
-        assert_eq!(
-            client.recommendation_attempts, 1,
-            "immediate retry must back off"
-        );
-        for expected in 2..=3 {
-            rewind_recommendation(&mut client, SELECTED_SETTLE_SECS);
-            client.open_recommendation_if_redirected().await.unwrap();
-            assert_eq!(client.recommendation_attempts, expected);
-        }
-        rewind_recommendation(&mut client, 3);
-        client.open_recommendation_if_redirected().await.unwrap();
-        assert_eq!(
-            client.recommendation_attempts, 3,
-            "later attempts back off longer"
-        );
-        rewind_recommendation(&mut client, 10);
-        client.open_recommendation_if_redirected().await.unwrap();
-        assert_eq!(client.recommendation_attempts, 4);
+    async fn a_selected_document_without_uifid_is_reloaded_once_its_player_had_time() {
+        // Observed live: a fresh /jingxuan document issued UIFID within 5s.
+        let (mut client, peer) = scripted(vec![("Page.navigate", json!({"frameId":"f"}))]).await;
+        client.current_path = "/jingxuan".into();
+        client.feed_videos = 1;
+        client.route_action_at = Some(ago(SELECTED_RELOAD_SECS - 1));
+        client.advance_towards_uifid().await.unwrap();
+        assert_eq!(client.uifid_attempts, 0, "the document still has time");
+        client.route_action_at = Some(ago(SELECTED_RELOAD_SECS));
+        client.advance_towards_uifid().await.unwrap();
+        assert_eq!(client.uifid_attempts, 1);
+        client.advance_towards_uifid().await.unwrap();
+        assert_eq!(client.uifid_attempts, 1, "a reload restarts the clock");
         peer.await.unwrap();
     }
 
     #[tokio::test]
-    async fn covered_recommendation_link_uses_the_site_handler_then_reloads_selected() {
-        // A covered link or hidden window keeps the hit test failing forever.
-        // That must not wait without acting or end in a manual-click request.
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let peer = tokio::spawn(serve_recommendation_rounds(
-            listener,
-            vec![
-                ("not_ready", "link"),
-                ("not_ready", "reload"),
-                ("not_ready", "link"),
-                ("not_ready", "reload"),
-            ],
-        ));
-        let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
-            .await
-            .unwrap();
-        for expected in 1..=4 {
-            rewind_recommendation(&mut client, 10);
-            client.open_recommendation_if_redirected().await.unwrap();
-            assert_eq!(client.recommendation_attempts, expected);
-        }
+    async fn a_slow_selected_document_without_a_player_gets_longer() {
+        let (mut client, peer) = scripted(vec![("Page.navigate", json!({"frameId":"f"}))]).await;
+        client.current_path = "/jingxuan".into();
+        client.route_action_at = Some(ago(SELECTED_RELOAD_SECS));
+        client.advance_towards_uifid().await.unwrap();
+        assert_eq!(client.uifid_attempts, 0);
+        client.route_action_at = Some(ago(SELECTED_RELOAD_NO_PLAYER_SECS));
+        client.advance_towards_uifid().await.unwrap();
+        assert_eq!(client.uifid_attempts, 1);
         peer.await.unwrap();
     }
 
     #[tokio::test]
-    async fn a_fresh_selected_document_settles_before_fallbacks() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let peer = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = accept_async(stream).await.unwrap();
-            for method in ["Page.bringToFront", "Runtime.evaluate"] {
-                let message = socket.next().await.unwrap().unwrap();
-                let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
-                assert_eq!(value["method"], method);
-                let response = json!({"result":{"value":{"status":"target","x":70,"y":55}}});
-                socket
-                    .send(Message::Text(
-                        json!({"id":value["id"],"result":response})
-                            .to_string()
-                            .into(),
-                    ))
-                    .await
-                    .unwrap();
-            }
-        });
-        let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
-            .await
-            .unwrap();
-        client.route_action_at = Some(tokio::time::Instant::now());
-        client.open_recommendation_if_redirected().await.unwrap();
+    async fn later_attempts_are_spaced_and_every_fourth_tries_the_in_app_switch() {
+        let (mut client, peer) = scripted(vec![
+            ("Page.bringToFront", json!({})),
+            (
+                "Runtime.evaluate",
+                json!({"result":{"value":{"status":"target","x":70,"y":55}}}),
+            ),
+            ("Input.dispatchMouseEvent", json!({})),
+            ("Input.dispatchMouseEvent", json!({})),
+            ("Input.dispatchMouseEvent", json!({})),
+            ("Page.bringToFront", json!({})),
+            (
+                "Runtime.evaluate",
+                json!({"result":{"value":{"status":"not_ready"}}}),
+            ),
+            (
+                "Runtime.evaluate",
+                json!({"result":{"value":{"status":"clicked"}}}),
+            ),
+        ])
+        .await;
+        client.current_path = "/jingxuan".into();
+        client.feed_videos = 1;
+        client.uifid_attempts = 3;
+        client.route_action_at = Some(ago(SELECTED_RELOAD_SECS));
+        client.advance_towards_uifid().await.unwrap();
         assert_eq!(
-            client.recommendation_attempts, 0,
-            "a fresh /jingxuan gets time to issue UIFID before any switch"
+            client.uifid_attempts, 3,
+            "later attempts are spaced further"
         );
+        client.route_action_at = Some(ago(SELECTED_RELOAD_LATER_SECS));
+        client.advance_towards_uifid().await.unwrap();
+        assert_eq!(client.uifid_attempts, 4, "a real click on the visible link");
+        client.uifid_attempts = 7;
+        client.route_action_at = Some(ago(SELECTED_RELOAD_LATER_SECS));
+        client.advance_towards_uifid().await.unwrap();
+        assert_eq!(
+            client.uifid_attempts, 8,
+            "a covered link uses the site handler"
+        );
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn other_main_site_routes_return_to_selected() {
+        let (mut client, peer) = scripted(vec![("Page.navigate", json!({"frameId":"f"}))]).await;
+        client.current_path = "/".into();
+        client.feed_videos = 3;
+        client.route_action_at = Some(ago(OTHER_ROUTE_SECS - 1));
+        client.advance_towards_uifid().await.unwrap();
+        assert_eq!(client.uifid_attempts, 0);
+        client.route_action_at = Some(ago(OTHER_ROUTE_SECS));
+        client.advance_towards_uifid().await.unwrap();
+        assert_eq!(client.uifid_attempts, 1);
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn switch_read_failures_back_off_between_polls() {
+        let (mut client, peer) = scripted(vec![
+            ("Page.bringToFront", json!({})),
+            (
+                "Runtime.evaluate",
+                json!({"exceptionDetails":{"text":"synthetic"}}),
+            ),
+        ])
+        .await;
+        client.current_path = "/jingxuan".into();
+        client.uifid_attempts = 3;
+        let error = client.advance_towards_uifid().await.unwrap_err();
+        assert!(!error.to_string().contains("手动"));
+        client.advance_towards_uifid().await.unwrap();
+        assert_eq!(client.uifid_attempts, 4, "the failure still backs off");
         peer.await.unwrap();
     }
 
@@ -1881,87 +1845,6 @@ mod tests {
         );
         client.restore_hidden_window().await.unwrap();
         assert_eq!(client.restore_attempts, 1, "do not fight the user");
-        peer.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn a_stalled_recommendation_feed_recovers_without_the_user() {
-        // Observed live: a fully loaded recommendation page stayed on "加载中"
-        // with no video. Return to /jingxuan and switch in-app again.
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let peer = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = accept_async(stream).await.unwrap();
-            for _ in 0..2 {
-                let message = socket.next().await.unwrap().unwrap();
-                let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
-                assert_eq!(value["method"], "Page.navigate");
-                assert_eq!(value["params"]["url"], SELECTED_URL);
-                socket
-                    .send(Message::Text(
-                        json!({"id":value["id"],"result":{}}).to_string().into(),
-                    ))
-                    .await
-                    .unwrap();
-            }
-        });
-        let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
-            .await
-            .unwrap();
-        let ago = |s| Some(tokio::time::Instant::now() - std::time::Duration::from_secs(s));
-        client.route_action_at = ago(STALLED_FEED_SECS - 1);
-        client.recover_stalled_recommendation().await.unwrap();
-        assert_eq!(client.recovery_attempts, 0, "a loading feed gets its grace");
-        client.route_action_at = ago(STALLED_FEED_SECS);
-        client.recover_stalled_recommendation().await.unwrap();
-        assert_eq!(client.recovery_attempts, 1);
-        client.feed_videos = 2;
-        client.route_action_at = ago(STALLED_FEED_SECS);
-        client.recover_stalled_recommendation().await.unwrap();
-        assert_eq!(client.recovery_attempts, 1, "a playing feed waits longer");
-        client.route_action_at = ago(STALLED_UIFID_SECS);
-        client.recover_stalled_recommendation().await.unwrap();
-        assert_eq!(client.recovery_attempts, 2);
-        peer.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn recommendation_read_failures_back_off_between_polls() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let peer = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = accept_async(stream).await.unwrap();
-            for method in ["Page.bringToFront", "Runtime.evaluate"] {
-                let message = socket.next().await.unwrap().unwrap();
-                let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
-                assert_eq!(value["method"], method);
-                let response = if method == "Runtime.evaluate" {
-                    json!({"exceptionDetails":{"text":"synthetic"}})
-                } else {
-                    json!({})
-                };
-                socket
-                    .send(Message::Text(
-                        json!({"id":value["id"],"result":response})
-                            .to_string()
-                            .into(),
-                    ))
-                    .await
-                    .unwrap();
-            }
-        });
-        let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
-            .await
-            .unwrap();
-        let error = client
-            .open_recommendation_if_redirected()
-            .await
-            .unwrap_err();
-        assert!(!error.to_string().contains("手动"));
-        client.open_recommendation_if_redirected().await.unwrap();
-        assert_eq!(client.recommendation_attempts, 0);
         peer.await.unwrap();
     }
 

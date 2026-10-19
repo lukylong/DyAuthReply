@@ -221,14 +221,14 @@ fn quick_auth_stages_report_mapped_fields_the_server_accepts() {
         tracing::info!(
             target: "dy_agent::quick_auth::cdp",
             attempt = 2,
-            action = "mouse_click",
-            "quick-auth main site on selected feed; switching to recommendation"
+            action = "reload_selected",
+            "quick-auth main site waiting for UIFID; retrying"
         );
         tracing::info!(
             target: "dy_agent::quick_auth::cdp",
             attempt = 1,
             videos = 3,
-            "quick-auth recommendation feed stalled without UIFID; returning to selected feed"
+            "quick-auth main site waiting for UIFID; retrying"
         );
         tracing::info!(
             target: "dy_agent::quick_auth",
@@ -241,7 +241,7 @@ fn quick_auth_stages_report_mapped_fields_the_server_accepts() {
     let events = shared.take();
     assert_eq!(events.len(), 3, "unlisted INFO stays local");
     assert_eq!(events[0].fields["attempt"], 2);
-    assert_eq!(events[0].fields["phase"], "mouse_click");
+    assert_eq!(events[0].fields["phase"], "reload_selected");
     assert_eq!(events[1].fields["count"], 3);
     assert_eq!(events[2].fields["elapsed_ms"], 4200);
     for event in &events {

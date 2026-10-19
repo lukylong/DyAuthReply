@@ -546,16 +546,17 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.47'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.48'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '修复回关提示未触发自动回复，并防止双向提示和重复推送造成重复回复\n'
-    '设置新增内置浏览器安装、修复重装、回退和卸载，保留登录资料、账号和规则\n'
-    '快捷登录启动后退出时显示退出码和修复指引，方便排查 Windows 电脑问题\n'
-    '设备名称改为电脑名称，旧设备随心跳更新，设备指纹与授权保持不变\n'
-    '账号列表仅显示在线、离线、受限，详细状态与技术信息移入账号详情\n'
-    '浏览器扩展本版无改动（扩展更新至 2.3.4 后保持不变）'
+    '修复卡片删除无响应，急停与恢复默认改用应用内确认框，保留明确确认和失败提示\n'
+    '修复切换账号或搜索时旧请求覆盖会话与规则列表的问题\n'
+    '修复规则启停连续点击后显示状态与实际状态相反的问题\n'
+    '修复编辑正则规则时表达式未回填的问题\n'
+    '诊断设置保存失败时保留错误提示，并恢复开关实际状态\n'
+    '手动检查更新设置同时约束主窗口和设置页，避免自动检查或自动更新\n'
+    '升级保留登录资料、账号和回复规则；浏览器扩展本版无改动（扩展更新至 2.3.4 后保持不变）'
 )

@@ -212,3 +212,44 @@ fn diagnostics_defaults_on_only_when_no_saved_choice_exists() {
     std::fs::write(dir.path().join(SWITCH_FILE), br#"{"enabled":"false"}"#).unwrap();
     assert!(!reload(dir.path()).enabled());
 }
+
+#[test]
+fn quick_auth_stages_report_mapped_fields_the_server_accepts() {
+    let shared = Arc::new(Shared::new());
+    shared.enabled.store(true, Ordering::Release);
+    capture(&shared, || {
+        tracing::info!(
+            target: "dy_agent::quick_auth::cdp",
+            attempt = 2,
+            action = "mouse_click",
+            "quick-auth main site on selected feed; switching to recommendation"
+        );
+        tracing::info!(
+            target: "dy_agent::quick_auth::cdp",
+            attempt = 1,
+            videos = 3,
+            "quick-auth recommendation feed stalled without UIFID; returning to selected feed"
+        );
+        tracing::info!(
+            target: "dy_agent::quick_auth",
+            elapsed_ms = 4200_u64,
+            attempt = 1,
+            "quick-auth capture ready"
+        );
+        tracing::info!(target: "dy_agent::quick_auth::cdp", "unlisted quick-auth detail");
+    });
+    let events = shared.take();
+    assert_eq!(events.len(), 3, "unlisted INFO stays local");
+    assert_eq!(events[0].fields["attempt"], 2);
+    assert_eq!(events[0].fields["phase"], "mouse_click");
+    assert_eq!(events[1].fields["count"], 3);
+    assert_eq!(events[2].fields["elapsed_ms"], 4200);
+    for event in &events {
+        for key in event.fields.keys() {
+            assert!(
+                ["attempt", "phase", "count", "elapsed_ms"].contains(&key.as_str()),
+                "{key} must be accepted by the server EVENT_FIELDS"
+            );
+        }
+    }
+}

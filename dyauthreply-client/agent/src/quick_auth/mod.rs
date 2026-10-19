@@ -454,6 +454,7 @@ impl Broker {
                 )
                 .await;
             if let Err(error) = result {
+                tracing::warn!(error = %error, "quick-auth session failed");
                 broker
                     .fail_and_cleanup(&session_id, error.to_string())
                     .await;
@@ -606,7 +607,8 @@ impl Broker {
                     };
                     match verified {
                         Ok(()) => {
-                            self.ready(&session_id, candidate).await?;
+                            self.ready(&session_id, candidate, cdp.main_site_effort())
+                                .await?;
                             return self
                                 .watch_confirmation(&session_id, &child, &mut stopped, deadline)
                                 .await;
@@ -699,7 +701,13 @@ impl Broker {
         Ok(())
     }
 
-    async fn ready(&self, session_id: &str, candidate: Candidate) -> Result<()> {
+    async fn ready(
+        &self,
+        session_id: &str,
+        candidate: Candidate,
+        (elapsed_ms, attempt): (u64, u32),
+    ) -> Result<()> {
+        tracing::info!(elapsed_ms, attempt, "quick-auth capture ready");
         let mut state = self.state.lock().await;
         let session = current_mut(&mut state, session_id)?;
         if *session.cancel.borrow() || terminal(session.view.state) {
@@ -855,6 +863,24 @@ fn now_ms() -> Result<u64> {
     )?)
 }
 
+// A covered login window (for example behind the client after scanning) is
+// otherwise treated as hidden: rendering freezes, the main-site feed never
+// mounts its video player and the formal UIFID is never computed. Keep covered
+// windows live; a minimized window is restored by the collector instead.
+const BROWSER_ARGS: &[&str] = &[
+    "--remote-debugging-port=0",
+    "--remote-debugging-address=127.0.0.1",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-sync",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-background-timer-throttling",
+    "--disable-features=CalculateNativeWinOcclusion",
+    "--new-window",
+    "about:blank",
+];
+
 async fn launch(
     executable: &Path,
     profile: &Path,
@@ -865,15 +891,7 @@ async fn launch(
     let mut command = Command::new(executable);
     command
         .arg(format!("--user-data-dir={}", profile.display()))
-        .args([
-            "--remote-debugging-port=0",
-            "--remote-debugging-address=127.0.0.1",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-sync",
-            "--new-window",
-            "about:blank",
-        ])
+        .args(BROWSER_ARGS)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -1130,6 +1148,23 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(100), cancelled(&mut rx))
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn covered_login_windows_stay_live_and_load_nothing_remote_at_start() {
+        for flag in [
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-background-timer-throttling",
+            "--disable-features=CalculateNativeWinOcclusion",
+        ] {
+            assert!(BROWSER_ARGS.contains(&flag), "{flag}");
+        }
+        assert_eq!(BROWSER_ARGS.last(), Some(&"about:blank"));
+        assert!(BROWSER_ARGS.contains(&"--remote-debugging-address=127.0.0.1"));
+        assert!(!BROWSER_ARGS
+            .iter()
+            .any(|arg| arg.contains("enable-automation")));
     }
 
     #[test]

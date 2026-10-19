@@ -10,15 +10,18 @@ use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 const MAX_CDP_MESSAGE: usize = 2 * 1024 * 1024;
 const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
-// A logged-in session lands this on /jingxuan, which loads normally. In a freshly
-// logged-in profile a full document load of the recommendation feed (even the
-// navigation link's own `?recommend=1&from_nav=1`) sat on "加载中" for a minute
-// without UIFID, while the in-app route change from /jingxuan issued UIFID within
-// seconds. Never load the recommendation feed as a document; switch in-app.
-const MAIN_ENTRY_URL: &str = "https://www.douyin.com/?recommend=1";
+// The site computes the formal UIFID (a fingerprint) while setting up its video
+// player. /jingxuan loads normally and carries a player; in a freshly logged-in
+// profile a full document load of the recommendation feed (even the navigation
+// link's own `?recommend=1&from_nav=1`) sat on "加载中" for a minute without
+// UIFID, and `?recommend=1` does not always redirect. Enter on /jingxuan, never
+// load the recommendation feed as a document, and switch in-app only if needed.
 const SELECTED_URL: &str = "https://www.douyin.com/jingxuan";
-// A /jingxuan document needs a moment before fallbacks replace a real click.
+// Let a /jingxuan document produce UIFID by itself before switching routes.
 const SELECTED_SETTLE_SECS: u64 = 8;
+// A hidden page does not render, so the fingerprint never runs. Restore it, but
+// do not fight a user who keeps minimizing the window.
+const RESTORE_INTERVAL_SECS: u64 = 5;
 // The recommendation feed reached by a full load can sit on "加载中" with no
 // video, or play without issuing the formal UIFID.
 const STALLED_FEED_SECS: u64 = 25;
@@ -113,6 +116,7 @@ const PAGE_INFO: &str = r"(async (readIdentity) => {
   return {origin:location.hostname,pathname:location.pathname,keys:keys[0] || '',key_candidates:keys,
     web_protect:protects[0] || '',ticket_candidates:protects,
     ua:navigator.userAgent || '',account,feed_videos:document.querySelectorAll('video').length,
+    visibility:document.visibilityState,
     browser_profile:{platform:navigator.platform,width:screen.width,height:screen.height,language:navigator.language,cpu_core_num:navigator.hardwareConcurrency,device_memory:navigator.deviceMemory,timezone_name:Intl.DateTimeFormat().resolvedOptions().timeZone,referer:'https://www.douyin.com/jingxuan',geo:[innerWidth,innerHeight,outerWidth,outerHeight,screen.availWidth,screen.availHeight,screen.width,screen.height]},
     dtrait_blob:String(window.__dyauthreplyLatestDtraitBlob || ''),
     dtrait_path:String(window.__dyauthreplyLatestDtraitPath || '')};
@@ -232,6 +236,9 @@ pub struct CdpClient {
     switch_step: u8,
     feed_videos: u64,
     recovery_attempts: u32,
+    page_hidden: bool,
+    restored_at: Option<tokio::time::Instant>,
+    restore_attempts: u32,
 }
 
 impl CdpClient {
@@ -263,6 +270,9 @@ impl CdpClient {
             switch_step: 0,
             feed_videos: 0,
             recovery_attempts: 0,
+            page_hidden: false,
+            restored_at: None,
+            restore_attempts: 0,
         })
     }
 
@@ -342,7 +352,9 @@ impl CdpClient {
             sid == self.creator_session,
             "主站与创作者中心登录会话不一致，请统一账号后重试"
         );
-        if !has_main_uifid(&www) {
+        if main.page_hidden {
+            main.restore_hidden_window().await?;
+        } else if !has_main_uifid(&www) {
             if main.current_path.starts_with("/jingxuan") {
                 main.open_recommendation_if_redirected().await?;
             } else if main.current_path == "/" {
@@ -398,6 +410,7 @@ impl CdpClient {
         }
         self.current_path = bounded_text(&page, "pathname", 512).into();
         self.feed_videos = page["feed_videos"].as_u64().unwrap_or(0);
+        self.page_hidden = page["visibility"].as_str() == Some("hidden");
         Ok([storage, www, creator, imapi, page])
     }
 
@@ -428,14 +441,13 @@ impl CdpClient {
             );
             return Ok(());
         }
-        let mouse = status == Some("target") && self.switch_step == 0;
-        if !mouse
-            && self
-                .route_action_at
-                .is_some_and(|at| at.elapsed().as_secs() < SELECTED_SETTLE_SECS)
+        if self
+            .route_action_at
+            .is_some_and(|at| at.elapsed().as_secs() < SELECTED_SETTLE_SECS)
         {
             return Ok(());
         }
+        let mouse = status == Some("target") && self.switch_step == 0;
         let action = if mouse {
             "mouse_click"
         } else if self.switch_step <= 1 {
@@ -496,6 +508,38 @@ impl CdpClient {
         self.navigate(SELECTED_URL).await
     }
 
+    // Covered windows stay live via launch flags; a minimized window or a
+    // background tab still freezes, so bring this page back without asking.
+    async fn restore_hidden_window(&mut self) -> Result<()> {
+        if self
+            .restored_at
+            .is_some_and(|at| at.elapsed().as_secs() < RESTORE_INTERVAL_SECS)
+        {
+            return Ok(());
+        }
+        self.restored_at = Some(tokio::time::Instant::now());
+        self.restore_attempts = self.restore_attempts.saturating_add(1);
+        tracing::info!(
+            attempt = self.restore_attempts,
+            "quick-auth main site page was hidden; restoring its window"
+        );
+        let window = self
+            .command("Browser.getWindowForTarget", json!({}))
+            .await?;
+        let window_id = window["windowId"]
+            .as_i64()
+            .context("登录窗口状态读取失败")?;
+        self.command(
+            "Browser.setWindowBounds",
+            json!({"windowId":window_id,"bounds":{"windowState":"normal"}}),
+        )
+        .await?;
+        self.command("Page.bringToFront", json!({})).await?;
+        // The frozen time must not count as a stalled feed.
+        self.route_action_at = Some(tokio::time::Instant::now());
+        Ok(())
+    }
+
     async fn evaluate_status(&mut self, expression: &str) -> Result<Value> {
         let result = self
             .command(
@@ -535,7 +579,7 @@ impl CdpClient {
                 .await
                 .context("主站连接超时")??;
             main.captured.main_site = true;
-            main.initialize_at(MAIN_ENTRY_URL).await?;
+            main.initialize_at(SELECTED_URL).await?;
             Ok::<Self, anyhow::Error>(main)
         }
         .await;
@@ -592,6 +636,20 @@ impl CdpClient {
         self.closed
     }
 
+    /// Main-site time and automatic actions (route switches, stall recoveries,
+    /// window restores) spent before the capture became ready.
+    pub fn main_site_effort(&self) -> (u64, u32) {
+        let elapsed = self.main_started.map_or(0, |at| {
+            u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX)
+        });
+        let actions = self.main_page.as_ref().map_or(0, |main| {
+            main.recommendation_attempts
+                .saturating_add(main.recovery_attempts)
+                .saturating_add(main.restore_attempts)
+        });
+        (elapsed, actions)
+    }
+
     pub fn progress_message(&self, completeness: &Completeness) -> String {
         let Some(started) = self.main_started else {
             return "登录已识别，正在读取创作者账号资料".into();
@@ -602,7 +660,10 @@ impl CdpClient {
             .as_ref()
             .filter(|_| completeness.0.get("main_uifid") == Some(&false))
         {
-            if main.current_path.starts_with("/jingxuan") {
+            if main.page_hidden {
+                return "登录窗口被最小化或切到后台，正在自动恢复并继续采集，无需手动操作".into();
+            }
+            if main.current_path.starts_with("/jingxuan") && main.recommendation_attempts > 0 {
                 return format!(
                     "主站停留在精选页，正在自动切换到推荐页（已尝试 {} 次），无需手动操作",
                     main.recommendation_attempts
@@ -1484,7 +1545,7 @@ mod tests {
             if method == "Page.navigate" {
                 let url = request["params"]["url"].as_str().unwrap();
                 host = if url.starts_with("https://www.douyin.com/") {
-                    assert_eq!(url, MAIN_ENTRY_URL);
+                    assert_eq!(url, SELECTED_URL);
                     "www.douyin.com"
                 } else {
                     assert_eq!(
@@ -1743,7 +1804,7 @@ mod tests {
                 let message = socket.next().await.unwrap().unwrap();
                 let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
                 assert_eq!(value["method"], method);
-                let response = json!({"result":{"value":{"status":"not_ready"}}});
+                let response = json!({"result":{"value":{"status":"target","x":70,"y":55}}});
                 socket
                     .send(Message::Text(
                         json!({"id":value["id"],"result":response})
@@ -1759,7 +1820,67 @@ mod tests {
             .unwrap();
         client.route_action_at = Some(tokio::time::Instant::now());
         client.open_recommendation_if_redirected().await.unwrap();
-        assert_eq!(client.recommendation_attempts, 0, "still rendering");
+        assert_eq!(
+            client.recommendation_attempts, 0,
+            "a fresh /jingxuan gets time to issue UIFID before any switch"
+        );
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_hidden_main_page_restores_its_window_without_fighting_the_user() {
+        // Minimized or backgrounded pages do not render, so the fingerprint that
+        // yields UIFID never runs. Restore once, then back off.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            for method in [
+                "Browser.getWindowForTarget",
+                "Browser.setWindowBounds",
+                "Page.bringToFront",
+            ] {
+                let message = socket.next().await.unwrap().unwrap();
+                let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                assert_eq!(value["method"], method);
+                let response = match method {
+                    "Browser.getWindowForTarget" => json!({"windowId":7,"bounds":{}}),
+                    "Browser.setWindowBounds" => {
+                        assert_eq!(value["params"]["windowId"], 7);
+                        assert_eq!(value["params"]["bounds"]["windowState"], "normal");
+                        json!({})
+                    }
+                    _ => json!({}),
+                };
+                socket
+                    .send(Message::Text(
+                        json!({"id":value["id"],"result":response})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            // Nothing else may arrive while the restore interval is running.
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(200), socket.next())
+                    .await
+                    .is_err()
+            );
+        });
+        let mut client = CdpClient::connect(&format!("ws://{address}/devtools/page/test"))
+            .await
+            .unwrap();
+        client.page_hidden = true;
+        client.restore_hidden_window().await.unwrap();
+        assert_eq!(client.restore_attempts, 1);
+        assert!(
+            client.route_action_at.is_some(),
+            "frozen time must not count as a stall"
+        );
+        client.restore_hidden_window().await.unwrap();
+        assert_eq!(client.restore_attempts, 1, "do not fight the user");
         peer.await.unwrap();
     }
 

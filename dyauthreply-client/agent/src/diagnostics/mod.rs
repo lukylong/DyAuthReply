@@ -38,6 +38,10 @@ const INFO_MESSAGES: &[&str] = &[
     "peer profile backfilled",
     "conversation peer resolved from member list",
     "quick-auth component downloaded and verified",
+    "quick-auth main site on selected feed; switching to recommendation",
+    "quick-auth recommendation feed stalled without UIFID; returning to selected feed",
+    "quick-auth main site page was hidden; restoring its window",
+    "quick-auth capture ready",
 ];
 /// Tracing field -> reported key. Fields not listed are dropped.
 const FIELDS: &[(&str, &str)] = &[
@@ -58,6 +62,10 @@ const FIELDS: &[(&str, &str)] = &[
     ("members", "members"),
     ("host", "host"),
     ("source", "host"),
+    ("attempt", "attempt"),
+    ("action", "phase"),
+    ("videos", "count"),
+    ("elapsed_ms", "elapsed_ms"),
 ];
 
 #[derive(Clone, Debug, Serialize)]

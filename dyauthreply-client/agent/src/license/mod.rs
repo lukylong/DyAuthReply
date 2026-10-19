@@ -2,6 +2,7 @@
 pub mod api;
 mod cards;
 mod catalog;
+mod device_name;
 mod diagnostics;
 mod state;
 use anyhow::{Context, Result};
@@ -94,20 +95,25 @@ impl NativeLicense {
         fs::create_dir_all(config.state_file.parent().context("license root missing")?)?;
         let _initial_lock = state::operation_lock(&config.state_file)?;
         let mut cached = state::load(&config.state_file)?;
-        if string(&cached, "device_fingerprint").is_empty() {
+        let initialized = string(&cached, "device_fingerprint").is_empty();
+        if initialized {
             cached["device_fingerprint"] = json!(uuid::Uuid::new_v4().simple().to_string());
-            cached["device_name"] = json!("本地设备");
             cached["os_type"] = json!(std::env::consts::OS);
             cached["os_version"] = json!("");
             cached["local_state"] = json!("unactivated");
             cached["server_url"] = json!(config.server_url);
-            state::save(&config.state_file, &cached)?;
         }
         anyhow::ensure!(
             string(&cached, "server_url").is_empty()
                 || string(&cached, "server_url").trim_end_matches('/') == config.server_url,
             "license authority changed; explicit activation required"
         );
+        let hostname = sysinfo::System::host_name();
+        let metadata_changed =
+            device_name::refresh(&mut cached, hostname.as_deref(), std::env::consts::OS);
+        if initialized || metadata_changed {
+            state::save(&config.state_file, &cached)?;
+        }
         let client = wreq::Client::builder()
             .redirect(wreq::redirect::Policy::none())
             .retry(wreq::retry::Policy::never())
@@ -308,7 +314,7 @@ impl NativeLicense {
             pending = json!({});
         }
         if pending["request"].is_null() {
-            pending = json!({"server":self.config.server_url,"previous_sequence":seq,"request":{"request_id":uuid::Uuid::new_v4().to_string(),"activation_id":current["activation_id"],"refresh_token":current["refresh_token"],"app_version":option_env!("CLIENT_APP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),"machine_meta":{"runtime":"rust"}}});
+            pending = json!({"server":self.config.server_url,"previous_sequence":seq,"request":{"request_id":uuid::Uuid::new_v4().to_string(),"activation_id":current["activation_id"],"refresh_token":current["refresh_token"],"app_version":option_env!("CLIENT_APP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),"machine_meta":device_name::machine_meta(&current)}});
             state::save(&pending_path, &pending)?;
         }
         anyhow::ensure!(
@@ -367,7 +373,7 @@ impl NativeLicense {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let payload = json!({"license_code":code.trim(),"device_fingerprint":current["device_fingerprint"],"device_name":current["device_name"],"os_type":current["os_type"],"os_version":current["os_version"],"app_version":option_env!("CLIENT_APP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),"machine_meta":{"runtime":"rust"}});
+        let payload = json!({"license_code":code.trim(),"device_fingerprint":current["device_fingerprint"],"device_name":current["device_name"],"os_type":current["os_type"],"os_version":current["os_version"],"app_version":option_env!("CLIENT_APP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),"machine_meta":device_name::machine_meta(&current)});
         let response = self.post("activate", &payload).await?;
         let mut next = self.apply(current, &response, 0)?;
         next["activated_at"] = json!(iso(now()?));

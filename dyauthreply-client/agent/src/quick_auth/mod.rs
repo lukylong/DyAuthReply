@@ -198,6 +198,23 @@ pub struct Broker {
     importer: Arc<Importer>,
     state: Mutex<State>,
     install: Arc<InstallProgress>,
+    component_gate: Arc<Mutex<()>>,
+}
+
+fn component_operation(gate: &Arc<Mutex<()>>) -> Result<tokio::sync::OwnedMutexGuard<()>> {
+    gate.clone()
+        .try_lock_owned()
+        .context("内置浏览器正在安装或维护，请稍后重试")
+}
+
+fn ensure_browser_closed(state: &State) -> Result<()> {
+    if let Some(session) = state.session.as_ref() {
+        anyhow::ensure!(
+            terminal(session.view.state) && !child_running(&session.child)?,
+            "请先结束当前快捷登录并关闭浏览器窗口"
+        );
+    }
+    Ok(())
 }
 
 struct InstallPhase {
@@ -242,6 +259,7 @@ impl Broker {
             root,
             importer,
             state: Mutex::new(State { session: None }),
+            component_gate: Arc::new(Mutex::new(())),
             install: Arc::new(InstallProgress {
                 phase: StdMutex::new(InstallPhase {
                     state: "idle",
@@ -255,13 +273,38 @@ impl Broker {
 
     #[must_use]
     pub fn component_status(&self) -> ComponentView {
-        let mut view = component::status(&self.root);
-        let (state, message) = self.install.phase.lock().map_or(
+        let (mut state, mut message) = self.install.phase.lock().map_or(
             ("failed", "快捷登录组件状态异常".into()),
             |phase| (phase.state, phase.message.clone()),
         );
+        // Hold the same gate while resolving (which may recover a manifest), so
+        // status polling cannot recreate files during an uninstall/rollback.
+        let read_guard = self.component_gate.try_lock();
+        if read_guard.is_err() && state != "installing" {
+            state = "installing";
+            message = "内置浏览器正在维护，请稍后".into();
+        }
         let downloaded = self.install.downloaded.load(Ordering::Relaxed);
         let total = self.install.total.load(Ordering::Relaxed);
+        let mut view = if state == "installing" {
+            ComponentView {
+                state: "installing",
+                source: "managed",
+                version: String::new(),
+                install_required: false,
+                message: String::new(),
+                downloaded_bytes: 0,
+                total_bytes: 0,
+                progress_percent: None,
+                can_rollback: self
+                    .root
+                    .join("components/chromium/previous.json")
+                    .is_file(),
+                managed_installed: self.root.join("components/chromium").exists(),
+            }
+        } else {
+            component::status(&self.root)
+        };
         if state == "installing" {
             view.state = "installing";
             view.source = "managed";
@@ -278,12 +321,10 @@ impl Broker {
                 )
                 .unwrap_or(100)
             });
-        } else if state == "failed" && view.source != "managed" {
+        } else if state == "failed" {
             view.state = "failed";
             view.install_required = true;
             view.message = message;
-        } else if state == "failed" {
-            view.message = format!("{message}；当前版本仍可使用");
         }
         view
     }
@@ -292,16 +333,27 @@ impl Broker {
     /// # Errors
     /// Rejects active authorization or duplicate installation work.
     pub async fn install_component(self: &Arc<Self>) -> Result<ComponentView> {
-        {
-            let state = self.state.lock().await;
-            anyhow::ensure!(
-                state
-                    .session
-                    .as_ref()
-                    .is_none_or(|session| terminal(session.view.state)),
-                "请先结束当前快捷登录"
-            );
-        }
+        self.begin_install(false).await
+    }
+
+    /// Forces a fresh verified installation without clearing login data.
+    /// # Errors
+    /// Rejects concurrent maintenance or an active browser session.
+    pub async fn repair_component(self: &Arc<Self>) -> Result<ComponentView> {
+        self.begin_install(true).await
+    }
+
+    async fn require_browser_closed(&self) -> Result<()> {
+        ensure_browser_closed(&*self.state.lock().await)
+    }
+
+    fn reserve_component(&self) -> Result<tokio::sync::OwnedMutexGuard<()>> {
+        component_operation(&self.component_gate)
+    }
+
+    async fn begin_install(self: &Arc<Self>, force: bool) -> Result<ComponentView> {
+        let operation = self.reserve_component()?;
+        self.require_browser_closed().await?;
         {
             let mut phase = self
                 .install
@@ -310,7 +362,12 @@ impl Broker {
                 .map_err(|_| anyhow::anyhow!("快捷登录组件状态异常"))?;
             anyhow::ensure!(phase.state != "installing", "快捷登录组件正在安装");
             phase.state = "installing";
-            phase.message = "正在下载快捷登录组件".into();
+            phase.message = if force {
+                "正在重新下载并修复内置浏览器"
+            } else {
+                "正在下载快捷登录组件"
+            }
+            .into();
             self.install.downloaded.store(0, Ordering::Relaxed);
             self.install.total.store(0, Ordering::Relaxed);
         }
@@ -318,13 +375,18 @@ impl Broker {
         let root = self.root.clone();
         let progress_state = self.install.clone();
         tokio::spawn(async move {
+            let _operation = operation;
             let callback: installer::Progress = Arc::new(move |downloaded, total| {
                 progress_state
                     .downloaded
                     .store(downloaded, Ordering::Relaxed);
                 progress_state.total.store(total, Ordering::Relaxed);
             });
-            let result = installer::install_latest(&root, callback).await;
+            let result = if force {
+                installer::repair_latest(&root, callback).await
+            } else {
+                installer::install_latest(&root, callback).await
+            };
             let Some(broker) = broker.upgrade() else {
                 return;
             };
@@ -349,28 +411,49 @@ impl Broker {
     /// # Errors
     /// Rejects active authorization/installation or unavailable previous versions.
     pub async fn rollback_component(&self) -> Result<ComponentView> {
-        {
-            let state = self.state.lock().await;
-            anyhow::ensure!(
-                state
-                    .session
-                    .as_ref()
-                    .is_none_or(|session| terminal(session.view.state)),
-                "请先结束当前快捷登录"
-            );
-        }
-        anyhow::ensure!(
-            self.install
-                .phase
-                .lock()
-                .map_err(|_| anyhow::anyhow!("快捷登录组件状态异常"))?
-                .state
-                != "installing",
-            "快捷登录组件正在安装"
-        );
+        let operation = self.reserve_component()?;
+        self.require_browser_closed().await?;
         let root = self.root.clone();
-        tokio::task::spawn_blocking(move || installer::rollback(&root)).await??;
+        let (operation, result) = tokio::task::spawn_blocking(move || {
+            let result = installer::rollback(&root);
+            (operation, result)
+        })
+        .await?;
+        result?;
+        self.clear_component_failure()?;
+        drop(operation);
         Ok(self.component_status())
+    }
+
+    fn clear_component_failure(&self) -> Result<()> {
+        let mut phase = self
+            .install
+            .phase
+            .lock()
+            .map_err(|_| anyhow::anyhow!("快捷登录组件状态异常"))?;
+        phase.state = "idle";
+        phase.message.clear();
+        Ok(())
+    }
+
+    /// Uninstalls managed browser files only; account credentials/profiles remain untouched.
+    /// # Errors
+    /// Rejects concurrent login/maintenance and filesystem failures.
+    pub async fn uninstall_component(&self) -> Result<ComponentView> {
+        let operation = self.reserve_component()?;
+        self.require_browser_closed().await?;
+        let root = self.root.clone();
+        let (operation, result) = tokio::task::spawn_blocking(move || {
+            let result = installer::uninstall(&root);
+            (operation, result)
+        })
+        .await?;
+        result?;
+        self.clear_component_failure()?;
+        drop(operation);
+        let mut view = self.component_status();
+        view.message = "内置浏览器已卸载，登录资料、账号和回复规则均已保留".into();
+        Ok(view)
     }
 
     /// Starts one disposable browser session and returns before user interaction completes.
@@ -381,6 +464,7 @@ impl Broker {
         mode: Mode,
         target_account_id: Option<String>,
     ) -> Result<SessionView> {
+        let _operation = self.reserve_component()?;
         anyhow::ensure!(
             self.install
                 .phase
@@ -897,7 +981,13 @@ async fn launch(
         .stderr(Stdio::null());
     #[cfg(target_os = "macos")]
     command.arg("--use-mock-keychain");
-    let child = command.spawn().context("快捷登录组件启动失败")?;
+    let child = command.spawn().map_err(|error| {
+        anyhow::anyhow!(
+            "快捷登录组件启动失败（系统错误 {:?}，{:?}）；请到设置 → 内置浏览器修复重装",
+            error.raw_os_error(),
+            error.kind()
+        )
+    })?;
     let pid = child.id();
     *child_slot
         .lock()
@@ -911,7 +1001,14 @@ async fn launch(
                     return Ok::<String, anyhow::Error>(content);
                 }
             }
-            anyhow::ensure!(child_running(child_slot)?, "快捷登录组件启动后退出");
+            if !child_running(child_slot)? {
+                let status = child_slot
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("浏览器进程状态异常"))?
+                    .as_mut()
+                    .and_then(|child| child.try_wait().ok().flatten());
+                anyhow::bail!("{}", startup_exit_message(status));
+            }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
@@ -931,6 +1028,25 @@ async fn launch(
         .map_err(|_| anyhow::anyhow!("浏览器连接状态异常"))? = Some(browser_ws);
     let page_ws = discover_page(port).await?;
     Ok(Launched { page_ws })
+}
+
+fn startup_exit_message(status: Option<std::process::ExitStatus>) -> String {
+    let detail = status.map_or_else(
+        || "进程状态未返回".into(),
+        |status| {
+            status.code().map_or_else(
+                || status.to_string(),
+                |code| {
+                    format!(
+                        "退出码 {code} / 0x{:08X}",
+                        u32::from_ne_bytes(code.to_ne_bytes())
+                    )
+                },
+            )
+        },
+    );
+    format!("快捷登录组件启动后退出（{detail}，{}/{}）；请到设置 → 内置浏览器执行修复重装；如仍退出，请反馈此退出码",
+        std::env::consts::OS, std::env::consts::ARCH)
 }
 
 async fn discover_page(port: u16) -> Result<String> {
@@ -1199,5 +1315,92 @@ mod tests {
         response["runtime_reload_required"] = json!(reload);
         assert_eq!(response["runtime_reload_required"], true);
         assert!(response.get("_runtime_reload").is_none());
+    }
+    #[tokio::test]
+    async fn browser_management_gate_covers_background_work_and_active_sessions() {
+        let gate = Arc::new(Mutex::new(()));
+        let owned = component_operation(&gate).unwrap();
+        assert!(component_operation(&gate).is_err());
+        let worker = tokio::spawn(async move {
+            let _owned = owned;
+            tokio::task::yield_now().await;
+        });
+        worker.await.unwrap();
+        assert!(component_operation(&gate).is_ok());
+        // Dropping an HTTP join handle must not unlock a still-running filesystem operation.
+        let operation = component_operation(&gate).unwrap();
+        let (finish, wait) = std::sync::mpsc::channel::<()>();
+        let blocking = tokio::task::spawn_blocking(move || {
+            let result = wait.recv_timeout(Duration::from_secs(1));
+            (operation, result)
+        });
+        drop(blocking);
+        assert!(component_operation(&gate).is_err());
+        finish.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while component_operation(&gate).is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut state = State {
+            session: Some(session(root.path())),
+        };
+        for status in [
+            "launching",
+            "awaiting_login",
+            "collecting",
+            "importing",
+            "closing",
+        ] {
+            state.session.as_mut().unwrap().view.state = status;
+            assert!(ensure_browser_closed(&state).is_err(), "{status}");
+        }
+        for status in [
+            "completed",
+            "cancelled",
+            "failed",
+            "browser_exited",
+            "timed_out",
+        ] {
+            state.session.as_mut().unwrap().view.state = status;
+            assert!(ensure_browser_closed(&state).is_ok(), "{status}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn browser_management_startup_exit_reports_real_code_without_browser_secrets() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("fake-browser");
+        std::fs::write(
+            &executable,
+            b"#!/bin/sh\necho 'private-browser-detail' >&2\nexit 42\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let child = Arc::new(StdMutex::new(None));
+        let ws = Arc::new(StdMutex::new(None));
+        let profile = root.path().join("profile");
+        let error = launch(&executable, &profile, &child, &ws)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("退出码 42 / 0x0000002A"), "{error}");
+        assert!(error.contains("设置 → 内置浏览器"));
+        assert!(!error.contains("private-browser-detail"));
+        stop_child_and_remove(&child, &profile).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_management_windows_exit_code_keeps_unsigned_hex() {
+        use std::os::windows::process::ExitStatusExt;
+        let message = startup_exit_message(Some(std::process::ExitStatus::from_raw(0xC0000135)));
+        assert!(message.contains("0xC0000135"));
     }
 }

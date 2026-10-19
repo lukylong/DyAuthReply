@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { onBeforeRouteLeave } from 'vue-router';
+import { onBeforeRouteLeave, RouterLink } from 'vue-router';
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { Ellipsis, KeyRound, LoaderCircle, Plus, Search, ShieldCheck, Smartphone, TriangleAlert } from 'lucide-vue-next';
 import AppModal from '../components/AppModal.vue';
-import { hasUnavailableLease } from '../utils/accountLease';
+import { accountStatusPresentation } from '../utils/accountStatus';
 import { acceptsQuickAuthResponse, freshQuickAuthProgress } from '../utils/quickAuthProgress';
 import AccountProfileDrawer from '../components/AccountProfileDrawer.vue';
 import {
@@ -14,6 +14,7 @@ import {
   getCurrentQuickAuthSession,
   getQuickAuthSession,
   installQuickAuthComponent,
+  repairQuickAuthComponent,
   inTauriRuntime,
   importCredential,
   listAccounts,
@@ -22,7 +23,6 @@ import {
   quickCreateAccount,
   restartNativeService,
   startQuickAuth,
-  statusLabel,
   type DouyinAccount,
   type QuickAuthMode,
   type QuickAuthComponent,
@@ -117,7 +117,8 @@ async function installQuickComponent() {
   quickAuthBusy.value = true;
   quickAuthError.value = '';
   try {
-    quickComponent.value = await installQuickAuthComponent();
+    quickComponent.value = quickComponent.value?.managed_installed
+      ? await repairQuickAuthComponent() : await installQuickAuthComponent();
     stopComponentRepair();
     componentRepairTimer = setInterval(() => void refreshQuickComponent(), 700);
   } catch (e) {
@@ -259,6 +260,12 @@ const filteredAccounts = computed(() => {
 
 const showProfile = ref(false);
 const profileTarget = ref<DouyinAccount | null>(null);
+watch(accounts, (rows) => {
+  const selected = profileTarget.value;
+  if (!selected) return;
+  const latest = rows.find(row => row.id === selected.id);
+  if (latest) Object.assign(selected, latest);
+});
 
 function openProfile(account: DouyinAccount) {
   profileTarget.value = account;
@@ -343,46 +350,6 @@ async function refreshAccounts() {
   } catch {
     // 后台刷新失败时保留现有列表；显式加载仍会展示错误。
   }
-}
-
-function accountStatusLabel(acc: DouyinAccount) {
-  if (hasUnavailableLease(acc)) return acc.last_probe_error || '客户端租约恢复中，不代表抖音登录失效';
-  if (acc.credential_state === 'receive_only') {
-    return isSendRestricted(acc) ? '客户端发送受限（仅接收）' : '仅接收（发送凭证不完整）';
-  }
-  if (acc.credential_state === 'invalid' || acc.status === 2) return '登录失效';
-  if (isAccountHealthy(acc)) {
-    return acc.credential_state === 'sendable'
-      ? '登录和接收正常，上次发送成功；不保证下一条消息送达'
-      : '登录和接收正常，发送尚待实际回执验证；不代表消息已送达';
-  }
-  if (acc.identity_error) return acc.last_probe_error || '身份校验异常';
-  return statusLabel(acc.status);
-}
-
-function isAccountHealthy(acc: DouyinAccount) {
-  return acc.status === 1
-    && acc.identity_verified === true
-    && acc.credential_state !== 'invalid'
-    && acc.credential_state !== 'receive_only';
-}
-
-function isSendRestricted(acc: DouyinAccount) {
-  const detail = acc.last_probe_error || '';
-  return acc.credential_state === 'receive_only'
-    && ['客户端协议发送', '发送封控', '发送风控', 'business=', 'raw_check='].some((marker) => detail.includes(marker));
-}
-
-function accountCredentialLabel(acc: DouyinAccount) {
-  if (hasUnavailableLease(acc)) return '租约恢复中';
-  if (acc.credential_state === 'invalid') return '登录失效';
-  if (acc.credential_state === 'receive_only') {
-    return isSendRestricted(acc) ? '客户端发送受限（仅接收）' : '仅接收';
-  }
-  if (isAccountHealthy(acc)) return acc.credential_state === 'sendable' ? '在线 · 上次发送成功' : '在线 · 发送待验证';
-  if (acc.credential_state === 'sendable') return '可发送';
-  if (acc.identity_error) return '校验异常';
-  return '检测中';
 }
 
 function openImport(account?: DouyinAccount) {
@@ -595,12 +562,8 @@ onMounted(async () => {
           </div>
           <span
             class="status-dot"
-            :class="{
-              online: isAccountHealthy(acc),
-              risk: acc.credential_state === 'receive_only',
-              invalid: acc.credential_state === 'invalid' || acc.status === 2,
-            }"
-            :title="accountStatusLabel(acc)"
+            :class="{ online: accountStatusPresentation(acc).tone === 'success', risk: accountStatusPresentation(acc).tone === 'warning' }"
+            :title="accountStatusPresentation(acc).label"
           ></span>
           <div class="menu-wrap">
             <button
@@ -624,34 +587,16 @@ onMounted(async () => {
         </div>
 
         <strong class="nickname" :title="acc.nickname">{{ acc.nickname }}</strong>
-        <span
+        <button
+          type="button"
           class="credential-badge"
-          :class="{
-            success: !hasUnavailableLease(acc) && (isAccountHealthy(acc) || acc.credential_state === 'sendable'),
-            warning: hasUnavailableLease(acc) || acc.credential_state === 'receive_only',
-            danger: acc.credential_state === 'invalid',
-          }"
-          :title="accountStatusLabel(acc)"
+          :class="accountStatusPresentation(acc).tone"
+          title="查看账号详情"
+          :aria-label="`${acc.nickname}：${accountStatusPresentation(acc).label}，查看详情`"
+          @click.stop="openProfile(acc)"
         >
-          {{ accountCredentialLabel(acc) }}
-        </span>
-        <p v-if="hasUnavailableLease(acc)" class="account-alert risk-alert">
-          <TriangleAlert :size="14" />
-          <span :title="acc.last_probe_error || '等待客户端授权续签与租约恢复，不代表抖音登录失效'">{{ acc.last_probe_error || '等待客户端授权续签与租约恢复，不代表抖音登录失效' }}</span>
-        </p>
-        <p v-else-if="acc.credential_state === 'receive_only'" class="account-alert risk-alert">
-          <TriangleAlert :size="14" />
-          <span :title="acc.last_probe_error || '当前仅可接收消息，请更新发送凭证'">{{ acc.last_probe_error || '当前仅可接收消息，请更新发送凭证' }}</span>
-        </p>
-        <p v-else-if="acc.credential_state === 'invalid' || acc.status === 2" class="account-alert invalid-alert">
-          <TriangleAlert :size="14" />
-          <span :title="acc.last_probe_error || '登录状态已失效，请更新凭证'">{{ acc.last_probe_error || '登录状态已失效，请更新凭证' }}</span>
-        </p>
-
-        <p v-else-if="acc.identity_error" class="account-alert risk-alert">
-          <TriangleAlert :size="14" />
-          <span :title="acc.last_probe_error || '身份校验异常，正在重试'">{{ acc.last_probe_error || '身份校验异常，正在重试' }}</span>
-        </p>
+          {{ accountStatusPresentation(acc).label }}
+        </button>
 
         <div class="card-divider"></div>
 
@@ -679,7 +624,7 @@ onMounted(async () => {
         <div v-if="!quickAuth && quickComponent?.state !== 'ready'" class="component-install-card">
           <LoaderCircle v-if="quickComponent?.state === 'installing'" class="quick-spinner" :size="34" />
           <KeyRound v-else :size="34" />
-          <h3>{{ quickComponent?.state === 'installing' ? '正在安装快捷登录组件' : '需要安装快捷登录组件' }}</h3>
+          <h3>{{ quickComponent?.state === 'installing' ? '正在安装快捷登录组件' : (quickComponent?.managed_installed ? '需要修复快捷登录组件' : '需要安装快捷登录组件') }}</h3>
           <p>{{ quickComponent?.message || '该组件用于打开独立的安全登录窗口。' }}</p>
           <div v-if="quickComponent?.state === 'installing'" class="install-progress">
             <span :style="{ width: `${quickComponent.progress_percent || 0}%` }"></span>
@@ -694,7 +639,7 @@ onMounted(async () => {
             :disabled="quickAuthBusy"
             @click="installQuickComponent"
           >
-            {{ quickAuthBusy ? '正在准备...' : '安装快捷登录组件' }}
+            {{ quickAuthBusy ? '正在准备...' : (quickComponent?.managed_installed ? '修复重装快捷登录组件' : '安装快捷登录组件') }}
           </button>
         </div>
 
@@ -732,6 +677,9 @@ onMounted(async () => {
           正在重新读取字段，暂不显示上一轮状态；请以上方实时提示为准。
         </p>
 
+        <RouterLink v-if="quickAuthError || (quickAuthTerminal && quickAuth?.state !== 'completed')" to="/settings?tab=browser" class="btn-glass">
+          前往设置管理 / 修复内置浏览器
+        </RouterLink>
         <p v-if="quickAuthError" class="msg-box error-msg">{{ quickAuthError }}</p>
         <p v-else-if="quickAuthTerminal && quickAuth?.state !== 'completed'" class="msg-box error-msg">
           {{ quickAuth?.message }}
@@ -1115,6 +1063,7 @@ onMounted(async () => {
 
 .credential-badge {
   align-self: flex-start;
+  cursor: pointer;
   font-size: 0.68rem;
   font-weight: 600;
   padding: 2px 8px;
@@ -1139,48 +1088,10 @@ onMounted(async () => {
   color: var(--danger);
 }
 
-.account-alert {
-  margin: 0;
-  display: flex;
-  align-items: flex-start;
-  gap: 5px;
-  border-radius: 8px;
-  padding: 7px 8px;
-  font-size: 0.72rem;
-  line-height: 1.35;
-}
-
-.account-alert svg {
-  flex: 0 0 auto;
-  margin-top: 1px;
-}
-
-/* Keep a verbose probe message to two lines so one card never towers over its
-   row; the full text stays available through the span's title tooltip. */
-.account-alert span {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.risk-alert {
-  color: var(--warning);
-  background: var(--warning-soft);
-}
-
-.invalid-alert {
-  color: var(--danger);
-  background: var(--danger-soft);
-}
-
 .card-divider {
   height: 1px;
   background: var(--border-subtle);
-  /* Push the divider + footer to the card's bottom edge so every card's
-     "今日回复 + 开关" row lines up across the row, regardless of whether a
-     card shows a status alert above. */
+  /* Keep the reply count and switch aligned across cards. */
   margin-top: auto;
 }
 

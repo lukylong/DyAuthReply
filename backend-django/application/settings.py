@@ -546,16 +546,16 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.46'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.47'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '修复 Windows 快捷登录扫码后一直等待主站 UIFID：登录窗口被其他窗口遮挡时页面会冻结，现在保持正常运行\n'
-    '登录窗口被最小化或切到后台时自动恢复并继续采集，无需手动操作\n'
-    '主站 UIFID 改为在精选页自动刷新获取，不再长时间停在推荐页等待，macOS 实测从约 73 秒缩短到约 20 秒\n'
-    '进度提示显示自动刷新次数，不再提示检查登录窗口；采集各阶段耗时随运行诊断上报便于排查\n'
-    '浏览器扩展本版无改动（扩展更新至 2.3.4 后保持不变）\n'
-    'macOS 本机真实快捷登录验证通过；Windows 已出测试包，正式版未做 Windows 真实扫码验收；未新增真实消息发送测试'
+    '修复回关提示未触发自动回复，并防止双向提示和重复推送造成重复回复\n'
+    '设置新增内置浏览器安装、修复重装、回退和卸载，保留登录资料、账号和规则\n'
+    '快捷登录启动后退出时显示退出码和修复指引，方便排查 Windows 电脑问题\n'
+    '设备名称改为电脑名称，旧设备随心跳更新，设备指纹与授权保持不变\n'
+    '账号列表仅显示在线、离线、受限，详细状态与技术信息移入账号详情\n'
+    '浏览器扩展本版无改动（扩展更新至 2.3.4 后保持不变）'
 )

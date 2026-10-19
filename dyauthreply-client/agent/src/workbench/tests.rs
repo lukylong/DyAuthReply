@@ -633,3 +633,41 @@ fn public_handle_missing_refresh_keeps_last_verified_value_across_reopen() {
     let db = Workbench::open(root.path()).unwrap();
     assert_eq!(db.account("a").unwrap()["unique_id"], "new.name");
 }
+
+#[test]
+fn mutual_follow_peer_resolution_is_account_identity_and_route_bound() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Workbench::open(root.path()).unwrap();
+    db.ensure_account("a", "self").unwrap();
+    db.ensure_account("b", "other").unwrap();
+    let e = event("1", "peer");
+    db.project("a", "self", &[e]).unwrap();
+    let short = "7681885293746357819";
+    assert_eq!(
+        db.notice_peer("a", "self", "platform-route", short)
+            .unwrap()
+            .as_deref(),
+        Some("peer")
+    );
+    for (account, own, platform, short) in [
+        ("b", "other", "platform-route", short),
+        ("a", "other", "platform-route", short),
+        ("a", "self", "missing", short),
+        ("a", "self", "platform-route", "1"),
+    ] {
+        assert!(db
+            .notice_peer(account, own, platform, short)
+            .unwrap()
+            .is_none());
+    }
+    for peer in ["", "self", "fallback_unknown"] {
+        db.lock()
+            .unwrap()
+            .execute("UPDATE conversations SET peer=?1", [peer])
+            .unwrap();
+        assert!(db
+            .notice_peer("a", "self", "platform-route", short)
+            .unwrap()
+            .is_none());
+    }
+}

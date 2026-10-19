@@ -33,6 +33,14 @@ pub fn router(broker: Arc<Broker>, token: String) -> Router {
             post(rollback_component).options(options),
         )
         .route(
+            "/api/client/v1/douyin/quick-auth/component/repair",
+            post(repair_component).options(options),
+        )
+        .route(
+            "/api/client/v1/douyin/quick-auth/component/uninstall",
+            post(uninstall_component).options(options),
+        )
+        .route(
             "/api/client/v1/douyin/quick-auth/start",
             post(start).options(options),
         )
@@ -94,6 +102,24 @@ async fn rollback_component(State(broker): State<Arc<Broker>>) -> Response {
             .rollback_component()
             .await
             .and_then(|view| serde_json::to_value(view).map_err(Into::into)),
+    )
+}
+
+async fn repair_component(State(broker): State<Arc<Broker>>) -> Response {
+    result(
+        broker
+            .repair_component()
+            .await
+            .and_then(|v| serde_json::to_value(v).map_err(Into::into)),
+    )
+}
+
+async fn uninstall_component(State(broker): State<Arc<Broker>>) -> Response {
+    result(
+        broker
+            .uninstall_component()
+            .await
+            .and_then(|v| serde_json::to_value(v).map_err(Into::into)),
     )
 }
 

@@ -367,6 +367,17 @@ def get_activation_by_refresh_token(activation_id: str, refresh_token: str) -> L
     return activation
 
 
+def _reported_device_name(machine_meta) -> Optional[str]:
+    """Bound display metadata without letting absent/legacy reports erase names."""
+    raw = machine_meta.get("device_name") if isinstance(machine_meta, dict) else None
+    if not isinstance(raw, str):
+        return None
+    name = "".join(char for char in raw if char.isprintable()).strip()[:128]
+    if not name or name.lower() in {"本地设备", "localhost", "localhost.localdomain", "unknown"}:
+        return None
+    return name
+
+
 @transaction.atomic
 def check_in_activation(
     *,
@@ -426,11 +437,19 @@ def check_in_activation(
 
     device = activation.client_device
     device.last_seen_at = now
+    update_fields = ["last_seen_at", "app_version", "machine_meta", "sys_update_datetime"]
+    reported_name = _reported_device_name(machine_meta)
+    previous_report = _reported_device_name(device.machine_meta)
+    current_name = (device.device_name or "").strip()
+    # Refresh generic/automatically reported labels, not an administrator's custom name.
+    if reported_name and (current_name in {"", "本地设备"} or current_name == previous_report):
+        device.device_name = reported_name
+        update_fields.append("device_name")
     if app_version:
         device.app_version = app_version
     if machine_meta:
         device.machine_meta = machine_meta
-    device.save(update_fields=["last_seen_at", "app_version", "machine_meta", "sys_update_datetime"])
+    device.save(update_fields=update_fields)
 
     license_key.last_check_in_at = now
     license_key.save(update_fields=["last_check_in_at", "sys_update_datetime"])

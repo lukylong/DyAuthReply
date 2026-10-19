@@ -29,6 +29,24 @@ struct InstallSpec {
 /// # Errors
 /// Rejects unverified archives, unsafe entries and failed publication.
 pub async fn install_latest(root: &Path, progress: Progress) -> Result<ResolvedComponent> {
+    install(root, progress, false).await
+}
+
+/// Re-downloads even the same version to repair missing libraries/resources.
+pub async fn repair_latest(root: &Path, progress: Progress) -> Result<ResolvedComponent> {
+    install(root, progress, true).await
+}
+
+fn reusable(root: &Path, version: &str, force: bool) -> Option<ResolvedComponent> {
+    if force {
+        return None;
+    }
+    component::resolve(root)
+        .ok()
+        .filter(|current| current.view.source == "managed" && current.view.version == version)
+}
+
+async fn install(root: &Path, progress: Progress, force: bool) -> Result<ResolvedComponent> {
     let (platform, executable_inside) = platform_contract()?;
     let pinned = sources::pinned(platform)?;
     let mut spec = InstallSpec {
@@ -36,11 +54,9 @@ pub async fn install_latest(root: &Path, progress: Progress) -> Result<ResolvedC
         url: String::new(),
         executable_inside,
     };
-    if let Ok(current) = component::resolve(root) {
-        if current.view.source == "managed" && current.view.version == spec.version {
-            progress(1, 1);
-            return Ok(current);
-        }
+    if let Some(current) = reusable(root, &spec.version, force) {
+        progress(1, 1);
+        return Ok(current);
     }
     let component = root.join("components/chromium");
     std::fs::create_dir_all(&component)?;
@@ -79,6 +95,36 @@ fn cleanup_stages(component: &Path) -> Result<()> {
         {
             std::fs::remove_dir_all(entry.path())?;
         }
+    }
+    Ok(())
+}
+
+/// Removes only the managed component, never profiles, credentials or account data.
+pub fn uninstall(root: &Path) -> Result<()> {
+    let parent = root.join("components");
+    let component = parent.join("chromium");
+    for path in [&parent, &component] {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) => anyhow::ensure!(
+                meta.is_dir() && !meta.file_type().is_symlink(),
+                "内置浏览器目录异常，未执行卸载"
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        }
+    }
+    // Rename first so a locked Windows executable cannot cause a partial walk
+    // of the live installation. Restore the directory on a deletion error.
+    let removed = parent.join(format!(".chromium-remove-{}", uuid::Uuid::new_v4()));
+    std::fs::rename(&component, &removed)
+        .context("内置浏览器仍被占用，请关闭快捷登录窗口后重试")?;
+    if let Err(error) = std::fs::remove_dir_all(&removed) {
+        let restored = std::fs::rename(&removed, &component).is_ok();
+        anyhow::bail!(
+            "内置浏览器卸载未完成（系统错误 {:?}，目录恢复={}），请关闭浏览器后重试",
+            error.raw_os_error(),
+            restored
+        );
     }
     Ok(())
 }
@@ -142,12 +188,15 @@ fn publish(
     let component = root.join("components/chromium");
     let versions = component.join("versions");
     std::fs::create_dir_all(&versions)?;
-    let directory = format!("{}-{}", spec.version, component::target());
+    // A same-version repair must not overwrite files selected by current/previous.
+    let directory = format!(
+        "{}-{}-{}",
+        spec.version,
+        component::target(),
+        uuid::Uuid::new_v4()
+    );
     anyhow::ensure!(valid_directory(&directory), "快捷登录组件目录名无效");
     let final_root = versions.join(&directory);
-    if final_root.exists() {
-        std::fs::remove_dir_all(&final_root)?;
-    }
     std::fs::rename(&extracted, &final_root)?;
     let executable_relative = Path::new("versions").join(&directory).join(inside);
     let executable_sha256 = file_digest(&component.join(&executable_relative))?;
@@ -160,7 +209,7 @@ fn publish(
         archive_sha256,
         source_url: spec.url.clone(),
     };
-    publish_manifest(&component, &manifest)?;
+    publish_manifest(root, &component, &manifest)?;
     let resolved = component::resolve(root)?;
     prune_versions(root)?;
     Ok(resolved)
@@ -254,13 +303,16 @@ fn safe_link(relative: &Path, target: &Path) -> bool {
     true
 }
 
-fn publish_manifest(component: &Path, manifest: &Manifest) -> Result<()> {
+fn publish_manifest(root: &Path, component: &Path, manifest: &Manifest) -> Result<()> {
     let next = component.join("current.next.json");
     atomic_write(&next, &serde_json::to_vec_pretty(manifest)?)?;
     let current = component.join("current.json");
     let previous = component.join("previous.json");
-    if current.is_file() {
+    if component::managed_from(root, &current).is_ok() {
         std::fs::copy(&current, &previous)?;
+    }
+    if previous.exists() && component::managed_from(root, &previous).is_err() {
+        std::fs::remove_file(&previous)?;
     }
     replace(&next, &current)
 }
@@ -485,6 +537,140 @@ mod tests {
                 .unwrap()
                 .count(),
             2
+        );
+    }
+    #[test]
+    fn browser_management_repair_preserves_previous_same_version() {
+        let root = tempfile::tempdir().unwrap();
+        let mut installed = Vec::new();
+        for body in [b"old-browser".as_slice(), b"new-browser".as_slice()] {
+            let stage = root.path().join(format!("stage-{}", installed.len()));
+            std::fs::create_dir_all(&stage).unwrap();
+            let archive = stage.join("test.zip");
+            let mut zip = zip::ZipWriter::new(File::create(&archive).unwrap());
+            zip.start_file(
+                "browser",
+                SimpleFileOptions::default().unix_permissions(0o755),
+            )
+            .unwrap();
+            zip.write_all(body).unwrap();
+            zip.finish().unwrap();
+            let spec = InstallSpec {
+                version: "1.0.0".into(),
+                url: "https://fixture.invalid/browser.zip".into(),
+                executable_inside: "browser",
+            };
+            installed.push(
+                publish(
+                    root.path(),
+                    &stage,
+                    &archive,
+                    &spec,
+                    file_digest(&archive).unwrap(),
+                )
+                .unwrap(),
+            );
+        }
+        assert_ne!(installed[0].executable, installed[1].executable);
+        assert_eq!(
+            std::fs::read(&installed[0].executable).unwrap(),
+            b"old-browser"
+        );
+        assert_eq!(
+            std::fs::read(rollback(root.path()).unwrap().executable).unwrap(),
+            b"old-browser"
+        );
+    }
+    #[test]
+    fn browser_management_uninstall_preserves_login_profiles_and_business_data() {
+        let root = tempfile::tempdir().unwrap();
+        let preserve = [
+            "quick-auth/profiles/account/cookies",
+            "accounts.sqlite3",
+            "business.sqlite3",
+            "credentials-v1/secret",
+            "components/other/keep",
+        ];
+        for path in preserve {
+            let p = root.path().join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"keep-exactly").unwrap();
+        }
+        let component = root.path().join("components/chromium");
+        std::fs::create_dir_all(component.join("versions/old")).unwrap();
+        for name in ["current.json", "previous.json", "versions/old/browser"] {
+            std::fs::write(component.join(name), b"component").unwrap();
+        }
+        uninstall(root.path()).unwrap();
+        assert!(!component.exists());
+        for path in preserve {
+            assert_eq!(
+                std::fs::read(root.path().join(path)).unwrap(),
+                b"keep-exactly"
+            );
+        }
+        uninstall(root.path()).unwrap();
+        assert!(!component.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn browser_management_uninstall_refuses_symlinked_parent_or_component() {
+        for parent in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::write(outside.path().join("keep"), b"untouched").unwrap();
+            let link = if parent {
+                root.path().join("components")
+            } else {
+                std::fs::create_dir(root.path().join("components")).unwrap();
+                root.path().join("components/chromium")
+            };
+            std::os::unix::fs::symlink(outside.path(), link).unwrap();
+            assert!(uninstall(root.path()).is_err());
+            assert_eq!(
+                std::fs::read(outside.path().join("keep")).unwrap(),
+                b"untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_management_repair_replaces_corrupt_manifest_and_never_reuses_same_version() {
+        let root = tempfile::tempdir().unwrap();
+        let component = root.path().join("components/chromium");
+        std::fs::create_dir_all(&component).unwrap();
+        std::fs::write(component.join("current.json"), b"broken-json").unwrap();
+        std::fs::write(component.join("previous.json"), b"also-broken").unwrap();
+        let stage = root.path().join("stage");
+        std::fs::create_dir(&stage).unwrap();
+        let archive = stage.join("archive.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&archive).unwrap());
+        zip.start_file("browser", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"repaired").unwrap();
+        zip.finish().unwrap();
+        let spec = InstallSpec {
+            version: "1.0.0".into(),
+            url: "https://fixture.invalid/browser.zip".into(),
+            executable_inside: "browser",
+        };
+        let resolved = publish(
+            root.path(),
+            &stage,
+            &archive,
+            &spec,
+            file_digest(&archive).unwrap(),
+        )
+        .unwrap();
+        assert!(reusable(root.path(), "1.0.0", false).is_some());
+        assert!(reusable(root.path(), "1.0.0", true).is_none());
+        assert!(!component.join("previous.json").exists());
+        std::fs::write(&archive, b"invalid archive").unwrap();
+        assert!(publish(root.path(), &stage, &archive, &spec, "0".repeat(64)).is_err());
+        assert_eq!(
+            component::resolve(root.path()).unwrap().executable,
+            resolved.executable
         );
     }
 }

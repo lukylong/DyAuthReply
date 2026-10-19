@@ -6,7 +6,7 @@ use super::{
 use crate::{
     runtime::{
         inbound::InboundEvent,
-        inbound_policy::{receipt_eligibility, Eligibility},
+        inbound_policy::{is_mutual_follow_notice, receipt_eligibility, Eligibility},
         rules::{MatchInput, ReplyPlan, RuleEngine},
     },
     store::{
@@ -238,6 +238,57 @@ impl PlanPass<'_> {
         }
         Ok(())
     }
+    fn decision(&self, receipt: &InboundReceipt, event: &InboundEvent) -> Result<Eligibility> {
+        let decision = receipt_eligibility(
+            event,
+            receipt.received_at_ms,
+            self.own,
+            self.cutoff,
+            u64::try_from(self.now)? * 1000,
+        );
+        Ok(
+            if decision == Eligibility::Candidate
+                && super::known_notice_echo(self.store, &self.lease.account_id, self.own, event)?
+            {
+                Eligibility::IgnoreSelf
+            } else {
+                decision
+            },
+        )
+    }
+    fn resolve_peer(
+        &self,
+        receipt: &InboundReceipt,
+        event: &InboundEvent,
+    ) -> Result<Option<String>> {
+        if event.sender_sec_uid != self.own {
+            return Ok(Some(event.sender_sec_uid.clone()));
+        }
+        let peer = self
+            .workbench
+            .map(|w| {
+                w.notice_peer(
+                    &self.lease.account_id,
+                    self.own,
+                    &event.conversation_id,
+                    &event.conversation_short_id,
+                )
+            })
+            .transpose()?
+            .flatten();
+        if peer.is_none() {
+            self.store.observe_audit_wait(
+                self.lease,
+                key(receipt),
+                crate::store::DecisionAudit {
+                    result: "pending",
+                    reason: "互关通知的对方身份尚未就绪，暂缓处理",
+                    rule_id: None,
+                },
+            )?;
+        }
+        Ok(peer)
+    }
     fn run(&self) -> Result<Vec<String>> {
         let mut batches = Vec::new();
         for receipt in self.store.pending_inbound_receipts(self.lease, 128)? {
@@ -247,17 +298,15 @@ impl PlanPass<'_> {
             let Ok(event) = serde_json::from_slice::<InboundEvent>(payload) else {
                 continue;
             };
-            let decision = receipt_eligibility(
-                &event,
-                receipt.received_at_ms,
-                self.own,
-                self.cutoff,
-                u64::try_from(self.now)? * 1000,
-            );
+            let decision = self.decision(&receipt, &event)?;
             if decision != Eligibility::Candidate {
                 self.settle_ineligible(&receipt, decision)?;
                 continue;
             }
+            let mutual_follow = is_mutual_follow_notice(&event);
+            let Some(peer) = self.resolve_peer(&receipt, &event)? else {
+                continue;
+            };
             if self.policy.silent(self.engine.timezone_name(), self.now)? {
                 self.store.observe_audit_wait(
                     self.lease,
@@ -288,7 +337,7 @@ impl PlanPass<'_> {
                 continue;
             }
             let text = event.text.clone().unwrap_or_default();
-            let plan = if self.policy.blocked_peers.contains(&event.sender_sec_uid)
+            let plan = if self.policy.blocked_peers.contains(&peer)
                 || self
                     .policy
                     .blocked_content_keywords
@@ -324,7 +373,7 @@ impl PlanPass<'_> {
                 continue;
             };
             let rule_id = plan.rule_id.clone();
-            let planned = self.claim(&receipt, event, plan)?;
+            let planned = self.claim(&receipt, event, plan, peer, mutual_follow)?;
             log_planned(&self.lease.account_id, &rule_id, &planned);
             match planned {
                 Planned::Queued(id) => batches.push(id),
@@ -339,6 +388,8 @@ impl PlanPass<'_> {
         receipt: &InboundReceipt,
         event: InboundEvent,
         plan: ReplyPlan,
+        peer: String,
+        mutual_follow: bool,
     ) -> Result<Planned> {
         let route = Route {
             version: 2,
@@ -360,12 +411,16 @@ impl PlanPass<'_> {
         let guard = GuardPolicy {
             rule_id: plan.rule_id,
             conversation_id: event.conversation_id,
-            peer_id: event.sender_sec_uid,
+            peer_id: peer,
             timezone: self.engine.timezone_name().into(),
             daily_quota: self.policy.daily_quota,
-            cooldown_ms: u64::from(plan.cooldown_seconds) * 1000,
+            cooldown_ms: if mutual_follow {
+                0
+            } else {
+                u64::from(plan.cooldown_seconds) * 1000
+            },
             minimum_interval_ms: self.policy.interval_ms(&event.server_message_id),
-            daily_peer_limit: self.policy.daily_peer_limit,
+            daily_peer_limit: !mutual_follow && self.policy.daily_peer_limit,
         };
         match self.store.consume_inbound_guarded(
             self.lease,
@@ -374,6 +429,7 @@ impl PlanPass<'_> {
                 response_id: &route,
                 segments: &segments,
                 pending_batch_limit: 32,
+                mutual_follow_at_us: mutual_follow.then_some(event.create_time_us),
             },
             &guard,
         ) {
@@ -453,7 +509,7 @@ mod tests {
         }
     }
 
-    fn policy() -> AutomationPolicy {
+    pub(super) fn policy() -> AutomationPolicy {
         AutomationPolicy {
             account_id: "account".into(),
             enabled: true,
@@ -689,3 +745,7 @@ mod tests {
         assert_eq!(store.audit_changes(0, 100).unwrap().records.len(), 1);
     }
 }
+
+#[cfg(test)]
+#[path = "mutual_follow_tests.rs"]
+mod mutual_follow_tests;

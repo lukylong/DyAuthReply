@@ -561,6 +561,7 @@ export interface QuickAuthComponent {
   total_bytes: number;
   progress_percent?: number | null;
   can_rollback: boolean;
+  managed_installed?: boolean;
 }
 
 export interface QuickAuthCompleteness {
@@ -612,6 +613,18 @@ export function rollbackQuickAuthComponent() {
   return request<QuickAuthComponent>('/douyin/quick-auth/component/rollback', {
     method: 'POST',
     body: '{}',
+  });
+}
+
+export function repairQuickAuthComponent() {
+  return request<QuickAuthComponent>('/douyin/quick-auth/component/repair', {
+    method: 'POST', body: '{}',
+  });
+}
+
+export function uninstallQuickAuthComponent() {
+  return request<QuickAuthComponent>('/douyin/quick-auth/component/uninstall', {
+    method: 'POST', body: '{}',
   });
 }
 

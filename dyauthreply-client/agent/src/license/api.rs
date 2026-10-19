@@ -87,7 +87,7 @@ async fn health() -> Json<Value> {
 async fn bootstrap(State(m): State<Arc<NativeLicense>>) -> Json<Value> {
     let s = m.status();
     Json(
-        json!({"user_id":s["device_fingerprint"],"username":"本地设备","data_dir":m.state_file().parent(),"http_port":18765,"api_prefix":"/api/client/v1","license":s}),
+        json!({"user_id":s["device_fingerprint"],"username":s["device_name"],"data_dir":m.state_file().parent(),"http_port":18765,"api_prefix":"/api/client/v1","license":s}),
     )
 }
 

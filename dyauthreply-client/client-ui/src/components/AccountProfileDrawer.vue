@@ -1,17 +1,17 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { Heart } from 'lucide-vue-next';
 import {
   getAccountWorks,
   getProfileStats,
   openExternalUrl,
   patchAccount,
-  statusLabel,
   type DouyinAccount,
   type ProfileStats,
   type WorkItem,
 } from '../api/client';
 import { useClientLicense } from '../composables/useClientLicense';
+import { accountStatusPresentation, accountStatusDetails, accountStatusTechnicalInfo } from '../utils/accountStatus';
 
 const props = defineProps<{
   open: boolean;
@@ -19,6 +19,9 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{ close: [] }>();
+const statusView = computed(() => accountStatusPresentation(props.account));
+const statusDetails = computed(() => accountStatusDetails(props.account));
+const technicalInfo = computed(() => accountStatusTechnicalInfo(props.account));
 
 const { licenseStatus: license } = useClientLicense();
 
@@ -178,8 +181,8 @@ watch(
               <span v-if="account?.unique_id || stats?.unique_id" class="uid">
                 抖音号：{{ account?.unique_id || stats?.unique_id }}
               </span>
-              <span class="badge" :class="{ success: account?.status === 1 }">
-                {{ statusLabel(account?.status ?? 0) }}
+              <span class="badge" :class="statusView.tone">
+                {{ statusView.label }}
               </span>
             </div>
           </div>
@@ -187,6 +190,17 @@ watch(
         </header>
 
         <div class="drawer-body">
+          <section class="status-details" aria-labelledby="account-status-title">
+            <h4 id="account-status-title" class="section-title">账号状态</h4>
+            <p class="status-description">{{ statusView.description }}</p>
+            <dl>
+              <div v-for="item in statusDetails" :key="item.label"><dt>{{ item.label }}</dt><dd>{{ item.value }}</dd></div>
+            </dl>
+            <details v-if="technicalInfo" class="technical-info">
+              <summary>查看技术信息</summary>
+              <pre>{{ technicalInfo }}</pre>
+            </details>
+          </section>
           <!-- 统计 -->
           <section class="stats-card">
             <div class="stats-grid">
@@ -387,6 +401,17 @@ watch(
   border-color: rgba(5, 150, 105, 0.2);
   color: var(--success);
 }
+
+.badge.warning { background: var(--warning-soft); color: var(--warning); border-color: rgba(217, 119, 6, 0.2); }
+.status-details { padding: 18px; border: 1px solid var(--border-subtle); border-radius: 16px; background: var(--bg-app); }
+.status-description { color: var(--text-secondary); font-size: .8rem; line-height: 1.7; margin: 10px 0 16px; }
+.status-details dl { display: grid; gap: 12px; margin: 0; }
+.status-details dl > div { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 12px; font-size: .8rem; line-height: 1.6; }
+.status-details dt { color: var(--text-muted); }
+.status-details dd { color: var(--text-primary); margin: 0; overflow-wrap: anywhere; }
+.technical-info { border-top: 1px solid var(--border-subtle); margin-top: 16px; padding-top: 12px; font-size: .75rem; color: var(--text-muted); }
+.technical-info summary { cursor: pointer; }
+.technical-info pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; line-height: 1.6; }
 
 .drawer-close {
   border: 1px solid var(--border-subtle);

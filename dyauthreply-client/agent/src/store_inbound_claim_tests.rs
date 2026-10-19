@@ -61,6 +61,7 @@ fn plan(segments: &[OutboundSegmentDraft]) -> InboundReplyPlan<'_> {
         response_id: "route-v1",
         segments,
         pending_batch_limit: 32,
+        mutual_follow_at_us: None,
     }
 }
 #[test]

@@ -44,6 +44,8 @@ pub use send_receipts::{ReceiptReconciliation, SentReceiptEvidence};
 #[path = "store_guards.rs"]
 mod guards;
 pub use guards::GuardPolicy;
+#[path = "store_mutual_follow.rs"]
+mod mutual_follow;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const LEASE_TRANSFER_UNCERTAIN_REASON: &str =
     "lease epoch changed while the previous send outcome was unresolved";
@@ -548,6 +550,8 @@ pub struct InboundReplyPlan<'a> {
     pub response_id: &'a str,
     pub segments: &'a [OutboundSegmentDraft],
     pub pending_batch_limit: u32,
+    /// Validated platform notice time; coalesces paired notices in the claim transaction.
+    pub mutual_follow_at_us: Option<u64>,
 }
 pub struct InboundConsumeOutcome {
     pub applied: bool,
@@ -825,6 +829,7 @@ impl CoreStore {
             validate_or_migrate_existing_database(&mut connection, data_dir)?
         };
         protocol_state::migrate_browser_identity_v2(&connection)?;
+        mutual_follow::ensure_schema(&connection)?;
         if let Some(marker_database_id) = marker_database_id {
             if marker_database_id != database_id {
                 return Err(StoreError::DatabaseIdentityMismatch {
@@ -1465,6 +1470,11 @@ impl CoreStore {
             return Err(StoreError::InvalidInput("invalid canonical inbound ID"));
         }
         if let Some(plan) = reply {
+            if plan.mutual_follow_at_us.is_some() && policy.is_none() {
+                return Err(StoreError::InvalidInput(
+                    "mutual-follow requires guarded reply",
+                ));
+            }
             if plan.response_id.is_empty()
                 || plan.segments.is_empty()
                 || plan.segments.len() > 32
@@ -1509,6 +1519,7 @@ impl CoreStore {
             params![lease.account_id,DECISION_STREAM,key.event_id],|_|Ok(())).optional()?.is_some();
         let applied = !decided && receipt.status == InboundStatus::Pending;
         if applied {
+            let reply = mutual_follow::coalesce(&transaction, lease, &receipt, reply, policy, now)?;
             if let Some(audit) = audit {
                 audit_feed::decision(&transaction, lease, receipt.payload.as_deref(), audit, now)?;
             }
@@ -1531,6 +1542,9 @@ impl CoreStore {
             }
             if let (Some(policy), Some(batch)) = (policy, batch.as_ref()) {
                 guards::reserve(&transaction, batch, policy, now)?;
+                if let Some(at) = reply.and_then(|p| p.mutual_follow_at_us) {
+                    mutual_follow::record(&transaction, lease, policy, at, &batch.id, now)?;
+                }
             }
             transaction.execute("INSERT INTO inbound_receipts(account_id,stream,stream_generation,event_id,page_checkpoint,payload,payload_hash,status,
                 fence_epoch,received_at_ms,processed_at_ms,processed_fence_epoch) VALUES(?1,?2,1,?3,0,NULL,?4,'processed',?5,?6,?6,?5)",
@@ -1541,6 +1555,30 @@ impl CoreStore {
             params![lease.account_id,key.stream,key.generation,key.event_id,now,lease.fence_epoch])?;
         transaction.commit()?;
         Ok(InboundConsumeOutcome { applied, batch })
+    }
+
+    /// Checks account-bound local send identity without treating every platform
+    /// client ID as our own (system notices carry such IDs too).
+    /// # Errors
+    /// Returns storage errors rather than guessing whether a packet is our echo.
+    pub fn has_outbound_client_message(
+        &self,
+        account: &str,
+        client_id: &str,
+    ) -> Result<bool, StoreError> {
+        if client_id.is_empty() {
+            return Ok(false);
+        }
+        Ok(self
+            .lock_connection()?
+            .query_row(
+                "SELECT 1 FROM outbound_segments s JOIN outbound_batches b ON b.id=s.batch_id
+             WHERE b.account_id=?1 AND s.client_message_id=?2 LIMIT 1",
+                params![account, client_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     /// Claims one trigger and creates its durable outbound plan exactly once.

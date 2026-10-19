@@ -1,4 +1,5 @@
-//! Disposable, bounded chat projection. Never used for send decisions or leases.
+//! Disposable, bounded chat projection. Send claims and leases live in `CoreStore`;
+//! cached peer metadata may resolve a notice's recipient, never authorize a send.
 use crate::runtime::inbound::InboundEvent;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -234,6 +235,26 @@ impl Workbench {
             "conversation peer scope unavailable"
         );
         Ok(peer)
+    }
+    /// Resolves an own-side notice through an existing account-bound conversation.
+    /// Missing, self, fallback or mismatched routes stay pending, never guessed.
+    pub(crate) fn notice_peer(
+        &self,
+        account: &str,
+        own: &str,
+        platform: &str,
+        short_id: &str,
+    ) -> Result<Option<String>> {
+        let peer: Option<String> = self
+            .lock()?
+            .query_row(
+                "SELECT c.peer FROM conversations c JOIN accounts a ON a.id=c.account_id
+             WHERE c.account_id=?1 AND a.sec_uid=?2 AND c.platform_id=?3 AND c.short_id=?4",
+                params![account, own, platform, short_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(peer.filter(|p| valid_peer(p) && p != own))
     }
     /// Claims up to `limit` conversations whose peer is known but whose public profile is
     /// missing, recording the attempt so each is retried at most every

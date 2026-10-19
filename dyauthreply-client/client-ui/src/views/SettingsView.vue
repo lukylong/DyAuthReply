@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, watch } from "vue";
+import { useRoute } from "vue-router";
 import {
   Bell,
   RefreshCw,
@@ -9,6 +10,7 @@ import {
   Gauge,
   Download,
   Activity,
+  Globe,
 } from "lucide-vue-next";
 import {
   useClientSettings,
@@ -16,6 +18,7 @@ import {
 } from "../composables/useClientSettings";
 import { useVersionUpdate } from "../composables/useVersionUpdate";
 import CapacityPanel from "../components/CapacityPanel.vue";
+import BrowserComponentPanel from "../components/BrowserComponentPanel.vue";
 import {
   openExternalUrl,
   getDiagnostics,
@@ -48,9 +51,12 @@ function resetMirrors() {
   mirrorsText.value = DEFAULT_UPDATE_MIRRORS.join("\n");
 }
 
-const activeTab = ref<"capacity" | "version" | "notification" | "runtime" | "diagnostics">(
+const activeTab = ref<"capacity" | "version" | "notification" | "runtime" | "diagnostics" | "browser">(
   "capacity",
 );
+
+const route = useRoute();
+watch(() => route.query.tab, (tab) => { if (tab === "browser") activeTab.value = "browser"; }, { immediate: true });
 
 // 运行设置：开机自启状态反馈
 const autoStartBusy = ref(false);
@@ -235,6 +241,9 @@ const updateStatusType = computed<"info" | "error" | "success" | "update">(
         >
           <Zap :size="18" /><span>启动与运行<small>系统启动行为</small></span>
         </button>
+        <button :class="{ active: activeTab === 'browser' }" @click="activeTab = 'browser'">
+          <Globe :size="18" /><span>内置浏览器<small>安装、修复与卸载</small></span>
+        </button>
         <button
           :class="{ active: activeTab === 'notification' }"
           @click="activeTab = 'notification'"
@@ -263,6 +272,7 @@ const updateStatusType = computed<"info" | "error" | "success" | "update">(
       </nav>
       <div class="settings-main">
         <CapacityPanel v-if="activeTab === 'capacity'" editable />
+        <BrowserComponentPanel v-if="activeTab === 'browser'" />
         <section v-if="activeTab === 'runtime'" class="settings-section">
           <header>
             <h2>启动与运行</h2>

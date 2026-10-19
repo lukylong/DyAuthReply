@@ -5,6 +5,32 @@ use serde::Serialize;
 
 const MAX_REPLY_AGE_US: u64 = 5 * 60 * 1_000_000;
 const MAX_FUTURE_SKEW_US: u64 = 30 * 1_000_000;
+
+/// Platform-generated mutual-follow notices are ordinary direct text packets,
+/// sometimes attributed to ourselves. Do not exempt arbitrary text mentioning
+/// following or control packets. Notices also have client IDs; the caller checks
+/// the durable outbox to distinguish our actual sends from platform notices.
+pub(crate) fn is_mutual_follow_notice(event: &InboundEvent) -> bool {
+    if event.message_type != 1 {
+        return false;
+    }
+    let Ok(serde_json::Value::Object(content)) = serde_json::from_str(&event.content_json) else {
+        return false;
+    };
+    if content.contains_key("read_index") || content.contains_key("command_type") {
+        return false;
+    }
+    let Some(text) = content.get("text").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    if event.text.as_deref() != Some(text) {
+        return false;
+    }
+    matches!(
+        text.trim().trim_end_matches(['。', '！', '!', '.']),
+        "我们已互相关注，可以开始聊天了" | "我们已互相关注,可以开始聊天了"
+    )
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Eligibility {
@@ -75,7 +101,7 @@ pub fn eligibility(
     {
         return Eligibility::DeferIdentity;
     }
-    if event.sender_sec_uid == own_sec_uid {
+    if event.sender_sec_uid == own_sec_uid && !is_mutual_follow_notice(event) {
         return Eligibility::IgnoreSelf;
     }
     if live_start_us == 0
@@ -303,6 +329,119 @@ mod tests {
         assert_eq!(
             eligibility(&e, "self", START, START + 1),
             Eligibility::DeferContent
+        );
+    }
+}
+
+#[cfg(test)]
+mod mutual_follow_regression {
+    use super::*;
+    const START: u64 = 1_700_000_000_000_000;
+    fn notice(sender: &str) -> InboundEvent {
+        let text = "我们已互相关注，可以开始聊天了";
+        InboundEvent {
+            version: 1,
+            server_message_id: "9001".into(),
+            conversation_id: "0:1:100:200".into(),
+            conversation_short_id: "9002".into(),
+            sender_uid: if sender == "self" { "100" } else { "200" }.into(),
+            sender_sec_uid: sender.into(),
+            client_message_id: String::new(),
+            message_type: 1,
+            create_time_us: START + 1,
+            content_json: serde_json::json!({"text": text}).to_string(),
+            text: Some(text.into()),
+        }
+    }
+    #[test]
+    fn fresh_peer_notice_is_candidate_but_history_and_expired_are_not() {
+        let mut e = notice("peer");
+        assert_eq!(
+            eligibility(&e, "self", START, START + 2),
+            Eligibility::Candidate
+        );
+        e.create_time_us = START;
+        assert_eq!(
+            eligibility(&e, "self", START, START + 2),
+            Eligibility::IgnoreHistory
+        );
+        e.create_time_us = START + 1;
+        assert_eq!(
+            eligibility(&e, "self", START, START + 300_000_002),
+            Eligibility::IgnoreExpired
+        );
+    }
+    #[test]
+    fn legacy_outbound_follow_notice_should_reach_rule_matching() {
+        let e = notice("self");
+        assert_eq!(eligibility(&e, "self", START, START + 2), Eligibility::Candidate,
+            "legacy mutual-follow fallback missing: own-side follow notice is discarded before rule matching");
+    }
+}
+
+#[cfg(test)]
+mod mutual_follow_boundaries {
+    use super::*;
+    #[test]
+    fn mutual_follow_exception_is_not_a_generic_self_echo_bypass() {
+        let start = 1_700_000_000_000_000;
+        let text = "我们已互相关注，可以开始聊天了";
+        let mut e = InboundEvent {
+            version: 1,
+            server_message_id: "1".into(),
+            conversation_id: "0:1:100:200".into(),
+            conversation_short_id: "123".into(),
+            sender_uid: "100".into(),
+            sender_sec_uid: "self".into(),
+            client_message_id: String::new(),
+            message_type: 1,
+            create_time_us: start + 1,
+            content_json: serde_json::json!({"text":text}).to_string(),
+            text: Some(text.into()),
+        };
+        assert_eq!(
+            eligibility(&e, "self", start, start + 2),
+            Eligibility::Candidate
+        );
+        e.client_message_id = "our-send-id".into();
+        assert_eq!(
+            eligibility(&e, "self", start, start + 2),
+            Eligibility::Candidate
+        );
+        e.client_message_id.clear();
+        e.content_json = serde_json::json!({"text":text,"command_type":1}).to_string();
+        assert_eq!(
+            eligibility(&e, "self", start, start + 2),
+            Eligibility::IgnoreSystem
+        );
+        for body in [
+            "请互相关注",
+            "hello",
+            "我们已互相关注，可以开始聊天了 http://example.test",
+        ] {
+            e.text = Some(body.into());
+            e.content_json = serde_json::json!({"text":body}).to_string();
+            assert_eq!(
+                eligibility(&e, "self", start, start + 2),
+                Eligibility::IgnoreSelf
+            );
+        }
+        e.text = Some(text.into());
+        e.content_json = serde_json::json!({"text":text}).to_string();
+        e.create_time_us = start;
+        assert_eq!(
+            eligibility(&e, "self", start, start + 2),
+            Eligibility::IgnoreHistory
+        );
+        e.create_time_us = start + 1;
+        assert_eq!(
+            eligibility(&e, "self", start, start + MAX_REPLY_AGE_US + 2),
+            Eligibility::IgnoreExpired
+        );
+        e.sender_sec_uid.clear();
+        assert_eq!(
+            eligibility(&e, "self", start, start + 2),
+            Eligibility::DeferIdentity
         );
     }
 }

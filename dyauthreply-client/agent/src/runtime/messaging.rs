@@ -2077,6 +2077,17 @@ fn send_block_reason(state: &crate::state::AccountRuntimeState) -> String {
         SendCapability::Unknown | SendCapability::Sendable => "账号当前状态禁止发送".into(),
     }
 }
+fn known_notice_echo(
+    store: &CoreStore,
+    account: &str,
+    own: &str,
+    event: &super::inbound::InboundEvent,
+) -> Result<bool> {
+    Ok(event.sender_sec_uid == own
+        && super::inbound_policy::is_mutual_follow_notice(event)
+        && store.has_outbound_client_message(account, &event.client_message_id)?)
+}
+
 fn filter_pending(
     store: &CoreStore,
     lease: &crate::store::LeaseToken,
@@ -2118,13 +2129,18 @@ fn filter_pending(
             summary.deferred += 1;
             continue;
         };
-        let decision = super::inbound_policy::receipt_eligibility(
+        let mut decision = super::inbound_policy::receipt_eligibility(
             &event,
             receipt.received_at_ms,
             own_sec_uid,
             live_start,
             now_us,
         );
+        if decision == super::inbound_policy::Eligibility::Candidate
+            && known_notice_echo(store, &lease.account_id, own_sec_uid, &event)?
+        {
+            decision = super::inbound_policy::Eligibility::IgnoreSelf;
+        }
         if decision.is_terminal_ignore() {
             store.consume_inbound(
                 lease,

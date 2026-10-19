@@ -52,12 +52,20 @@ struct Fake {
     calls: AtomicUsize,
     rotations: AtomicUsize,
     response: Mutex<Option<Value>>,
+    request: Mutex<Option<Value>>,
 }
 async fn checkin(
     State(fake): State<Arc<Fake>>,
     Json(request): Json<Value>,
 ) -> axum::response::Response {
     fake.calls.fetch_add(1, Ordering::SeqCst);
+    let mut original = fake.request.lock().await;
+    if let Some(expected) = original.as_ref() {
+        assert_eq!(expected, &request);
+    } else {
+        *original = Some(request.clone());
+    }
+    drop(original);
     let mut cached = fake.response.lock().await;
     if let Some(value) = &*cached {
         assert_eq!(value["request_id"], request["request_id"]);
@@ -250,4 +258,42 @@ fn expired_verified_license_keeps_dormant_recovery_configuration() {
     revoked["local_state"] = json!("revoked");
     manager.cache(revoked);
     assert!(manager.hosted_settings(&accounts).unwrap().is_none());
+}
+
+#[test]
+fn device_name_migration_preserves_signed_state_and_pending_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    let mut cached = initial();
+    cached["device_name"] = json!("本地设备");
+    state::save(&path, &cached).unwrap();
+    let pending = path.with_extension("renewal.json");
+    state::save(
+        &pending,
+        &json!({"request":{"request_id":"unchanged","machine_meta":{"runtime":"rust"}}}),
+    )
+    .unwrap();
+    let pending_before = fs::read(&pending).unwrap();
+    let manager = NativeLicense::new(LicenseConfig {
+        server_url: "http://127.0.0.1".into(),
+        public_key_pem: public_key(),
+        state_file: path.clone(),
+        api_token: "x".repeat(32),
+    })
+    .unwrap();
+    let next = state::load(&path).unwrap();
+    for field in [
+        "device_fingerprint",
+        "activation_id",
+        "activation_token",
+        "refresh_token",
+        "lease_token",
+        "lease_sequence",
+    ] {
+        assert_eq!(next[field], cached[field], "{field}");
+    }
+    assert_ne!(next["device_name"], "本地设备");
+    assert!(!string(&next, "device_name").is_empty());
+    assert_eq!(manager.status()["device_name"], next["device_name"]);
+    assert_eq!(fs::read(&pending).unwrap(), pending_before);
 }

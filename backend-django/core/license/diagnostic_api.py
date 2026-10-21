@@ -26,5 +26,5 @@ def get_diagnostic_device(request, device_id: str):
 
 @router.get("/license/diagnostics/device/{device_id}/events", response=List[DiagnosticEventOut], summary="诊断事件")
 @paginate(MyPagination)
-def list_diagnostic_events(request, device_id: str, level: str = ""):
-    return device_events(device_id, level)
+def list_diagnostic_events(request, device_id: str, level: str = "", account: str = "", trace_id: str = "", trigger_type: str = ""):
+    return device_events(device_id, level, account, trace_id, trigger_type)

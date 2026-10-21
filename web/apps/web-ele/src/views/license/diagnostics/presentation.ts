@@ -190,6 +190,18 @@ export function metric(value: unknown): string {
     : '—';
 }
 const messages: Record<string, string> = {
+  'account identity verification failed': '账号身份校验失败',
+  'IM session expired; login recovery required': '私信登录已失效，需要恢复登录',
+  'peer profile backfill unavailable': '联系人资料暂不可用',
+  'peer profile backfill failed': '联系人资料补全失败',
+  'native audit synchronization pending': '回复记录同步等待重试',
+  'workbench maintenance deferred': '聊天数据维护已延后',
+  'quick-auth main site waiting for UIFID; retrying':
+    '快捷登录正在等待账号信息',
+  'quick-auth main site UIFID ready': '快捷登录已获取账号信息',
+  'quick-auth main site page was hidden; restoring its window':
+    '正在恢复快捷登录窗口',
+  'quick-auth capture ready': '快捷登录资料已准备完成',
   'dy-agent runtime is ready': '客户端运行服务已就绪',
   'auto-reply dropped by cooldown or quota': '自动回复因冷却或额度限制跳过',
   'auto-reply deferred by reply guard': '自动回复暂缓，等待发送条件满足',
@@ -200,6 +212,21 @@ const messages: Record<string, string> = {
   'inbound page processed': '已完成一批消息接收处理',
   'platform request rejected': '平台拒绝了本次请求',
   'auto-reply queued': '自动回复已进入发送队列',
+  'reply batch stopped': '本批回复已停止后续发送',
+  'receive reconciliation failed': '消息补拉失败',
+  'conversation history read repair failed; serving cache':
+    '历史消息拉取失败，暂时显示缓存',
+  'hosted authorization suspended; awaiting license rotation':
+    '托管授权暂不可用，等待凭证恢复',
+  'native license renewal pending; retry retains durable request identity':
+    '客户端授权续签等待重试',
+  'remote lease release unconfirmed; awaiting server TTL':
+    '托管租约释放尚未确认',
+  'encrypted chat image unavailable': '聊天图片加载失败',
+  'quick-auth session failed': '快捷登录未完成',
+  'native send was not delivered': '本条消息未取得成功回执',
+  'platform risk control rejected the send; sending paused until recheck':
+    '平台限制发送，账号发送已暂停',
   'native send preparation failed before network attempt':
     '发送准备失败，尚未提交给平台',
   'native send completed': '客户端发送流程已结束，请核对消息回执',
@@ -207,10 +234,101 @@ const messages: Record<string, string> = {
     '账号已停止托管，其他账号不受影响',
 };
 export function eventMessage(event: DiagnosticEvent): string {
+  const fields = event.fields || {};
+  if (event.message === 'auto-reply queued') {
+    if (fields.trigger_type === 'mutual_follow')
+      return '回关自动回复已进入发送队列';
+    if (fields.trigger_type === 'message')
+      return '普通消息自动回复已进入发送队列';
+    return '自动回复已进入发送队列（触发来源未上报）';
+  }
+  if (event.message === 'account automatic policy changed') {
+    return fields.enabled === true
+      ? '自动回复配置已启用'
+      : fields.enabled === false
+        ? '自动回复配置已关闭'
+        : '自动回复配置已变更';
+  }
+  if (event.message === 'native send completed')
+    return '本条消息已取得发送成功回执';
   return messages[event.message] || event.message;
+}
+
+export function eventCategory(event: DiagnosticEvent): string {
+  const message = event.message || '';
+  if (/quick-auth/.test(message)) return '快捷登录';
+  if (/authorization|license|lease/.test(message)) return '授权与托管';
+  if (/image/.test(message)) return '图片与媒体';
+  if (/auto-reply|automatic policy/.test(message)) return '自动回复';
+  if (/send|reply batch/.test(message)) return '消息发送';
+  if (/inbound|receive|history|peer/.test(message)) return '消息接收';
+  return moduleLabel(event.target || '');
+}
+
+export function traceRef(event: DiagnosticEvent): string {
+  const value = event.fields?.trace_id;
+  return typeof value === 'string' && /^[0-9a-f]{16}$/.test(value) ? value : '';
+}
+
+export function eventAdvice(event: DiagnosticEvent): string {
+  const f = event.fields || {},
+    message = event.message || '';
+  const codes = String(f.response_codes || '');
+  if (message === 'auto-reply queued')
+    return '已建立回复任务；入队不等于发送成功。点击关联号查看同批各条消息的回执。';
+  if (message === 'account automatic policy changed')
+    return '这是已保存的开关变更；配置来源见下方，是否已生效请结合最新账号快照，不据此推断操作人。';
+  if (message === 'reply batch stopped')
+    return '该批后续消息已停止。先查看同关联号的失败或配置变更原因，不要整批重复发送。';
+  if (message === 'native send completed')
+    return '此条已取得成功回执，不代表整个批次均已送达或对方已读。请按关联号核对其余分段。';
+  if (f.classification === 'RiskControlled' || message.includes('risk control'))
+    return '当时已暂停该账号发送，接收可能仍正常。检查平台提示与最新状态；复查时间不等于保证恢复时间。';
+  if (codes.includes('business=Some(7467)'))
+    return '7467：该收件人的消息额度限制。等待对方回复或关系变化；不要按整个账号掉线处理或自动重发。';
+  if (codes.includes('business=Some(8101)'))
+    return '8101：本条发送被按业务拒绝处理。核对该段文案/链接及会话，不等于整个账号被风控，也不要只凭 HTTP 200 判断成功。';
+  if (f.classification === 'LoginExpired')
+    return '当时登录已失效，请核对该账号登录状态；历史记录不代表现在仍未恢复。';
+  if (f.classification === 'Uncertain' || f.classification === 'Inconclusive')
+    return '结果待核验，不应自动重发，先查询该条消息的回执。';
+  if (message === 'native send was not delivered')
+    return '这条发送未取得成功回执；先核对技术原文及同批其他分段，不直接判整个账号离线。';
+  if (message === 'receive reconciliation failed')
+    return f.reason === 'inbound_spool_full'
+      ? '入向缓冲已满，可能延迟处理；检查本机待处理任务与存储。此事件不代表实时接收连接一定断开。'
+      : f.reason
+        ? '消息补拉失败，查看原因码及附近授权/网络事件；不等于实时接收也全部中断。'
+        : '旧日志未上报具体失败原因，需新版客户端日志补充；不要仅据此判断账号掉线。';
+  if (message.includes('history read repair'))
+    return '本次未取到最新历史消息，暂用缓存；不表示历史数据丢失，核对接收和登录状态。';
+  if (
+    message.includes('hosted authorization') ||
+    message.includes('license renewal')
+  )
+    return '托管服务授权暂不可用，与抖音登录失效不同。核对后续续签、网络及最新租约状态，历史告警不代表持续中断。';
+  if (message.includes('lease release'))
+    return '释放请求未获得确认，系统等待租约过期；不要据此推断已出现重复发送。';
+  if (message === 'encrypted chat image unavailable')
+    return '图片获取或解密失败，可能影响图片显示；不等于自动回复全部停止。';
+  if (message === 'quick-auth session failed')
+    return String(f.error || '').includes('登录窗口已关闭')
+      ? '登录窗口已关闭，本次登录未完成；若是主动关闭可忽略，不据此判断组件损坏。'
+      : '检查退出原因、系统兼容性与内置浏览器状态，保留登录资料后再考虑修复组件。';
+  return '';
 }
 const fieldNames: Record<string, string> = {
   account: '匿名账号',
+  trace_id: '回复关联号',
+  trigger_type: '触发类型',
+  message_source: '发送来源',
+  segment_index: '第几条',
+  segment_count: '本批总条数',
+  content_kind: '内容类型',
+  content_chars: '内容字数',
+  enabled: '当前配置',
+  previous_enabled: '变更前配置',
+  change_source: '配置来源',
   step: '处理环节',
   status: '响应状态',
   classification: '结果分类',
@@ -228,6 +346,7 @@ const fieldNames: Record<string, string> = {
   phase: '运行阶段',
   attempt: '发送尝试',
   elapsed_ms: '耗时（毫秒）',
+  recheck_minutes: '建议复查间隔（分钟）',
   count: '数量',
   version: '版本',
   body: '脱敏响应摘要',
@@ -237,6 +356,21 @@ const fieldNames: Record<string, string> = {
 };
 const values: Record<string, string> = {
   send: '发送消息',
+  mutual_follow: '回关/互关通知',
+  message: '普通入向消息',
+  automatic: '自动回复',
+  manual: '手动发送',
+  text: '文字',
+  link: '链接（平台是否渲染为卡片待核对）',
+  account_settings: '账号设置',
+  emergency_stop: '管理急停',
+  configuration: '配置变更',
+  inbound_spool_full: '入向消息缓冲已满',
+  inbound_reconcile_failed: '入向消息补拉失败',
+  DeliveredSoft: '已取得成功回执（含业务提示）',
+  LoginExpired: '登录已失效',
+  ProtocolRejected: '请求被协议层拒绝',
+  Inconclusive: '响应不足以确认结果',
   identity: '校验账号身份',
   self_profile: '获取账号资料',
   self_works: '获取主页作品',
@@ -256,13 +390,36 @@ export function eventFields(event: DiagnosticEvent): string {
     event.fields && typeof event.fields === 'object' ? event.fields : {};
   return (
     Object.entries(fields)
-      .map(
-        ([key, value]) =>
-          `${fieldNames[key] || key}：${typeof value === 'object' && value !== null ? JSON.stringify(value) : values[String(value)] || String(value ?? '—')}`,
-      )
+      .filter(([key]) => key !== 'trace_id')
+      .map(([key, value]) => {
+        let label = values[String(value)] || String(value ?? '—');
+        if (
+          (key === 'enabled' || key === 'previous_enabled') &&
+          typeof value === 'boolean'
+        )
+          label = value ? '启用' : '关闭';
+        if (typeof value === 'object' && value !== null)
+          label = JSON.stringify(value);
+        if (key === 'response_codes') {
+          const raw = String(value);
+          const http = raw.match(/http=(\d+)/)?.[1];
+          const business = raw.match(/business=Some\((-?\d+)\)/)?.[1];
+          const check = raw.match(/raw_check=Some\((-?\d+)\)/)?.[1];
+          label =
+            [
+              http && `HTTP ${http}`,
+              business && `业务码 ${business}`,
+              check && `检查码 ${check}`,
+            ]
+              .filter(Boolean)
+              .join(' / ') || '详见技术原文';
+        }
+        return `${fieldNames[key] || key}：${label}`;
+      })
       .join('；') || '无附加信息'
   );
 }
+
 export function moduleLabel(target: string): string {
   if (target.includes('protocol')) return '平台通信';
   if (target.includes('automation') || target.includes('rules'))

@@ -87,6 +87,33 @@ class ClientDiagnosticsIngestTests(TestCase):
         self.assertEqual(self.post(self.payload()).status_code, 200)
         self.assertEqual(self.post(self.payload()).status_code, 429)
 
+    def test_correlated_context_survives_ingest_and_device_scoped_filter(self):
+        from core.license.diagnostic_service import device_events
+        body = self.payload()
+        body['events'] = [{'at': client_time(), 'level': 'INFO', 'target': 'dy_agent::runtime',
+            'message': 'auto-reply queued', 'fields': {
+                'account': '0123456789ab', 'trace_id': '0123456789abcdef', 'trigger_type': 'mutual_follow',
+                'message_source': 'automatic', 'segment_index': 1, 'segment_count': 2,
+                'content_kind': 'link', 'content_chars': 90, 'reason': 'inbound_spool_full',
+                'enabled': False, 'previous_enabled': True, 'change_source': 'account_settings',
+                'batch_id': 'raw-private-id', 'text': 'private message'}}]
+        self.assertEqual(self.post(body).status_code, 200)
+        event = ClientDiagnosticEvent.objects.get(device=self.device)
+        self.assertEqual(event.fields['trace_id'], '0123456789abcdef')
+        self.assertNotIn('batch_id', event.fields)
+        self.assertNotIn('text', event.fields)
+        other = ClientDevice.objects.create(device_fingerprint='other')
+        ClientDiagnosticEvent.objects.create(device=other, occurred_at=timezone.now(), level='INFO', target='t', message='auto-reply queued', fields=event.fields)
+        self.assertEqual(device_events(str(self.device.id), account='0123456789ab', trace_id='0123456789abcdef', trigger_type='mutual_follow').count(), 1)
+        self.assertEqual(device_events(str(self.device.id), trace_id='ffffffffffffffff').count(), 0)
+
+    def test_new_context_fields_reject_arbitrary_strings_and_invalid_counts(self):
+        from core.license.diagnostic_service import _clean_fields
+        fields = _clean_fields({'trace_id':'https://secret.example/private', 'trigger_type':'private text',
+            'content_kind':'cookie', 'segment_index':-1, 'segment_count':False, 'content_chars':{},
+            'enabled':'true', 'previous_enabled':1, 'change_source':'sessionid=secret'})
+        self.assertEqual(fields, {})
+
     def test_invalid_token_blocked_device_and_oversized_batches_are_rejected(self):
         self.assertEqual(self.post(self.payload(activation_token="wrong")).status_code, 401)
         too_many = [self.payload()["events"][0]] * 501
@@ -139,3 +166,13 @@ class ClientDiagnosticsIngestTests(TestCase):
         self.assertIsNone(row['runtime_phase'])
         self.assertIsNone(row['protocol_parity'])
         self.assertIsNone(row['storage_pressure'])
+
+    def test_event_filters_validate_context_and_keep_legacy_events(self):
+        from core.license.diagnostic_service import device_events
+        from ninja.errors import HttpError
+        self.post(self.payload())
+        self.assertEqual(device_events(str(self.device.id)).count(), 1)
+        self.assertEqual(device_events(str(self.device.id), trace_id='0123456789abcdef').count(), 0)
+        for query in [{'account': 'raw-account'}, {'trace_id': '../secret'}, {'trigger_type': 'unknown'}]:
+            with self.assertRaises(HttpError):
+                device_events(str(self.device.id), **query)

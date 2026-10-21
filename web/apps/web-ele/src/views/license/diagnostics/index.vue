@@ -28,10 +28,12 @@ import {
   accountIssue,
   automaticView,
   eventFields,
+  eventAdvice,
+  eventCategory,
+  traceRef,
   eventMessage,
   formatReportedAt,
   metric,
-  moduleLabel,
   stateView,
   summarizeDevice,
 } from './presentation';
@@ -50,7 +52,12 @@ const detail = ref<DiagnosticDeviceDetail | null>(null);
 const events = ref<DiagnosticEvent[]>([]),
   eventsLoading = ref(false),
   eventError = ref('');
-const eventFilter = reactive({ level: '' });
+const eventFilter = reactive({
+  level: '',
+  account: '',
+  trace_id: '',
+  trigger_type: '',
+});
 const eventPage = reactive({ page: 1, pageSize: 20, total: 0 });
 let listRequest = 0,
   detailRequest = 0,
@@ -99,10 +106,25 @@ async function loadEvents() {
   if (!detail.value) return;
   const id = detail.value.device_id,
     request = ++eventRequest;
+  const account = eventFilter.account.trim(),
+    trace = eventFilter.trace_id.trim();
+  if (
+    (account && !/^[0-9a-f]{12}$/.test(account)) ||
+    (trace && !/^[0-9a-f]{16}$/.test(trace))
+  ) {
+    eventError.value =
+      '请输入 12 位匿名账号或 16 位回复关联号（小写十六进制）。';
+    eventsLoading.value = false;
+    events.value = [];
+    eventPage.total = 0;
+    return;
+  }
   eventsLoading.value = true;
   try {
     const res = await getDiagnosticEventsApi(id, {
-      level: eventFilter.level,
+      ...eventFilter,
+      account: eventFilter.account.trim(),
+      trace_id: eventFilter.trace_id.trim(),
       page: eventPage.page,
       pageSize: eventPage.pageSize,
     });
@@ -118,6 +140,13 @@ async function loadEvents() {
   }
 }
 async function openDevice(row: DiagnosticDevice) {
+  if (detail.value?.device_id !== row.device_id)
+    Object.assign(eventFilter, {
+      level: '',
+      account: '',
+      trace_id: '',
+      trigger_type: '',
+    });
   const request = ++detailRequest;
   ++eventRequest;
   drawerOpen.value = true;
@@ -141,6 +170,28 @@ async function openDevice(row: DiagnosticDevice) {
   } finally {
     if (request === detailRequest) detailLoading.value = false;
   }
+}
+function searchEvents() {
+  eventPage.page = 1;
+  void loadEvents();
+}
+function showTrace(row: DiagnosticEvent) {
+  Object.assign(eventFilter, {
+    level: '',
+    trigger_type: '',
+    account: String(row.fields?.account || ''),
+    trace_id: traceRef(row),
+  });
+  searchEvents();
+}
+function clearEventFilters() {
+  Object.assign(eventFilter, {
+    level: '',
+    trigger_type: '',
+    account: '',
+    trace_id: '',
+  });
+  searchEvents();
 }
 function search() {
   pagination.page = 1;
@@ -439,7 +490,36 @@ onUnmounted(() => {
                 label="告警"
                 value="WARN" /><ElOption label="运行事件" value="INFO"
             /></ElSelect>
+            <ElSelect
+              v-model="eventFilter.trigger_type"
+              placeholder="触发类型"
+              clearable
+              style="width: 170px"
+              @change="searchEvents"
+            >
+              <ElOption label="回关/互关触发" value="mutual_follow" />
+              <ElOption label="普通消息触发" value="message" />
+            </ElSelect>
+            <ElInput
+              v-model="eventFilter.account"
+              placeholder="匿名账号（12位）"
+              clearable
+              style="width: 180px"
+              @keyup.enter="searchEvents"
+            />
+            <ElInput
+              v-model="eventFilter.trace_id"
+              placeholder="回复关联号（16位）"
+              clearable
+              style="width: 220px"
+              @keyup.enter="searchEvents"
+            />
+            <ElButton @click="searchEvents">筛选事件</ElButton>
+            <ElButton @click="clearEventFilters">清空筛选</ElButton>
           </div>
+          <p class="muted">
+            触发类型筛选只显示触发事件；点击关联号查看同批发送与停止原因。旧日志未记录的来源或关联号不作推断，事件条数不等于回复成功率。
+          </p>
           <ElAlert
             v-if="eventError"
             :title="eventError"
@@ -454,22 +534,36 @@ onUnmounted(() => {
             empty-text="当前筛选范围没有诊断事件"
           >
             <ElTableColumn label="发生时间" min-width="175"
-              ><template #default="{ row }">{{
-                formatReportedAt(row.occurred_at)
-              }}</template></ElTableColumn
+              ><template #default="{ row }"
+                >{{ formatReportedAt(row.occurred_at) }}
+                <p class="muted">
+                  收到：{{ formatReportedAt(row.received_at) }}
+                </p>
+              </template></ElTableColumn
             >
             <ElTableColumn label="级别 / 模块" width="130"
               ><template #default="{ row }"
                 ><ElTag size="small" :type="levelType(row.level)">{{
                   levelLabel(row.level)
                 }}</ElTag>
-                <p>{{ moduleLabel(row.target) }}</p></template
+                <p>{{ eventCategory(row) }}</p></template
               ></ElTableColumn
             >
             <ElTableColumn label="事件说明" min-width="260"
               ><template #default="{ row }"
                 ><b>{{ eventMessage(row) }}</b>
                 <p class="muted">{{ eventFields(row) }}</p>
+                <p v-if="eventAdvice(row)" class="event-advice">
+                  {{ eventAdvice(row) }}
+                </p>
+                <ElButton
+                  v-if="traceRef(row)"
+                  link
+                  type="primary"
+                  @click="showTrace(row)"
+                  >查看整批 · {{ traceRef(row) }}</ElButton
+                >
+                <span v-else class="muted">未提供回复关联号</span>
                 <details>
                   <summary>技术原文</summary>
                   <pre class="payload">{{

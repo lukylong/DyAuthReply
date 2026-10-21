@@ -6,6 +6,7 @@ The client already redacts, but the server enforces the same allow-list so an
 old or modified client cannot store message text, identities or secrets here.
 """
 import json
+import re
 from datetime import timedelta
 from typing import Any, Dict, List
 
@@ -42,8 +43,33 @@ def _clean_value(value: Any) -> Any:
     return str(value)[:MAX_VALUE_CHARS]
 
 
+# New diagnostic context is bounded and typed; arbitrary strings never enter these keys.
+CONTEXT_ENUMS = {
+    "trigger_type": {"mutual_follow", "message"},
+    "message_source": {"automatic", "manual"},
+    "content_kind": {"text", "link"},
+    "change_source": {"account_settings", "emergency_stop", "configuration"},
+}
+CONTEXT_COUNTS = {"segment_index": (1, 10000), "segment_count": (1, 10000), "content_chars": (0, 1048576), "recheck_minutes": (0, 1440)}
+
+
 def _clean_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
-    return {key: _clean_value(value) for key, value in fields.items() if key in EVENT_FIELDS}
+    cleaned = {key: _clean_value(value) for key, value in fields.items() if key in EVENT_FIELDS}
+    for key, allowed in CONTEXT_ENUMS.items():
+        value = fields.get(key)
+        if isinstance(value, str) and value in allowed:
+            cleaned[key] = value
+    trace = fields.get("trace_id")
+    if isinstance(trace, str) and re.fullmatch(r"[0-9a-f]{16}", trace):
+        cleaned["trace_id"] = trace
+    for key, (minimum, maximum) in CONTEXT_COUNTS.items():
+        value = fields.get(key)
+        if type(value) is int and minimum <= value <= maximum:
+            cleaned[key] = value
+    for key in ("enabled", "previous_enabled"):
+        if type(fields.get(key)) is bool:
+            cleaned[key] = fields[key]
+    return cleaned
 
 
 def _server_time(value):
@@ -173,8 +199,17 @@ def device_detail(device_id: str) -> Dict[str, Any]:
     return row
 
 
-def device_events(device_id: str, level: str = ""):
+def device_events(device_id: str, level: str = "", account: str = "", trace_id: str = "", trigger_type: str = ""):
     queryset = ClientDiagnosticEvent.objects.filter(device_id=device_id)
     if level:
         queryset = queryset.filter(level=level.upper())
+    for field, value, length in (("account", account, 12), ("trace_id", trace_id, 16)):
+        if value:
+            if not re.fullmatch(r"[0-9a-f]{%d}" % length, value):
+                raise HttpError(400, "账号或关联编号格式不正确")
+            queryset = queryset.filter(**{f"fields__{field}": value})
+    if trigger_type:
+        if trigger_type not in CONTEXT_ENUMS["trigger_type"]:
+            raise HttpError(400, "触发类型不正确")
+        queryset = queryset.filter(fields__trigger_type=trigger_type)
     return queryset.order_by("-occurred_at", "-id")

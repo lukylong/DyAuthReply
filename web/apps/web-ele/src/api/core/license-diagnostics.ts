@@ -66,7 +66,14 @@ export function getDiagnosticDeviceApi(deviceId: string) {
 
 export function getDiagnosticEventsApi(
   deviceId: string,
-  params: { level?: string; page?: number; pageSize?: number },
+  params: {
+    level?: string;
+    account?: string;
+    trace_id?: string;
+    trigger_type?: string;
+    page?: number;
+    pageSize?: number;
+  },
 ) {
   return requestClient.get<PaginatedResponse<DiagnosticEvent>>(
     `/api/core/license/diagnostics/device/${deviceId}/events`,

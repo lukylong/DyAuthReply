@@ -546,17 +546,16 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.48'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.49'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '修复卡片删除无响应，急停与恢复默认改用应用内确认框，保留明确确认和失败提示\n'
-    '修复切换账号或搜索时旧请求覆盖会话与规则列表的问题\n'
-    '修复规则启停连续点击后显示状态与实际状态相反的问题\n'
-    '修复编辑正则规则时表达式未回填的问题\n'
-    '诊断设置保存失败时保留错误提示，并恢复开关实际状态\n'
-    '手动检查更新设置同时约束主窗口和设置页，避免自动检查或自动更新\n'
+    '完善运行诊断，区分回关与普通消息触发，记录同批回复的关联编号\n'
+    '补充每段消息的发送结果、重试次数和耗时，便于定位部分发送失败\n'
+    '补充消息接收异常、自动回复开关变化及整批停止原因\n'
+    '配合新版管理后台显示中文事件说明、错误码解释与排查建议\n'
+    '诊断不新增私信正文、登录凭证或原始会话编号；原有关闭选择保持不变\n'
     '升级保留登录资料、账号和回复规则；浏览器扩展本版无改动（扩展更新至 2.3.4 后保持不变）'
 )

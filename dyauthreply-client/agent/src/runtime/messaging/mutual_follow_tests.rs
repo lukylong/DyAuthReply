@@ -379,3 +379,65 @@ fn mutual_follow_pairing_window_does_not_suppress_later_events_or_other_conversa
     assert_eq!(f.run().len(), 1);
     assert_eq!(f.count("outbound_batches"), 3);
 }
+
+#[test]
+fn diagnostic_mutual_follow_queue_and_send_share_trace_after_restart() {
+    use tracing_subscriber::layer::SubscriberExt;
+    let mut f = Fixture::new();
+    f.seed_peer();
+    f.receive(&f.event("111", "peer", NOTICE), true);
+    let diagnostics = std::sync::Arc::new(crate::diagnostics::Shared::new());
+    diagnostics.set_enabled(true).unwrap();
+    let subscriber = tracing_subscriber::registry().with(
+        crate::diagnostics::DiagnosticsLayer::new(diagnostics.clone()),
+    );
+    tracing::subscriber::with_default(subscriber, || {
+        let ids = f.run();
+        assert_eq!(ids.len(), 1);
+        f.store = CoreStore::open(f.dir.path()).unwrap();
+        let batch = f.store.outbound_batch(&ids[0]).unwrap();
+        let work = WorkEnvelope::new(
+            AccountId::new("account").unwrap(),
+            ids[0].clone(),
+            WorkKind::AutomaticReply,
+            crate::runtime::model::WorkFence {
+                actor_generation: 1,
+                credential_generation: 1,
+                lease_epoch: 1,
+            },
+            0,
+        );
+        super::super::diagnostic_events::log_send_outcome(
+            &work,
+            &batch,
+            &batch.segments[0],
+            &crate::protocol::live_sender::SendOutcome {
+                classification: crate::protocol::DeliveryClass::Delivered,
+                platform_message_id: Some("synthetic-platform-id".into()),
+                response_codes: Some("http=200,outer=Some(0)".into()),
+            },
+            25,
+        );
+    });
+    let events = diagnostics.take();
+    let queued = events
+        .iter()
+        .find(|e| e.message == "auto-reply queued")
+        .unwrap();
+    let sent = events
+        .iter()
+        .find(|e| e.message == "native send completed")
+        .unwrap();
+    assert_eq!(queued.fields["trigger_type"], "mutual_follow");
+    assert_eq!(queued.fields["trace_id"], sent.fields["trace_id"]);
+    assert_eq!(sent.fields["message_source"], "automatic");
+    assert_eq!(sent.fields["segment_index"], 1);
+    assert_eq!(sent.fields["attempt"], 1);
+    assert_eq!(sent.fields["elapsed_ms"], 25);
+    let output = serde_json::to_string(&events).unwrap();
+    assert!(
+        !output.contains(NOTICE)
+            && !output.contains("welcome")
+            && !output.contains("synthetic-platform-id")
+    );
+}

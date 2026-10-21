@@ -1,6 +1,34 @@
 use super::*;
 use tracing_subscriber::layer::SubscriberExt;
 
+#[test]
+fn diagnostic_context_keeps_reason_and_hashes_batch_without_payload() {
+    let shared = Arc::new(Shared::new());
+    shared.enabled.store(true, Ordering::Release);
+    capture(&shared, || {
+        tracing::info!(target: "dy_agent::runtime", account_id="synthetic-account", batch_id="synthetic-batch", trigger_type="mutual_follow", message_source="automatic", "auto-reply queued");
+        tracing::warn!(target: "dy_agent::runtime", account_id="synthetic-account", batch_id="synthetic-batch", reason="inbound_spool_full", segment_index=2, segment_count=3, content_kind="link", content_chars=42, attempt=1, text="PRIVATE_TEXT", url="https://example.com/private", cookie="PRIVATE_COOKIE", "native send was not delivered");
+    });
+    let events = shared.take();
+    assert_eq!(events[1].fields["reason"], "inbound_spool_full");
+    let trace = events[0].fields["trace_id"].as_str().unwrap();
+    assert_eq!(trace.len(), 16);
+    assert!(trace.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_eq!(events[1].fields["trace_id"], trace);
+    assert_eq!(events[0].fields["trigger_type"], "mutual_follow");
+    assert_eq!(events[1].fields["segment_index"], 2);
+    let encoded = serde_json::to_string(&events).unwrap();
+    for private in [
+        "synthetic-batch",
+        "synthetic-account",
+        "PRIVATE_TEXT",
+        "PRIVATE_COOKIE",
+        "example.com/private",
+    ] {
+        assert!(!encoded.contains(private));
+    }
+}
+
 fn capture(shared: &Arc<Shared>, emit: impl FnOnce()) {
     let subscriber = tracing_subscriber::registry().with(DiagnosticsLayer::new(shared.clone()));
     tracing::subscriber::with_default(subscriber, emit);
@@ -252,4 +280,21 @@ fn quick_auth_stages_report_mapped_fields_the_server_accepts() {
             );
         }
     }
+}
+
+#[test]
+fn diagnostic_policy_changes_and_batch_stops_preserve_typed_context() {
+    let shared = Arc::new(Shared::new());
+    shared.enabled.store(true, Ordering::Release);
+    capture(&shared, || {
+        tracing::info!(target:"dy_agent::runtime", account_id="fixture", enabled=false, previous_enabled=true, change_source="emergency_stop", "account automatic policy changed");
+        tracing::info!(target:"dy_agent::runtime", account_id="fixture", batch_id="fixture-batch", message_source="automatic", reason="配置已更新", "reply batch stopped");
+    });
+    let events = shared.take();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].fields["enabled"], false);
+    assert_eq!(events[0].fields["previous_enabled"], true);
+    assert_eq!(events[0].fields["change_source"], "emergency_stop");
+    assert_eq!(events[1].fields["reason"], "配置已更新");
+    assert!(events[1].fields.get("trace_id").is_some());
 }

@@ -35,6 +35,7 @@ use uuid::Uuid;
 
 pub mod api;
 mod automation;
+mod diagnostic_events;
 mod frontier;
 mod history;
 mod hot;
@@ -1239,6 +1240,12 @@ impl ManualService {
             }
         }
         let _configuration = self.inner.configuration_gate.write().await;
+        let previous = self.inner.business.snapshot()?;
+        let change_source = match &edit {
+            crate::business::Edit::Account { .. } => "account_settings",
+            crate::business::Edit::EmergencyStop => "emergency_stop",
+            _ => "configuration",
+        };
         let business = self.inner.business.clone();
         let result =
             tokio::task::spawn_blocking(move || business.change(|doc| edit.apply(doc))).await??;
@@ -1248,6 +1255,14 @@ impl ManualService {
                 .policies
                 .get(id.as_str())
                 .is_some_and(|p| p.enabled);
+            let previous_enabled = previous
+                .policies
+                .get(id.as_str())
+                .is_some_and(|p| p.enabled);
+            if previous_enabled != enabled {
+                tracing::info!(account_id = %id, previous_enabled, enabled, change_source,
+                    "account automatic policy changed");
+            }
             if !enabled {
                 self.inner.runtime.pause_automatic_account(&id).await?;
             } else if slot.restored_binding.lock().await.is_some() {
@@ -1380,7 +1395,8 @@ impl ManualService {
                 .lock()
                 .await
                 .last_reconcile_error = Some(reason.into());
-            tracing::warn!(account_id = %work.account_id, reason, "receive reconciliation failed");
+            tracing::warn!(account_id = %work.account_id, reason, step="reconcile",
+                error=%diagnostic_events::receive_failure_detail(error), "receive reconciliation failed");
         }
         let healthy = self
             .slot(&work.account_id)?
@@ -1667,6 +1683,7 @@ impl ManualService {
         let store = self.inner.store.clone();
         let id = work.durable_id.clone();
         let reason = reason.to_owned();
+        let message_source = diagnostic_events::message_source(work.kind);
         tokio::task::spawn_blocking(move || -> Result<()> {
             let batch = store.outbound_batch(&id)?;
             anyhow::ensure!(
@@ -1684,6 +1701,8 @@ impl ManualService {
                     )?;
                 }
             }
+            tracing::info!(account_id = %batch.account_id, batch_id = %id, reason = %reason,
+                message_source, "reply batch stopped");
             Ok(())
         })
         .await?
@@ -1737,7 +1756,7 @@ impl ManualService {
                         .await?;
                 }
                 let reason = preparation_failure(&error);
-                tracing::warn!(account_id=%work.account_id, error=?error, "native send preparation failed before network attempt");
+                tracing::warn!(account_id=%work.account_id, batch_id=%batch.id, segment_index=segment.ordinal+1, error=?error, "native send preparation failed before network attempt");
                 self.cancel_tail(work, &reason).await?;
                 return Ok(None);
             }
@@ -1874,6 +1893,7 @@ impl ManualService {
             else {
                 return Ok(());
             };
+            let send_started = Instant::now();
             let outcome = LiveSender::new(
                 self.inner.store.clone(),
                 self.inner.signer.clone(),
@@ -1881,13 +1901,9 @@ impl ManualService {
             )
             .send(operation)
             .await?;
-            log_send_outcome(work.account_id.as_str(), &outcome);
-            let capability = match outcome.classification {
-                DeliveryClass::Delivered | DeliveryClass::DeliveredSoft => SendCapability::Sendable,
-                DeliveryClass::RiskControlled => SendCapability::RiskControlled,
-                DeliveryClass::LoginExpired => SendCapability::AuthExpired,
-                _ => SendCapability::Unknown,
-            };
+            let elapsed = u64::try_from(send_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            diagnostic_events::log_send_outcome(&work, &batch, segment, &outcome, elapsed);
+            let capability = outcome_send_capability(outcome.classification);
             self.inner
                 .runtime
                 .update_send_capability(&work.account_id, work.fence(), capability)
@@ -2028,28 +2044,13 @@ fn log_inbound_summary(account_id: &str, summary: &ReceiveProcessing) {
         );
     }
 }
-fn log_send_outcome(account_id: &str, outcome: &crate::protocol::live_sender::SendOutcome) {
-    let codes = outcome.response_codes.as_deref().unwrap_or("");
-    match outcome.classification {
-        DeliveryClass::Delivered | DeliveryClass::DeliveredSoft => tracing::info!(
-            account_id,
-            classification = ?outcome.classification,
-            response_codes = codes,
-            "native send completed"
-        ),
-        DeliveryClass::RiskControlled => tracing::warn!(
-            account_id,
-            classification = ?outcome.classification,
-            response_codes = codes,
-            recheck_minutes = crate::store::RISK_RECHECK_MS / 60_000,
-            "platform risk control rejected the send; sending paused until recheck"
-        ),
-        _ => tracing::warn!(
-            account_id,
-            classification = ?outcome.classification,
-            response_codes = codes,
-            "native send was not delivered"
-        ),
+
+fn outcome_send_capability(classification: DeliveryClass) -> SendCapability {
+    match classification {
+        DeliveryClass::Delivered | DeliveryClass::DeliveredSoft => SendCapability::Sendable,
+        DeliveryClass::RiskControlled => SendCapability::RiskControlled,
+        DeliveryClass::LoginExpired => SendCapability::AuthExpired,
+        _ => SendCapability::Unknown,
     }
 }
 

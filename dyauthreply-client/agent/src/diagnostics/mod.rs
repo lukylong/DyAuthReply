@@ -32,6 +32,8 @@ const INFO_MESSAGES: &[&str] = &[
     "dy-agent runtime is ready",
     "inbound page processed",
     "auto-reply queued",
+    "reply batch stopped",
+    "account automatic policy changed",
     "auto-reply dropped by cooldown or quota",
     "auto-reply deferred by reply guard",
     "native send completed",
@@ -47,6 +49,18 @@ const INFO_MESSAGES: &[&str] = &[
 const FIELDS: &[(&str, &str)] = &[
     ("account_id", "account"),
     ("rule_id", "rule"),
+    ("batch_id", "trace_id"),
+    ("trigger_type", "trigger_type"),
+    ("message_source", "message_source"),
+    ("segment_index", "segment_index"),
+    ("segment_count", "segment_count"),
+    ("content_kind", "content_kind"),
+    ("content_chars", "content_chars"),
+    ("reason", "reason"),
+    ("recheck_minutes", "recheck_minutes"),
+    ("enabled", "enabled"),
+    ("previous_enabled", "previous_enabled"),
+    ("change_source", "change_source"),
     ("step", "step"),
     ("status", "status"),
     ("body", "body"),
@@ -359,6 +373,19 @@ impl Collect {
         };
         let value = match (field.name(), value) {
             ("account_id", v) => json!(hash_account(v.as_str().unwrap_or_default())),
+            ("batch_id", v) => {
+                use std::fmt::Write;
+                let raw = v.as_str().unwrap_or_default();
+                if raw.is_empty() {
+                    return;
+                }
+                let digest = Sha256::digest(format!("diagnostic-reply:{raw}"));
+                let trace = digest[..8].iter().fold(String::new(), |mut output, b| {
+                    let _ = write!(output, "{b:02x}");
+                    output
+                });
+                json!(trace)
+            }
             ("source", Value::String(url)) => json!(host_of(&url)),
             (_, Value::String(text)) => json!(redact(&text)),
             (_, other) => other,

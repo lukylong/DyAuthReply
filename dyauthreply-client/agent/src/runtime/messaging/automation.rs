@@ -197,20 +197,38 @@ struct PlanPass<'a> {
     cutoff: u64,
     now: i64,
 }
-fn log_planned(account_id: &str, rule_id: &str, planned: &Planned) {
+fn log_planned(account_id: &str, rule_id: &str, planned: &Planned, mutual_follow: bool) {
+    let trigger_type = if mutual_follow {
+        "mutual_follow"
+    } else {
+        "message"
+    };
     match planned {
         Planned::Queued(batch_id) => {
-            tracing::info!(account_id, rule_id, batch_id, "auto-reply queued");
+            tracing::info!(
+                account_id,
+                rule_id,
+                batch_id,
+                trigger_type,
+                message_source = "automatic",
+                "auto-reply queued"
+            );
         }
         Planned::Dropped => {
             tracing::info!(
                 account_id,
                 rule_id,
+                trigger_type,
                 "auto-reply dropped by cooldown or quota"
             );
         }
         Planned::Blocked => {
-            tracing::info!(account_id, rule_id, "auto-reply deferred by reply guard");
+            tracing::info!(
+                account_id,
+                rule_id,
+                trigger_type,
+                "auto-reply deferred by reply guard"
+            );
         }
     }
 }
@@ -374,7 +392,7 @@ impl PlanPass<'_> {
             };
             let rule_id = plan.rule_id.clone();
             let planned = self.claim(&receipt, event, plan, peer, mutual_follow)?;
-            log_planned(&self.lease.account_id, &rule_id, &planned);
+            log_planned(&self.lease.account_id, &rule_id, &planned, mutual_follow);
             match planned {
                 Planned::Queued(id) => batches.push(id),
                 Planned::Dropped => {}

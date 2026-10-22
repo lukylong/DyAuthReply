@@ -54,6 +54,7 @@ fn receive_invariant_detail(error: &anyhow::Error) -> &'static str {
                 Some("聊天展示同步冲突：同一消息的方向或文本与已有记录不一致")
             }
             "legacy route conflict" => Some("旧聊天记录的会话映射与平台消息不一致"),
+            "too many projection events" => Some("聊天展示同步失败：单批消息数量超过处理上限"),
             "invalid projection event" | "invalid message projection" => {
                 Some("聊天展示同步失败：消息结构或长度不符合要求")
             }

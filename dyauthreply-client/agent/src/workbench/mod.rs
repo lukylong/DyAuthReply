@@ -474,7 +474,12 @@ impl Workbench {
     /// # Errors
     /// Rejects malformed/oversized events and conflicting immutable delivery identities.
     pub fn project(&self, account: &str, own: &str, events: &[InboundEvent]) -> Result<()> {
-        anyhow::ensure!(events.len() <= 512, "too many projection events");
+        // Keep the display batch compatible with a complete durable inbound page.
+        // A separate hard-coded limit can poison every subsequent HTTP/WS drain.
+        anyhow::ensure!(
+            events.len() <= usize::try_from(crate::runtime::inbound::MAX_PENDING_RECORDS)?,
+            "too many projection events"
+        );
         let mut db = self.lock()?;
         let tx = db.transaction()?;
         let mut changed = std::collections::BTreeSet::new();

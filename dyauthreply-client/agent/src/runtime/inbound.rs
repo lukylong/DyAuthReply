@@ -339,7 +339,7 @@ mod tests {
     }
     #[tokio::test]
     async fn bounded_fetch_accepts_observed_643_event_page_without_loss_or_duplicate() {
-        let (_dir, store, token) = fixture();
+        let (dir, store, token) = fixture();
         commit(&store, &token, 100, &[]);
         let old = store.inbound_checkpoint(&token.account_id, STREAM).unwrap();
         let mut calls = 0;
@@ -351,6 +351,38 @@ mod tests {
         .unwrap();
         assert_eq!(calls, 1);
         reconcile_page_receipts(&store, &token, "self", &fetched).unwrap();
+        let projection = crate::workbench::Workbench::open(dir.path()).unwrap();
+        projection.ensure_account("account-a", "self").unwrap();
+        let now_us = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros(),
+        )
+        .unwrap();
+        let events: Vec<_> = fetched
+            .messages
+            .iter()
+            .map(|m| {
+                let mut event = InboundEvent::from(m);
+                event.message_type = 1;
+                event.create_time_us = now_us;
+                event
+            })
+            .collect();
+        projection.project("account-a", "self", &events).unwrap();
+        projection.project("account-a", "self", &events).unwrap();
+        let display = rusqlite::Connection::open(dir.path().join("workbench.sqlite3")).unwrap();
+        assert_eq!(
+            display
+                .query_row(
+                    "SELECT count(*) FROM messages WHERE account_id='account-a'",
+                    [],
+                    |row| row.get::<_, u64>(0)
+                )
+                .unwrap(),
+            643
+        );
         let result = commit_page(&store, &token, 1, old.as_ref(), fetched).unwrap();
         assert_eq!(result.inserted, 643);
         assert_eq!(result.cursor, 200);

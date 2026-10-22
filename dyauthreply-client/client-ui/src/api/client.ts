@@ -1176,14 +1176,11 @@ export function matchTypeLabel(type: string): string {
 
 export function resultLabel(result: string): string {
   const map: Record<string, string> = {
-    success: '成功',
-    failed: '失败',
-    skipped: '跳过',
-    cooldown: '冷却中',
-    quota_exceeded: '超配额',
-    silent: '静默时段',
+    success: '发送成功', failed: '发送失败', skipped: '已跳过',
+    cooldown: '冷却跳过', quota_exceeded: '额度限制', silent: '静默等待',
+    pending: '等待处理', uncertain: '结果待核验', partial: '部分送达',
   };
-  return map[result] ?? result;
+  return map[result] ?? '状态待确认';
 }
 
 export function statusLabel(status: number): string {

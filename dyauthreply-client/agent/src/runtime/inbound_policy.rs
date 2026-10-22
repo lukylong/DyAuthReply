@@ -26,10 +26,48 @@ pub(crate) fn is_mutual_follow_notice(event: &InboundEvent) -> bool {
     if event.text.as_deref() != Some(text) {
         return false;
     }
-    matches!(
-        text.trim().trim_end_matches(['。', '！', '!', '.']),
-        "我们已互相关注，可以开始聊天了" | "我们已互相关注,可以开始聊天了"
-    )
+    // Legacy Python accepted wording/punctuation variants. Keep a bounded notice
+    // grammar rather than turning every self-message containing “互相关注” into a trigger.
+    if text.len() > 256 {
+        return false;
+    }
+    let normalized: String = text
+        .chars()
+        .filter(|c| {
+            !c.is_whitespace() && !matches!(c, '，' | ',' | '。' | '.' | '！' | '!' | '～' | '~')
+        })
+        .collect();
+    [
+        "我们已互相关注",
+        "我们已经互相关注",
+        "你们已互相关注",
+        "你们已经互相关注",
+    ]
+    .iter()
+    .filter_map(|prefix| normalized.strip_prefix(prefix))
+    .any(|tail| {
+        matches!(
+            tail.strip_prefix('了').unwrap_or(tail),
+            "可以开始聊天了" | "可以开始聊天啦"
+        )
+    })
+}
+
+/// Only live WS notices may borrow their durable arrival time. Never rewrite the
+/// stored payload/hash, manufacture HTTP-history freshness, or extend the window
+/// on restart/replay. This derived timestamp is not platform delivery evidence.
+pub(crate) fn with_live_notice_time(
+    mut event: InboundEvent,
+    stream: &str,
+    received_at_ms: i64,
+) -> InboundEvent {
+    if event.create_time_us == 0 && stream == "douyin-im-ws" && is_mutual_follow_notice(&event) {
+        event.create_time_us = u64::try_from(received_at_ms)
+            .ok()
+            .and_then(|ms| ms.checked_mul(1000))
+            .unwrap_or(0);
+    }
+    event
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -90,6 +128,8 @@ pub fn eligibility(
     if event.content_json.trim().is_empty() && event.text.is_none() {
         return Eligibility::IgnoreEmpty;
     }
+    let verified_self_notice =
+        event.sender_sec_uid == own_sec_uid && is_mutual_follow_notice(event);
     if event.version != 1
         || own_sec_uid.is_empty()
         || event.sender_sec_uid.is_empty()
@@ -97,7 +137,7 @@ pub fn eligibility(
             .sender_uid
             .parse::<u64>()
             .ok()
-            .is_none_or(|id| id == 0)
+            .is_none_or(|id| id == 0 && !verified_self_notice)
     {
         return Eligibility::DeferIdentity;
     }
@@ -117,13 +157,9 @@ pub fn eligibility(
     if now_us.saturating_sub(event.create_time_us) > MAX_REPLY_AGE_US {
         return Eligibility::IgnoreExpired;
     }
-    let Some(content) = content else {
-        return Eligibility::DeferContent;
-    };
-    let text = content.get("text").and_then(serde_json::Value::as_str);
-    // Rich-media/default trigger parity is a separate rule-engine gate. Preserve
-    // those receipts pending rather than silently treating media as no-match.
-    if text.is_none_or(|s| s.trim().is_empty() || s.len() > 4096) || text != event.text.as_deref() {
+    // Recognized media has a bounded matching label independent of its chat
+    // rendering. Use the same view here and in planning; do not rewrite events.
+    if crate::workbench::reply_match_text(&event.content_json, event.text.as_deref()).is_none() {
         return Eligibility::DeferContent;
     }
     Eligibility::Candidate

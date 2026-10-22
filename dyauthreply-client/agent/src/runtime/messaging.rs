@@ -1539,10 +1539,15 @@ impl ManualService {
         session: &mut NativeAccountSession,
         cursor: u64,
     ) -> Result<crate::protocol::inbox::InboxPage> {
-        match session.inbox(cursor, 50).await {
+        match super::inbound::fetch_bounded_page(work.account_id.as_str(), |limit| {
+            session.inbox(cursor, limit)
+        })
+        .await
+        {
             Ok(page) => Ok(page),
             Err(error) => {
-                if error.is_authentication_expired() {
+                if error.downcast_ref::<crate::protocol::account_session::AccountRequestError>()
+                    .is_some_and(crate::protocol::account_session::AccountRequestError::is_authentication_expired) {
                     let slot = self.slot(&work.account_id)?;
                     *slot.restored_binding.lock().await = None;
                     *slot.identity_error.lock().await = Some("authentication_expired".into());
@@ -1556,7 +1561,7 @@ impl ManualService {
                         )
                         .await?;
                 }
-                Err(error.into())
+                Err(error)
             }
         }
     }
@@ -2105,8 +2110,16 @@ fn filter_pending(
     if let Some(projection) = projection {
         let events = pending
             .iter()
-            .filter_map(|r| r.payload.as_ref())
-            .filter_map(|p| serde_json::from_slice::<super::inbound::InboundEvent>(p).ok())
+            .filter_map(|r| {
+                let event =
+                    serde_json::from_slice::<super::inbound::InboundEvent>(r.payload.as_ref()?)
+                        .ok()?;
+                Some(super::inbound_policy::with_live_notice_time(
+                    event,
+                    &r.stream,
+                    r.received_at_ms,
+                ))
+            })
             .collect::<Vec<_>>();
         projection.project(&lease.account_id, own_sec_uid, &events)?;
     }
@@ -2130,6 +2143,11 @@ fn filter_pending(
             summary.deferred += 1;
             continue;
         };
+        let event = super::inbound_policy::with_live_notice_time(
+            event,
+            &receipt.stream,
+            receipt.received_at_ms,
+        );
         let mut decision = super::inbound_policy::receipt_eligibility(
             &event,
             receipt.received_at_ms,

@@ -307,6 +307,21 @@ impl PlanPass<'_> {
         }
         Ok(peer)
     }
+    fn blocked(&self, peer: &str, text: &str, nickname: Option<&str>) -> bool {
+        let text = text.to_lowercase();
+        let nickname = nickname.unwrap_or("").to_lowercase();
+        self.policy.blocked_peers.iter().any(|p| p == peer)
+            || self
+                .policy
+                .blocked_content_keywords
+                .iter()
+                .any(|k| text.contains(&k.to_lowercase()))
+            || self
+                .policy
+                .blocked_nickname_keywords
+                .iter()
+                .any(|k| nickname.contains(&k.to_lowercase()))
+    }
     fn run(&self) -> Result<Vec<String>> {
         let mut batches = Vec::new();
         for receipt in self.store.pending_inbound_receipts(self.lease, 128)? {
@@ -316,6 +331,11 @@ impl PlanPass<'_> {
             let Ok(event) = serde_json::from_slice::<InboundEvent>(payload) else {
                 continue;
             };
+            let event = crate::runtime::inbound_policy::with_live_notice_time(
+                event,
+                &receipt.stream,
+                receipt.received_at_ms,
+            );
             let decision = self.decision(&receipt, &event)?;
             if decision != Eligibility::Candidate {
                 self.settle_ineligible(&receipt, decision)?;
@@ -354,20 +374,12 @@ impl PlanPass<'_> {
                 )?;
                 continue;
             }
-            let text = event.text.clone().unwrap_or_default();
-            let plan = if self.policy.blocked_peers.contains(&peer)
-                || self
-                    .policy
-                    .blocked_content_keywords
-                    .iter()
-                    .any(|k| text.to_lowercase().contains(&k.to_lowercase()))
-                || self.policy.blocked_nickname_keywords.iter().any(|k| {
-                    nickname
-                        .as_deref()
-                        .unwrap_or("")
-                        .to_lowercase()
-                        .contains(&k.to_lowercase())
-                }) {
+            let Some(text) =
+                crate::workbench::reply_match_text(&event.content_json, event.text.as_deref())
+            else {
+                continue;
+            };
+            let plan = if self.blocked(&peer, &text, nickname.as_deref()) {
                 None
             } else {
                 self.engine.evaluate(&MatchInput {

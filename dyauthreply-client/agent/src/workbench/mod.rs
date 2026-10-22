@@ -14,6 +14,7 @@ use std::{
 
 pub mod api;
 mod content;
+pub(crate) use content::reply_match_text;
 mod import;
 pub(crate) mod media;
 #[cfg(test)]

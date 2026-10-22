@@ -86,7 +86,8 @@ fn present(
         "cooldown" => "冷却跳过",
         "quota_exceeded" => "额度限制",
         "silent" => "静默等待",
-        _ => "已跳过",
+        "skipped" => "已跳过",
+        _ => "状态待确认",
     };
     let peer = wb.peer_nickname(&record.account_id, &record.conversation_id)?;
     let mut v = serde_json::to_value(record)?;
@@ -166,16 +167,116 @@ async fn detail(State(app): State<App>, Path(id): Path<String>) -> Response {
     )
 }
 
+// Presentation only: retain original diagnostic codes in stored audit records.
 fn display_error(error: &str) -> String {
+    let error = error.trim();
+    if error.is_empty() {
+        return String::new();
+    }
+    let reason = match error {
+        "rule_cooldown" => Some("距离上次回复不足规则设置的冷却时间，本次已跳过。冷却结束后可用新消息测试，这条消息不会自动补发。"),
+        "account_daily_quota" => Some("该账号当日的自动回复次数已达到上限，本次已跳过。请检查账号的每日回复额度。"),
+        "peer_daily_quota" => Some("当天已自动回复过这位联系人，本次按每日一次的设置跳过。"),
+        "account_interval" => Some("距离上一条发送的间隔过短，正在等待发送间隔结束。"),
+        "pending_reply" => Some("已有回复任务正在处理，正在等待前一批任务完成。"),
+        "guard_storage_capacity" => Some("本地回复保护记录已达到容量上限，暂缓处理。请查看运行诊断。"),
+        "timezone_change_requires_migration" => Some("设备时区与回复记录不一致，本次暂缓处理，请检查时区设置。"),
+        "no match" | "no_match" => Some("没有命中可用的回复规则，本次已跳过。"),
+        _ => None,
+    };
+    if let Some(text) = reason {
+        return text.into();
+    }
     for (code, text) in [
-        ("RiskControlled", "平台返回发送风控，未取得送达回执"),
-        ("LoginExpired", "登录凭证失效，消息未送达"),
-        ("ProtocolRejected", "平台拒绝当前协议请求，消息未送达"),
-        ("BusinessRejected", "发送请求被拒绝，消息未送达"),
+        (
+            "RiskControlled",
+            "平台限制了该账号的发送，本条消息未送达，请查看账号详情",
+        ),
+        (
+            "LoginExpired",
+            "登录已失效，本条消息未送达，请重新登录该账号",
+        ),
+        ("ProtocolRejected", "平台拒绝了本次请求，本条消息未送达"),
+        (
+            "BusinessRejected",
+            "本条消息被平台拒绝，未送达；这不代表整个账号持续受限",
+        ),
+        ("TransportUncertain", "尚未确认消息是否送达，请勿重复发送"),
+        ("Uncertain", "尚未确认消息是否送达，请勿重复发送"),
+        ("Inconclusive", "本次请求未取得明确结果，请查看运行诊断"),
     ] {
-        if let Some(extra) = error.strip_prefix(code) {
-            return format!("{text}{extra}");
+        if let Some(extra) = error
+            .strip_prefix(code)
+            .filter(|rest| rest.is_empty() || rest.starts_with([' ', '[', ':']))
+        {
+            return with_platform_code(text, extra);
         }
     }
-    error.into()
+    let prose = error.split(" [").next().unwrap_or(error);
+    if prose
+        .chars()
+        .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+        && !prose.chars().any(|c| c.is_ascii_alphabetic())
+    {
+        return with_platform_code(prose, error);
+    }
+    "暂未识别具体处理原因，请查看运行诊断。".into()
+}
+
+fn with_platform_code(text: &str, raw: &str) -> String {
+    let code = raw
+        .split_once("business=")
+        .map(|(_, value)| {
+            value
+                .trim_start()
+                .strip_prefix("Some(")
+                .unwrap_or(value.trim_start())
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .take(10)
+                .collect::<String>()
+        })
+        .filter(|value| !value.is_empty() && value != "0");
+    code.map_or_else(
+        || text.into(),
+        |code| format!("{text}（平台状态码：{code}）"),
+    )
+}
+
+#[cfg(test)]
+mod reason_copy_tests {
+    use super::*;
+    #[test]
+    fn reply_reason_codes_are_readable_chinese() {
+        for (raw, expected) in [
+            ("rule_cooldown", "冷却"),
+            ("account_daily_quota", "账号"),
+            ("peer_daily_quota", "当天"),
+            ("account_interval", "间隔"),
+            ("pending_reply", "等待"),
+            ("guard_storage_capacity", "容量"),
+            ("timezone_change_requires_migration", "时区"),
+        ] {
+            let shown = display_error(raw);
+            assert!(shown.contains(expected), "{raw}: {shown}");
+            assert!(!shown.chars().any(|c| c.is_ascii_alphabetic()));
+        }
+        assert!(display_error("rule_cooldown").contains("不会自动补发"));
+        assert!(!display_error("rule_cooldown").contains("5 分钟"));
+    }
+    #[test]
+    fn reply_reason_platform_codes_are_preserved_without_raw_protocol_fields() {
+        let shown=display_error("BusinessRejected [http=200,outer=Some(0),business=Some(8101),raw_check=Some(1),msg=OK]");
+        assert!(shown.contains("8101") && shown.contains("拒绝"));
+        assert!(!shown.chars().any(|c| c.is_ascii_alphabetic()));
+        assert!(!shown.contains("风控"));
+    }
+    #[test]
+    fn reply_reason_unknown_english_never_leaks_to_user_hint() {
+        let shown = display_error("future_internal_reason token=PRIVATE_TEST_VALUE");
+        assert!(!shown.chars().any(|c| c.is_ascii_alphabetic()));
+        assert!(!shown.is_empty());
+        assert_eq!(display_error("静默时段，暂缓处理"), "静默时段，暂缓处理");
+        assert_eq!(display_error(""), "");
+    }
 }

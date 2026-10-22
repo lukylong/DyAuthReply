@@ -100,6 +100,42 @@ pub fn describe(content_json: &str, decoded_text: Option<&str>) -> Option<Descri
     Some(fallback(decoded_text))
 }
 
+/// A separate, read-only rule-engine view. Never replace the wire text or chat
+/// projection with these labels: chat media/decryption data must stay intact.
+/// Reuse display classification so recognized media and its placeholder do not
+/// drift between receiving and matching. Unknown/control payloads stay deferred.
+pub(crate) fn reply_match_text(content_json: &str, decoded_text: Option<&str>) -> Option<String> {
+    if content_json.len() > usize::try_from(crate::runtime::inbound::MAX_PENDING_BYTES).ok()? {
+        return None;
+    }
+    let parsed: Value = serde_json::from_str(content_json).ok()?;
+    let obj = parsed.as_object()?;
+    if obj.contains_key("read_index") || obj.contains_key("command_type") {
+        return None;
+    }
+    if let Some(text) = obj
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+    {
+        return (decoded_text == Some(text) && text.len() <= 4096).then(|| text.to_owned());
+    }
+    // Missing/empty text is normal for media; inconsistent decoded text is not.
+    if decoded_text.is_some_and(|s| !s.trim().is_empty()) {
+        return None;
+    }
+    let described = describe(content_json, None)?;
+    let known = matches!(described.kind, "text" | "image" | "video" | "card")
+        || described.media.as_ref().is_some_and(|media| {
+            matches!(
+                media.get("kind").and_then(Value::as_str),
+                Some("emoji" | "voice")
+            )
+        });
+    (known && !described.content.trim().is_empty() && described.content.len() <= 4096)
+        .then_some(described.content)
+}
+
 fn fallback(decoded_text: Option<&str>) -> Described {
     match decoded_text.filter(|t| !t.trim().is_empty()) {
         Some(text) => labelled("text", text.to_owned()),

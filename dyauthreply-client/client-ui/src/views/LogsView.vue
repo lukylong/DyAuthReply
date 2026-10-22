@@ -22,6 +22,8 @@ import {
   type DouyinReplyLogStat,
 } from "../api/client";
 
+import { reasonText, reasonTitle, resultTone } from "./logs-presentation";
+
 const selected = ref<DouyinReplyLog | null>(null);
 const detailDialog = ref<HTMLDialogElement | null>(null);
 watch(selected, async (value) => {
@@ -113,19 +115,14 @@ async function loadLogs() {
     await loadStat(current);
   } catch (e) {
     if (disposed || current !== generation) return;
-    error.value =
-      (e instanceof Error ? e.message : String(e)) || "回复记录读取失败";
+    error.value = "回复记录读取失败，请稍后刷新重试。";
     logs.value = [];
   } finally {
     if (current === generation) loading.value = false;
   }
 }
 
-function resultClass(result: string) {
-  if (result === "success") return "ok";
-  if (result === "failed") return "bad";
-  return "muted";
-}
+const resultClass = resultTone;
 
 watch([filterAccountId, filterResult, filterMode, pageSize], () => {
   page.value = 1;
@@ -143,7 +140,7 @@ onMounted(async () => {
     await loadAccounts();
     await loadLogs();
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e);
+    error.value = "回复记录读取失败，请稍后刷新重试。";
     loading.value = false;
   }
 });
@@ -292,15 +289,14 @@ onUnmounted(() => {
               <td>
                 <span class="result-badge" :class="resultClass(log.result)"
                   ><i />{{
-                    log.result_display || resultLabel(log.result)
+                    resultLabel(log.result)
                   }}</span
                 >
               </td>
               <td class="content">
-                <b :class="{ 'error-text': !!log.error_message }">{{
-                  log.error_message ||
+                <b :class="log.error_message ? `reason-${resultTone(log.result)}` : ''">{{
+                  reasonText(log.error_message, log.result) ||
                   log.reply_text ||
-                  log.result_display ||
                   resultLabel(log.result)
                 }}</b
                 ><small v-if="log.trigger_message_content"
@@ -391,7 +387,7 @@ onUnmounted(() => {
         </header>
         <span class="result-badge" :class="resultClass(selected.result)"
           ><i />{{
-            selected.result_display || resultLabel(selected.result)
+            resultLabel(selected.result)
           }}</span
         >
         <dl>
@@ -422,10 +418,11 @@ onUnmounted(() => {
         </div>
         <div
           v-if="selected.error_message"
-          class="message-section error-section"
+          class="message-section reason-section"
+          :class="`reason-${resultTone(selected.result)}`"
         >
-          <h3>未完成原因</h3>
-          <p>{{ selected.error_message }}</p>
+          <h3>{{ reasonTitle(selected.result) }}</h3>
+          <p>{{ reasonText(selected.error_message, selected.result) }}</p>
         </div>
         <p class="footnote">发送结果以平台回执和接收核验为准。</p>
       </section>
@@ -643,7 +640,7 @@ td b {
   font-size: 12px;
   margin-top: 6px;
 }
-.content .error-text {
+.content .reason-bad {
   color: var(--danger);
 }
 .result-badge {
@@ -808,7 +805,7 @@ dd {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.error-section p {
+.reason-section.reason-bad p {
   background: var(--danger-soft);
   color: var(--danger);
 }
@@ -846,4 +843,10 @@ select:focus-visible {
     padding: 8px;
   }
 }
+
+.content .reason-muted { color: var(--text-secondary); }
+.content .reason-warn { color: var(--warning); }
+.reason-section.reason-warn p { background: var(--warning-soft); color: var(--warning); }
+.reason-section.reason-muted p { background: var(--bg-app); color: var(--text-secondary); }
+.result-badge.warn { background: var(--warning-soft); color: var(--warning); }
 </style>

@@ -441,3 +441,219 @@ fn diagnostic_mutual_follow_queue_and_send_share_trace_after_restart() {
             && !output.contains("synthetic-platform-id")
     );
 }
+
+#[test]
+fn follow_compat_wording_and_numeric_identity_reach_one_batch() {
+    for ws in [true, false] {
+        for text in [
+            "我们已经互相关注，可以开始聊天了",
+            "我们已互相关注了，可以开始聊天啦！",
+            "我们已互相关注，\n可以开始聊天了。",
+            "你们已互相关注，可以开始聊天了",
+        ] {
+            let f = Fixture::new();
+            f.seed_peer();
+            let mut e = f.event("101", "self", text);
+            e.sender_uid = "0".into();
+            assert_eq!(f.receive(&e, ws).candidates, 1, "{text} ws={ws}");
+            let ids = f.run();
+            assert_eq!(ids.len(), 1, "{text} ws={ws}");
+            f.confirm(&ids[0]);
+            assert_eq!(
+                f.store.outbound_batch(&ids[0]).unwrap().status,
+                crate::store::BatchStatus::Confirmed
+            );
+            f.receive(&e, !ws);
+            f.run();
+            assert_eq!(f.count("outbound_batches"), 1);
+        }
+    }
+}
+
+#[test]
+fn follow_compat_missing_numeric_uid_requires_verified_self_and_peer_mapping() {
+    let f = Fixture::new();
+    let mut e = f.event("101", "self", NOTICE);
+    e.sender_uid = "0".into();
+    assert_eq!(f.receive(&e, true).candidates, 1);
+    assert!(f.run().is_empty());
+    assert_eq!(f.pending(), 1);
+    f.seed_peer();
+    assert_eq!(f.run().len(), 1);
+    for sender in ["", "peer"] {
+        let f = Fixture::new();
+        f.seed_peer();
+        let mut e = f.event("101", sender, NOTICE);
+        e.sender_uid = "0".into();
+        assert_eq!(f.receive(&e, true).candidates, 0);
+        assert!(f.run().is_empty());
+    }
+}
+
+#[test]
+fn follow_compat_zero_time_live_receipt_survives_restart_and_replay() {
+    let mut f = Fixture::new();
+    f.seed_peer();
+    let mut e = f.event("101", "self", "我们已经互相关注，可以开始聊天了");
+    e.create_time_us = 0;
+    e.sender_uid = "0".into();
+    assert_eq!(f.receive(&e, true).candidates, 1);
+    let receipt = f
+        .store
+        .pending_inbound_receipts(&f.lease, 128)
+        .unwrap()
+        .remove(0);
+    let stored: InboundEvent = serde_json::from_slice(receipt.payload.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        stored.create_time_us, 0,
+        "wire payload must stay unchanged for replay hashes"
+    );
+    f.now = crate::workbench::now_ms();
+    f.store = CoreStore::open(f.dir.path()).unwrap();
+    let ids = f.run();
+    assert_eq!(ids.len(), 1);
+    let route: Route =
+        serde_json::from_str(&f.store.outbound_batch(&ids[0]).unwrap().response_id).unwrap();
+    assert_eq!(route.expires_at_ms, Some(receipt.received_at_ms + 300_000));
+    f.confirm(&ids[0]);
+    f.receive(&e, true);
+    f.receive(&e, false);
+    assert!(f.run().is_empty());
+    assert_eq!(f.count("outbound_batches"), 1);
+    let db = rusqlite::Connection::open(f.dir.path().join("workbench.sqlite3")).unwrap();
+    let at: i64 = db
+        .query_row(
+            "SELECT at_ms FROM messages WHERE server_id='101'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(at, receipt.received_at_ms);
+}
+
+#[test]
+fn follow_compat_zero_time_http_history_and_old_live_receipts_never_revive() {
+    let mut f = Fixture::new();
+    f.seed_peer();
+    let mut e = f.event("101", "self", NOTICE);
+    e.create_time_us = 0;
+    assert_eq!(f.receive(&e, false).candidates, 0);
+    assert!(
+        f.run().is_empty(),
+        "HTTP receipt must not manufacture freshness"
+    );
+    f.now += 301_000;
+    assert!(f.run().is_empty());
+    assert_eq!(f.pending(), 0);
+
+    let mut f = Fixture::new();
+    f.seed_peer();
+    f.receive(&e, true);
+    f.now += 301_000;
+    assert!(
+        f.run().is_empty(),
+        "restarts/retries must retain original arrival deadline"
+    );
+    assert_eq!(f.count("outbound_batches"), 0);
+
+    let mut f = Fixture::new();
+    f.seed_peer();
+    f.receive(&e, true);
+    f.cutoff_us = u64::try_from(crate::workbench::now_ms() + 1).unwrap() * 1000;
+    assert!(
+        f.run().is_empty(),
+        "enabling auto after arrival must not revive a notice"
+    );
+}
+
+#[test]
+fn follow_compat_control_echo_and_ordinary_self_text_still_do_not_trigger() {
+    for text in [
+        "请互相关注",
+        "我们已互相关注，可以开始聊天了 https://example.test",
+        "我们已经互相关注，可以开始聊天了吗？",
+    ] {
+        let f = Fixture::new();
+        f.seed_peer();
+        f.receive(&f.event("101", "self", text), true);
+        assert!(f.run().is_empty());
+    }
+    let f = Fixture::new();
+    f.seed_peer();
+    let mut e = f.event("101", "self", NOTICE);
+    e.create_time_us = 0;
+    e.content_json = serde_json::json!({"text":NOTICE,"command_type":1}).to_string();
+    assert_eq!(f.receive(&e, true).candidates, 0);
+    assert!(f.run().is_empty());
+}
+
+#[test]
+fn follow_compat_zero_time_own_echo_never_confirms_a_send_or_queues_reply() {
+    let f = Fixture::new();
+    f.seed_peer();
+    let text = "我们已经互相关注，可以开始聊天了";
+    let batch = f
+        .store
+        .prepare_outbound_batch(
+            &f.lease,
+            "manual",
+            "route",
+            &[OutboundSegmentDraft::text(text)],
+        )
+        .unwrap();
+    let mut e = f.event("101", "self", text);
+    e.create_time_us = 0;
+    e.client_message_id
+        .clone_from(&batch.segments[0].client_message_id);
+    assert_eq!(f.receive(&e, true).ignored, 1);
+    assert!(f.run().is_empty());
+    assert_eq!(f.count("outbound_batches"), 1);
+    assert_eq!(f.count("mutual_follow_claims"), 0);
+    assert_eq!(
+        f.store.outbound_batch(&batch.id).unwrap().segments[0].status,
+        crate::store::SegmentStatus::Prepared
+    );
+}
+
+#[test]
+fn follow_compat_recovered_notice_preserves_blacklist_quota_and_cooldown_contracts() {
+    for mode in ["allowed", "peer", "content", "quota", "no_rule", "silent"] {
+        let mut f = Fixture::new();
+        f.seed_peer();
+        f.policy.daily_peer_limit = true;
+        f.receive(&f.event("100", "peer", "hello"), true);
+        let previous = f.run();
+        f.confirm(&previous[0]);
+        match mode {
+            "peer" => f.policy.blocked_peers.push("peer".into()),
+            "content" => f.policy.blocked_content_keywords.push("互相关注".into()),
+            "quota" => f.policy.daily_quota = 1,
+            "no_rule" => {
+                f.engine = RuleEngine::from_json(
+                    br#"{"version":1,"revision":1,"timezone":"Asia/Shanghai","rules":[]}"#,
+                )
+                .unwrap();
+            }
+            "silent" => {
+                f.policy.silent_start = Some("00:00:00".into());
+                f.policy.silent_end = Some("23:59:59".into());
+            }
+            _ => {}
+        }
+        let mut e = f.event("101", "self", "我们已经互相关注，可以开始聊天了");
+        e.sender_uid = "0".into();
+        e.create_time_us = 0;
+        assert_eq!(f.receive(&e, true).candidates, 1);
+        f.now = crate::workbench::now_ms();
+        assert_eq!(f.run().len(), usize::from(mode == "allowed"), "{mode}");
+        assert_eq!(
+            f.count("outbound_batches"),
+            if mode == "allowed" { 2 } else { 1 },
+            "{mode}"
+        );
+    }
+}
+
+// Reuse the durable WS/HTTP receive fixture without changing chat projection.
+#[path = "media_reply_tests.rs"]
+mod media_reply_tests;

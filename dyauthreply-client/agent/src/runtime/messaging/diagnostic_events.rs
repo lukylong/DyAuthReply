@@ -41,7 +41,46 @@ pub(super) fn receive_failure_detail(error: &anyhow::Error) -> String {
         None if error.downcast_ref::<crate::store::StoreError>().is_some() => {
             "本地消息存储操作失败".into()
         }
-        None => "未归类的接收异常，请核对本地日志".into(),
+        None => receive_invariant_detail(error).into(),
+    }
+}
+
+// Exact internal invariant names only. Never forward arbitrary error chains,
+// SQL arguments, response bodies, account identifiers or credentials.
+fn receive_invariant_detail(error: &anyhow::Error) -> &'static str {
+    for cause in error.chain() {
+        let description = match cause.to_string().as_str() {
+            "conflicting server message projection" => {
+                Some("聊天展示同步冲突：同一消息的方向或文本与已有记录不一致")
+            }
+            "legacy route conflict" => Some("旧聊天记录的会话映射与平台消息不一致"),
+            "invalid projection event" | "invalid message projection" => {
+                Some("聊天展示同步失败：消息结构或长度不符合要求")
+            }
+            "projection byte counter mismatch" => Some("聊天展示存储的容量计数不一致"),
+            "inbox cursor regressed" => Some("消息补拉游标发生回退，未推进接收位置"),
+            "inbox page exceeds safe receive bounds at minimum limit" => {
+                Some("消息补拉单组数据仍超过处理上限，已保留接收位置等待排查")
+            }
+            "invalid receipt evidence page" => Some("消息补拉结果不完整或超过单页处理上限"),
+            "inbox response is not a valid success" => Some("消息补拉响应未通过完整性检查"),
+            "invalid message identity" => Some("接收消息缺少有效的消息编号或会话编号"),
+            "history baseline has no usable cursor" => Some("首次消息补拉缺少有效游标"),
+            "stale receive lease" | "stale receive result" => {
+                Some("接收期间账号状态或托管授权已变化，本轮结果未采用")
+            }
+            _ => None,
+        };
+        if let Some(description) = description {
+            return description;
+        }
+    }
+    if error.downcast_ref::<rusqlite::Error>().is_some() {
+        "聊天展示数据库操作失败"
+    } else if error.downcast_ref::<serde_json::Error>().is_some() {
+        "接收消息的结构化内容解析失败"
+    } else {
+        "未归类的接收异常，请核对本地日志"
     }
 }
 pub(super) fn log_send_outcome(
@@ -77,6 +116,22 @@ pub(super) fn log_send_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn receive_invariant_diagnostics_name_only_known_safe_failures() {
+        let error = anyhow::anyhow!("conflicting server message projection")
+            .context("private outer details");
+        assert_eq!(
+            receive_failure_detail(&error),
+            "聊天展示同步冲突：同一消息的方向或文本与已有记录不一致"
+        );
+        assert!(!receive_failure_detail(&anyhow::anyhow!(
+            "conflicting server message projection PRIVATE_TOKEN"
+        ))
+        .contains("PRIVATE"));
+        assert!(
+            receive_failure_detail(&anyhow::anyhow!("inbox cursor regressed")).contains("游标")
+        );
+    }
     #[test]
     fn diagnostic_receive_error_reports_typed_status_not_private_error_body() {
         let error = anyhow::Error::new(

@@ -2,7 +2,10 @@
 //! only messages at/before the durable live-start watermark. Consumers must explicitly
 //! acknowledge durable events before their payloads are reclaimed.
 use crate::{
-    protocol::inbox::{InboxMessage, InboxPage},
+    protocol::{
+        account_session::AccountRequestError,
+        inbox::{InboxMessage, InboxPage},
+    },
     store::{
         CoreStore, InboundCheckpoint, InboundLimits, InboundPageDraft, InboundReceiptDraft,
         LeaseToken,
@@ -14,10 +17,11 @@ use sha2::{Digest, Sha256};
 
 pub const STREAM: &str = "douyin-im-http";
 // The upstream limit counts conversation groups, not individual events.
-// One valid decoded page (up to 512 events) must fit atomically.
-pub const MAX_PENDING_RECORDS: u32 = 512;
+// Some responses ignore smaller requested limits (observed: 643 events).
+// Admit up to 1024 events atomically, still under the unchanged 1 MiB byte budget.
+pub const MAX_PENDING_RECORDS: u32 = 1024;
 pub const MAX_PENDING_BYTES: u64 = 1024 * 1024;
-const MAX_PAGE_MESSAGES: usize = 512;
+const MAX_PAGE_MESSAGES: usize = 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,6 +54,44 @@ impl From<&InboxMessage> for InboundEvent {
             text: message.text.clone(),
         }
     }
+}
+
+/// The platform limit bounds conversation groups, not messages. Retry the same
+/// cursor with fewer groups; never truncate a page or advance a partial cursor.
+pub(super) async fn fetch_bounded_page<F, Fut>(account: &str, mut fetch: F) -> Result<InboxPage>
+where
+    F: FnMut(u16) -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<InboxPage, AccountRequestError>>,
+{
+    for limit in [50, 10, 1] {
+        let page = fetch(limit).await?;
+        anyhow::ensure!(
+            page.status_code == 0 && page.wrapper_present,
+            "inbox response is not a valid success"
+        );
+        let mut bytes = 0_u64;
+        if page.messages.len() <= MAX_PAGE_MESSAGES {
+            for message in &page.messages {
+                bytes = bytes.saturating_add(u64::try_from(
+                    serde_json::to_vec(&InboundEvent::from(message))?.len(),
+                )?);
+                if bytes > MAX_PENDING_BYTES {
+                    break;
+                }
+            }
+            if bytes <= MAX_PENDING_BYTES {
+                return Ok(page);
+            }
+        }
+        tracing::warn!(
+            account_id = account,
+            requested_groups = limit,
+            received_messages = page.messages.len(),
+            measured_payload_bytes = bytes,
+            "inbox page exceeds receive bounds; reducing conversation group limit"
+        );
+    }
+    anyhow::bail!("inbox page exceeds safe receive bounds at minimum limit")
 }
 
 /// Only a consistent ordinary own-message can prove delivery. This does not
@@ -295,6 +337,154 @@ mod tests {
         let old = store.inbound_checkpoint(&token.account_id, STREAM).unwrap();
         commit_page(store, token, 1, old.as_ref(), page(cursor, ids)).unwrap()
     }
+    #[tokio::test]
+    async fn bounded_fetch_accepts_observed_643_event_page_without_loss_or_duplicate() {
+        let (_dir, store, token) = fixture();
+        commit(&store, &token, 100, &[]);
+        let old = store.inbound_checkpoint(&token.account_id, STREAM).unwrap();
+        let mut calls = 0;
+        let fetched = fetch_bounded_page("account-a", |_| {
+            calls += 1;
+            std::future::ready(Ok(page(200, &(1..=643).collect::<Vec<_>>())))
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls, 1);
+        reconcile_page_receipts(&store, &token, "self", &fetched).unwrap();
+        let result = commit_page(&store, &token, 1, old.as_ref(), fetched).unwrap();
+        assert_eq!(result.inserted, 643);
+        assert_eq!(result.cursor, 200);
+        assert_eq!(
+            commit(&store, &token, 200, &(1..=643).collect::<Vec<_>>()).inserted,
+            0
+        );
+        assert_eq!(
+            store.pending_inbound_receipts(&token, 1024).unwrap().len(),
+            643
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_fetch_retries_same_cursor_and_commits_only_complete_page() {
+        let (_dir, store, token) = fixture();
+        commit(&store, &token, 100, &[]);
+        let old = store.inbound_checkpoint(&token.account_id, STREAM).unwrap();
+        let mut limits = Vec::new();
+        let fetched = fetch_bounded_page("account-a", |limit| {
+            limits.push(limit);
+            std::future::ready(Ok(if limit == 50 {
+                page(
+                    999,
+                    &(1..=u64::from(MAX_PENDING_RECORDS) + 1).collect::<Vec<_>>(),
+                )
+            } else {
+                page(200, &(1..=136).collect::<Vec<_>>())
+            }))
+        })
+        .await
+        .unwrap();
+        assert_eq!(limits, [50, 10]);
+        assert_eq!(
+            store
+                .inbound_checkpoint(&token.account_id, STREAM)
+                .unwrap()
+                .unwrap()
+                .checkpoint,
+            100
+        );
+        let result = commit_page(&store, &token, 1, old.as_ref(), fetched).unwrap();
+        assert_eq!(result.cursor, 200);
+        assert_eq!(result.inserted, 136);
+    }
+
+    #[tokio::test]
+    async fn bounded_fetch_exhaustion_does_not_advance_cursor_or_drop_messages() {
+        let (_dir, store, token) = fixture();
+        commit(&store, &token, 100, &[]);
+        let mut limits = Vec::new();
+        let result = fetch_bounded_page("account-a", |limit| {
+            limits.push(limit);
+            std::future::ready(Ok(page(
+                999,
+                &(1..=u64::from(MAX_PENDING_RECORDS) + 1).collect::<Vec<_>>(),
+            )))
+        })
+        .await;
+        assert_eq!(limits, [50, 10, 1]);
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            "inbox page exceeds safe receive bounds at minimum limit"
+        );
+        assert_eq!(
+            store
+                .inbound_checkpoint(&token.account_id, STREAM)
+                .unwrap()
+                .unwrap()
+                .checkpoint,
+            100
+        );
+        assert!(store
+            .pending_inbound_receipts(&token, 128)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn bounded_fetch_retries_oversized_payload_not_only_message_count() {
+        let mut limits = Vec::new();
+        let result = fetch_bounded_page("account-a", |limit| {
+            limits.push(limit);
+            let mut result = page(200, &[1]);
+            if limit == 50 {
+                result.messages[0].content_json =
+                    "x".repeat(usize::try_from(MAX_PENDING_BYTES).unwrap());
+            }
+            std::future::ready(Ok(result))
+        })
+        .await
+        .unwrap();
+        assert_eq!(limits, [50, 10]);
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].content_json, message(1).content_json);
+    }
+
+    #[tokio::test]
+    async fn bounded_fetch_preserves_auth_error_and_does_not_retry() {
+        let mut limits = Vec::new();
+        let result = fetch_bounded_page("account-a", |limit| {
+            limits.push(limit);
+            std::future::ready(Err(AccountRequestError::AuthenticationExpired {
+                step: "inbox",
+                code: 401,
+            }))
+        })
+        .await;
+        assert_eq!(limits, [50]);
+        assert!(result
+            .err()
+            .unwrap()
+            .downcast_ref::<AccountRequestError>()
+            .unwrap()
+            .is_authentication_expired());
+    }
+
+    #[tokio::test]
+    async fn bounded_fetch_rejects_invalid_wrapper_without_retry() {
+        let mut limits = Vec::new();
+        let result = fetch_bounded_page("account-a", |limit| {
+            limits.push(limit);
+            let mut result = page(200, &[]);
+            result.wrapper_present = false;
+            std::future::ready(Ok(result))
+        })
+        .await;
+        assert_eq!(limits, [50]);
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            "inbox response is not a valid success"
+        );
+    }
+
     #[test]
     fn platform_page_exceeding_requested_limit_can_commit_and_advance() {
         let (_dir, store, token) = fixture();
@@ -308,12 +498,24 @@ mod tests {
     #[test]
     fn websocket_receipts_are_bounded_and_do_not_advance_http_cursor() {
         let (_dir, store, token) = fixture();
-        commit_frontier(&store, &token, 1, (1..=512).map(message).collect()).unwrap();
+        commit_frontier(
+            &store,
+            &token,
+            1,
+            (1..=u64::from(MAX_PENDING_RECORDS)).map(message).collect(),
+        )
+        .unwrap();
         assert!(store
             .inbound_checkpoint(&token.account_id, STREAM)
             .unwrap()
             .is_none());
-        assert!(commit_frontier(&store, &token, 1, vec![message(513)]).is_err());
+        assert!(commit_frontier(
+            &store,
+            &token,
+            1,
+            vec![message(u64::from(MAX_PENDING_RECORDS) + 1)]
+        )
+        .is_err());
         assert_eq!(
             store
                 .inbound_checkpoint(&token.account_id, "douyin-im-ws")
@@ -487,7 +689,7 @@ mod tests {
     fn failed_initial_page_keeps_watermark_and_retries_without_advancing_cursor() {
         let (_dir, store, token) = fixture();
         let cutoff = u64::try_from(store.ensure_inbound_live_start(&token, 1).unwrap()).unwrap();
-        let ids: Vec<u64> = (1..=513).collect();
+        let ids: Vec<u64> = (1..=u64::from(MAX_PENDING_RECORDS) + 1).collect();
         let mut response = page(100, &ids);
         for m in &mut response.messages {
             m.create_time_us = cutoff + 1;
@@ -518,7 +720,7 @@ mod tests {
     #[test]
     fn initial_page_count_is_bounded_even_when_all_messages_are_history() {
         let (_dir, store, token) = fixture();
-        let ids: Vec<u64> = (1..=513).collect();
+        let ids: Vec<u64> = (1..=u64::from(MAX_PENDING_RECORDS) + 1).collect();
         assert!(commit_page(&store, &token, 1, None, page(100, &ids)).is_err());
         assert!(store
             .inbound_checkpoint(&token.account_id, STREAM)
@@ -576,10 +778,17 @@ mod tests {
     fn full_spool_rolls_back_every_insert_and_cursor() {
         let (_dir, store, token) = fixture();
         commit(&store, &token, 100, &[]);
-        let ids: Vec<u64> = (1..=512).collect();
+        let ids: Vec<u64> = (1..=u64::from(MAX_PENDING_RECORDS)).collect();
         commit(&store, &token, 200, &ids);
         let old = store.inbound_checkpoint(&token.account_id, STREAM).unwrap();
-        assert!(commit_page(&store, &token, 1, old.as_ref(), page(201, &[513])).is_err());
+        assert!(commit_page(
+            &store,
+            &token,
+            1,
+            old.as_ref(),
+            page(201, &[u64::from(MAX_PENDING_RECORDS) + 1])
+        )
+        .is_err());
         assert_eq!(
             store
                 .inbound_checkpoint(&token.account_id, STREAM)
@@ -589,8 +798,11 @@ mod tests {
             200
         );
         assert_eq!(
-            store.pending_inbound_receipts(&token, 600).unwrap().len(),
-            512
+            store
+                .pending_inbound_receipts(&token, MAX_PENDING_RECORDS + 1)
+                .unwrap()
+                .len(),
+            MAX_PAGE_MESSAGES
         );
         assert_eq!(commit(&store, &token, 200, &ids).inserted, 0);
     }

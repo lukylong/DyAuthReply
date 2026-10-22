@@ -546,16 +546,16 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.49'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.50'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '完善运行诊断，区分回关与普通消息触发，记录同批回复的关联编号\n'
-    '补充每段消息的发送结果、重试次数和耗时，便于定位部分发送失败\n'
-    '补充消息接收异常、自动回复开关变化及整批停止原因\n'
-    '配合新版管理后台显示中文事件说明、错误码解释与排查建议\n'
-    '诊断不新增私信正文、登录凭证或原始会话编号；原有关闭选择保持不变\n'
+    '修复回关自动回复兼容，保留跨通道去重\n'
+    '修复表情、图片、语音、视频和卡片消息触发自动兜底，不改变聊天显示\n'
+    '回复记录改用中文原因说明，冷却和规则跳过不再作为发送失败展示\n'
+    '修复大消息页补拉反复失败，保留接收位置并采用有上限的缩小分页重试\n'
+    '完善接收异常分类，不新增私信正文或登录凭证上报\n'
     '升级保留登录资料、账号和回复规则；浏览器扩展本版无改动（扩展更新至 2.3.4 后保持不变）'
 )

@@ -27,6 +27,10 @@ fn call(port: u16, path: &str, token: Option<&str>, body: Option<&str>) -> Strin
 fn scenario(method: &str) {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("agent-v2");
+    // This child uses an empty synthetic data root. Preserve its startup error
+    // instead of discarding the only evidence when a CI-specific boot fails.
+    let stderr_path = root.path().join("native-stderr.log");
+    let stderr = std::fs::File::create(&stderr_path).unwrap();
     let port = port();
     let mut child = Command::new(env!("CARGO_BIN_EXE_dy-agent"))
         .env("CLIENT_DATA_DIR", root.path())
@@ -35,13 +39,18 @@ fn scenario(method: &str) {
         .env("DY_AGENT_PARENT_STDIN", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(stderr))
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     while TcpStream::connect(("127.0.0.1", port)).is_err() {
         assert!(Instant::now() < deadline);
-        assert!(child.try_wait().unwrap().is_none());
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!(
+                "native child exited before readiness ({status}): {}",
+                std::fs::read_to_string(&stderr_path).unwrap_or_default()
+            );
+        }
         std::thread::sleep(Duration::from_millis(30));
     }
     let identity = call(

@@ -21,6 +21,18 @@ struct StartInput {
 pub fn router(broker: Arc<Broker>, token: String) -> Router {
     let routes = Router::new()
         .route(
+            "/api/client/v1/douyin/creator-session/current",
+            get(creator_current).options(options),
+        )
+        .route(
+            "/api/client/v1/douyin/creator-session/start",
+            post(creator_start).options(options),
+        )
+        .route(
+            "/api/client/v1/douyin/creator-session/{session_id}/finish",
+            post(creator_finish).options(options),
+        )
+        .route(
             "/api/client/v1/douyin/quick-auth/component",
             get(component).options(options),
         )
@@ -161,5 +173,35 @@ async fn cancel(State(broker): State<Arc<Broker>>, Path(session_id): Path<String
             .cancel(&session_id)
             .await
             .and_then(|view| serde_json::to_value(view).map_err(Into::into)),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreatorInput {
+    account_id: String,
+    #[serde(default)]
+    confirm_pause: bool,
+}
+async fn creator_current(State(broker): State<Arc<Broker>>) -> Json<Value> {
+    Json(serde_json::to_value(broker.creator_current().await).unwrap_or(Value::Null))
+}
+async fn creator_start(
+    State(broker): State<Arc<Broker>>,
+    Json(input): Json<CreatorInput>,
+) -> Response {
+    result(
+        broker
+            .creator_start(input.account_id, input.confirm_pause)
+            .await
+            .and_then(|v| Ok(serde_json::to_value(v)?)),
+    )
+}
+async fn creator_finish(State(broker): State<Arc<Broker>>, Path(id): Path<String>) -> Response {
+    result(
+        broker
+            .creator_finish(&id)
+            .await
+            .and_then(|v| Ok(serde_json::to_value(v)?)),
     )
 }

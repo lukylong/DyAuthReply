@@ -1408,3 +1408,28 @@ export class DouyinRealtime {
     this.ws = null;
   }
 }
+
+
+export interface CreatorSession {
+  session_id: string;
+  account_id: string;
+  state: 'launching' | 'open' | 'syncing' | 'closing' | 'completed' | 'needs_attention';
+  message: string;
+  original_auto_reply: boolean;
+  auto_reply_restored: boolean;
+  credentials_updated: boolean;
+  started_at_ms: number;
+}
+export function getCreatorSession() {
+  return request<CreatorSession | null>('/douyin/creator-session/current');
+}
+export function startCreatorSession(accountId: string, confirmPause: boolean) {
+  return request<CreatorSession>('/douyin/creator-session/start', {
+    method: 'POST', body: JSON.stringify({ account_id: accountId, confirm_pause: confirmPause }),
+  });
+}
+export function finishCreatorSession(sessionId: string) {
+  return request<CreatorSession>(`/douyin/creator-session/${encodeURIComponent(sessionId)}/finish`, {
+    method: 'POST', body: '{}',
+  });
+}

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { Heart } from 'lucide-vue-next';
+import CreatorSessionPanel from './CreatorSessionPanel.vue';
 import {
   getAccountWorks,
   getProfileStats,
@@ -190,6 +191,7 @@ watch(
         </header>
 
         <div class="drawer-body">
+          <CreatorSessionPanel v-if="account" :account="account" />
           <section class="status-details" aria-labelledby="account-status-title">
             <h4 id="account-status-title" class="section-title">账号状态</h4>
             <p class="status-description">{{ statusView.description }}</p>

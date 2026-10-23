@@ -319,6 +319,7 @@ struct Inner {
     http_profiles: std::sync::Mutex<BTreeMap<String, ProtocolHttpClient>>,
     /// Serializes hot account changes against each other.
     account_changes: Mutex<()>,
+    creator_holds: std::sync::Mutex<BTreeMap<String, bool>>,
 }
 #[derive(Clone)]
 pub struct ManualService {
@@ -438,6 +439,7 @@ impl ManualService {
                 http_budget: budget,
                 http_profiles: std::sync::Mutex::new(profiles),
                 account_changes: Mutex::new(()),
+                creator_holds: std::sync::Mutex::new(BTreeMap::new()),
             }),
         }))
     }
@@ -508,6 +510,7 @@ impl ManualService {
         // immutable until the registry tombstone and policy removal are published.
         let _configuration = self.inner.configuration_gate.write().await;
         let snapshot = self.inner.business.snapshot()?;
+        anyhow::ensure!(!self.creator_held(id), "请先结束创作者平台窗口再移除账号");
         snapshot.document.ensure_account_unbound(id)?;
         anyhow::ensure!(
             !snapshot.policies.get(id).is_some_and(|p| p.enabled),
@@ -1233,6 +1236,14 @@ impl ManualService {
     /// # Errors
     /// Serializes edits against native planning/sending; publishes only a validated durable generation.
     pub async fn change_business(&self, edit: crate::business::Edit) -> Result<serde_json::Value> {
+        self.change_business_inner(edit, false).await
+    }
+
+    async fn change_business_inner(
+        &self,
+        edit: crate::business::Edit,
+        creator: bool,
+    ) -> Result<serde_json::Value> {
         if let crate::business::Edit::Account { id, input } = &edit {
             anyhow::ensure!(self.has_account(id), "账号未托管");
             if input["auto_reply_enabled"] == true {
@@ -1240,6 +1251,41 @@ impl ManualService {
             }
         }
         let _configuration = self.inner.configuration_gate.write().await;
+        if !creator {
+            if let crate::business::Edit::Account { id, input } = &edit {
+                anyhow::ensure!(
+                    input.get("auto_reply_enabled").is_none() || !self.creator_held(id),
+                    "创作者平台正在人工接管，请先结束窗口并恢复托管"
+                );
+            }
+        }
+        if creator {
+            if let crate::business::Edit::Account { id, input } = &edit {
+                if input["auto_reply_enabled"] == true {
+                    anyhow::ensure!(
+                        self.inner
+                            .creator_holds
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .get(id)
+                            .copied()
+                            .unwrap_or(false),
+                        "自动恢复已被停止操作取消"
+                    );
+                }
+            }
+        }
+        if matches!(&edit, crate::business::Edit::EmergencyStop) {
+            for resume in self
+                .inner
+                .creator_holds
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .values_mut()
+            {
+                *resume = false;
+            }
+        }
         let previous = self.inner.business.snapshot()?;
         let change_source = match &edit {
             crate::business::Edit::Account { .. } => "account_settings",
@@ -1806,6 +1852,9 @@ impl ManualService {
     }
 
     fn send_admission(&self, work: &WorkEnvelope, route: &Route) -> Result<SendAdmission> {
+        if self.creator_held(work.account_id.as_str()) {
+            return Ok(SendAdmission::Cancel);
+        }
         if work.kind != WorkKind::AutomaticReply {
             return Ok(SendAdmission::Proceed);
         }
@@ -2652,3 +2701,6 @@ mod tests {
         assert!(!status.success);
     }
 }
+
+#[path = "messaging/creator_hold.rs"]
+mod creator_hold;

@@ -655,12 +655,12 @@ impl CdpClient {
         }
     }
 
-    async fn command(&mut self, method: &str, params: Value) -> Result<Value> {
+    pub(super) async fn command(&mut self, method: &str, params: Value) -> Result<Value> {
         let [result] = self.commands([(method, params)]).await?;
         Ok(result)
     }
 
-    async fn navigate(&mut self, url: &str) -> Result<()> {
+    pub(super) async fn navigate(&mut self, url: &str) -> Result<()> {
         self.route_action_at = Some(tokio::time::Instant::now());
         let result = self.command("Page.navigate", json!({"url":url})).await?;
         anyhow::ensure!(

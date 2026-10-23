@@ -54,7 +54,32 @@ impl Importer {
     /// # Errors
     /// Rejects incomplete, unlicensed, duplicate or cross-account credentials.
     pub async fn import_bundle(&self, target: Option<String>, bundle: String) -> Result<Value> {
-        import(
+        self.publish_bundle(target, bundle, false).await
+    }
+
+    pub(crate) async fn import_creator_bundle(
+        &self,
+        target: String,
+        bundle: String,
+    ) -> Result<Value> {
+        self.publish_bundle(Some(target), bundle, true).await
+    }
+
+    pub(crate) fn creator_service(&self) -> Result<Arc<ManualService>> {
+        anyhow::ensure!(
+            self.app.license.status()["can_use_business"] == true,
+            "授权未生效，请先完成授权"
+        );
+        Ok(self.app.service.clone())
+    }
+
+    async fn publish_bundle(
+        &self,
+        target: Option<String>,
+        bundle: String,
+        creator: bool,
+    ) -> Result<Value> {
+        import_inner(
             self.app.clone(),
             target,
             Input {
@@ -71,6 +96,7 @@ impl Importer {
                 silent_end: None,
                 remark: None,
             },
+            creator,
         )
         .await
     }
@@ -207,6 +233,21 @@ async fn update(
     response(import(app, Some(id), input).await)
 }
 async fn import(app: App, target: Option<String>, input: Input) -> Result<Value> {
+    import_inner(app, target, input, false).await
+}
+fn ensure_creator_publication(app: &App, id: &str, creator: bool) -> Result<()> {
+    anyhow::ensure!(
+        creator || !app.service.creator_held(id),
+        "创作者平台正在人工接管，请先结束窗口再更新凭证"
+    );
+    Ok(())
+}
+async fn import_inner(
+    app: App,
+    target: Option<String>,
+    input: Input,
+    creator: bool,
+) -> Result<Value> {
     anyhow::ensure!(
         app.license.status()["can_use_business"] == true,
         "授权未生效，请先完成授权"
@@ -284,6 +325,7 @@ async fn import(app: App, target: Option<String>, input: Input) -> Result<Value>
         existing.as_ref().is_some_and(|r| !r.deleted) || active < usize::try_from(limit)?,
         "本机托管账号已达当前承载上限，请查看设置中的承载评估"
     );
+    ensure_creator_publication(&app, &document.account_id, creator)?;
     let policy = account_policy(&input, document.account_id.clone())?;
     log_import(&document.account_id, &input, &document.user_agent);
     let (record, changed) = registry.put(

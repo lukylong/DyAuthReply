@@ -520,7 +520,7 @@ jobs:
 
           version=$(python3 -c "import json;print(json.load(open('dyauthreply-client/desktop/src-tauri/tauri.conf.json'))['version'])")
           pub_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          notes="${GITHUB_REF_NAME:-}"
+          notes="$(cat .github/client-release-notes.md)"
 
           mkdir -p dist-manifests
           test -s dist-public/DAssistant-windows-x64-setup.exe.sig
@@ -585,8 +585,11 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          DIST_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
         run: |
           set -euo pipefail
           gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --draft=false --latest
+          GH_TOKEN="$DIST_TOKEN" gh release edit client-latest --repo "$DIST_REPO" \
+            --title "D助手 客户端与插件下载" --notes-file .github/client-release-notes.md
           echo 'VERSIONED_RELEASE_PUBLISHED=1'

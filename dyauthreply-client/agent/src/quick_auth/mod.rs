@@ -2,6 +2,7 @@
 pub mod api;
 mod cdp;
 mod component;
+pub mod creator;
 mod installer;
 #[cfg(test)]
 mod live_probe;
@@ -199,6 +200,7 @@ pub struct Broker {
     state: Mutex<State>,
     install: Arc<InstallProgress>,
     component_gate: Arc<Mutex<()>>,
+    creator: Mutex<Option<creator::Session>>,
 }
 
 fn component_operation(gate: &Arc<Mutex<()>>) -> Result<tokio::sync::OwnedMutexGuard<()>> {
@@ -255,10 +257,12 @@ struct Launched {
 impl Broker {
     #[must_use]
     pub fn new(root: PathBuf, importer: Arc<Importer>) -> Arc<Self> {
+        let recovered = creator::recover(&root);
         Arc::new(Self {
             root,
             importer,
             state: Mutex::new(State { session: None }),
+            creator: Mutex::new(recovered),
             component_gate: Arc::new(Mutex::new(())),
             install: Arc::new(InstallProgress {
                 phase: StdMutex::new(InstallPhase {
@@ -344,7 +348,17 @@ impl Broker {
     }
 
     async fn require_browser_closed(&self) -> Result<()> {
-        ensure_browser_closed(&*self.state.lock().await)
+        ensure_browser_closed(&*self.state.lock().await)?;
+        anyhow::ensure!(
+            !self
+                .creator
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(creator::Session::active),
+            "请先结束创作者平台窗口"
+        );
+        Ok(())
     }
 
     fn reserve_component(&self) -> Result<tokio::sync::OwnedMutexGuard<()>> {
@@ -474,6 +488,7 @@ impl Broker {
                 != "installing",
             "快捷登录组件正在安装"
         );
+        self.require_browser_closed().await?;
         let target_account_id = normalize_target(mode, target_account_id)?;
         if let Some(target) = target_account_id.as_deref() {
             self.importer.expected_scope(target)?;

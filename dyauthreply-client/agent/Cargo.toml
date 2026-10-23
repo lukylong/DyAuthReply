@@ -68,3 +68,14 @@ unsafe_code = "forbid"
 [lints.clippy]
 all = "warn"
 pedantic = "warn"
+
+# Lifecycle tests launch the real debug binary, which must satisfy the same
+# bounded IPC identity hashing contract as the packaged release executable.
+# Full DWARF data can push the Linux test executable beyond that 256 MiB bound.
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false

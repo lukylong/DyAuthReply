@@ -32,7 +32,10 @@ fn scenario(method: &str) {
     let stderr_path = root.path().join("native-stderr.log");
     let stderr = std::fs::File::create(&stderr_path).unwrap();
     let port = port();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_dy-agent"))
+    let executable = env!("CARGO_BIN_EXE_dy-agent");
+    let expected_digest = dy_agent::desktop_ipc::binary_digest(std::path::Path::new(executable))
+        .expect("test executable must satisfy the production IPC binary-size bound");
+    let mut child = Command::new(executable)
         .env("CLIENT_DATA_DIR", root.path())
         .env("DY_AGENT_DATA_DIR", &data)
         .env("DY_AGENT_BIND", format!("127.0.0.1:{port}"))
@@ -62,6 +65,7 @@ fn scenario(method: &str) {
     assert!(identity.starts_with("HTTP/1.1 200"));
     let raw = identity.split("\r\n\r\n").nth(1).unwrap();
     let identity: serde_json::Value = serde_json::from_str(raw).unwrap();
+    assert_eq!(identity["binary_sha256"], expected_digest);
     if method == "pipe" {
         drop(child.stdin.take());
     } else {

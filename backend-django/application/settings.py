@@ -546,15 +546,15 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.54'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.55'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '新增免扫码进入创作者平台，复用有效登录态直接处理私信\n'
-    '优化关窗凭证校验，减少重复采集和登录失效提示\n'
-    '人工操作期间暂停当前账号自动回复，关闭后保持关闭，需手动开启\n'
-    '浏览器按需启动、用完退出；升级保留账号、规则和聊天数据\n'
+    '回复间隔新增 6 小时、12 小时快捷选项，移除 30 分钟快捷项\n'
+    '自定义间隔按小时填写，支持小数：0.5 小时等于 30 分钟\n'
+    '优化冷却时间排版，自定义输入与快捷选项同排，减少占位\n'
+    '已有回复间隔保持不变，升级保留账号、规则和聊天数据\n'
     '浏览器扩展本版无改动（扩展更新至 2.3.4 后保持不变）'
 )

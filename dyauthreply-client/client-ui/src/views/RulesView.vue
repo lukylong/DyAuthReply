@@ -60,6 +60,7 @@ const form = ref({
   time_window_end: '',
   weekday_mask: '1111111',
 });
+const customCooldownHours = ref('');
 
 // 账号冲突确认状态
 const pendingConflicts = ref<import('../api/client').RuleAccountConflict[]>([]);
@@ -157,6 +158,7 @@ async function loadRules() {
 
 function openCreate() {
   editing.value = null;
+  customCooldownHours.value = '';
   form.value = {
     name: '',
     match_type: 'contains',
@@ -198,6 +200,9 @@ function openEdit(rule: DouyinRule) {
     time_window_end: rule.time_window_end || '',
     weekday_mask: rule.weekday_mask || '1111111',
   };
+  customCooldownHours.value = COOLDOWN_PRESETS.some((preset) => preset.value === form.value.cooldown_seconds)
+    ? ''
+    : String(form.value.cooldown_seconds / 3600);
   formError.value = '';
   showForm.value = true;
 }
@@ -278,6 +283,10 @@ async function submitForm() {
   }
   if (!form.value.reply_text.trim() && form.value.match_type !== 'default') {
     formError.value = '请填写回复内容';
+    return;
+  }
+  if (!Number.isSafeInteger(form.value.cooldown_seconds) || form.value.cooldown_seconds < 0) {
+    formError.value = '请填写有效的冷却小时数：0 表示不限，大于 0 时至少为 1 秒';
     return;
   }
   submitting.value = true;
@@ -467,9 +476,26 @@ function toggleWeekday(idx: number) {
 const COOLDOWN_PRESETS = [
   { label: '不限', value: 0 },
   { label: '5 分钟', value: 300 },
-  { label: '30 分钟', value: 1800 },
   { label: '1 小时', value: 3600 },
+  { label: '6 小时', value: 21600 },
+  { label: '12 小时', value: 43200 },
 ];
+
+function selectCooldownPreset(seconds: number) {
+  form.value.cooldown_seconds = seconds;
+  customCooldownHours.value = '';
+}
+
+function setCustomCooldownHours(value: string) {
+  customCooldownHours.value = value;
+  const hours = Number(value);
+  const seconds = Math.round(hours * 3600);
+  // 接口和已有配置仍使用整秒；空值或无效输入不能变成“不限”。
+  form.value.cooldown_seconds = value.trim() && Number.isFinite(hours) && hours >= 0
+    && (hours === 0 || seconds > 0)
+    ? seconds
+    : Number.NaN;
+}
 
 function weekdayLabel(mask: string): string {
   if (!mask || mask === '1111111') return '全周';
@@ -777,16 +803,27 @@ onMounted(async () => {
                 type="button"
                 class="preset-btn"
                 :class="{ active: form.cooldown_seconds === p.value }"
-                @click="form.cooldown_seconds = p.value"
+                @click="selectCooldownPreset(p.value)"
               >{{ p.label }}</button>
-              <input
-                class="input-glass cooldown-custom"
-                v-model.number="form.cooldown_seconds"
-                type="number"
-                min="0"
-                placeholder="自定义秒数"
-              />
+              <label class="cooldown-custom-wrap">
+                <input
+                  class="input-glass cooldown-custom"
+                  :value="customCooldownHours"
+                  @input="setCustomCooldownHours(($event.target as HTMLInputElement).value)"
+                  type="number"
+                  min="0"
+                  step="any"
+                  inputmode="decimal"
+                  placeholder="自定义"
+                  aria-label="自定义（小时）"
+                  aria-describedby="cooldown-hours-hint"
+                />
+                <span class="cooldown-unit" aria-hidden="true">小时</span>
+              </label>
             </div>
+            <p id="cooldown-hours-hint" class="field-hint cooldown-hint">
+              支持小数，0.5 小时 = 30 分钟；0 表示不限。
+            </p>
           </div>
         </div>
 
@@ -1469,6 +1506,7 @@ onMounted(async () => {
   flex-shrink: 0;
 }
 .priority-field .input-glass {
+  height: 32px;
   font-size: 0.8rem;
   padding: 6px 10px;
 }
@@ -1482,8 +1520,11 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: nowrap;
-  margin-top: 4px;
+  flex-wrap: wrap;
+}
+.cooldown-presets .preset-btn {
+  height: 32px;
+  padding: 0 10px;
 }
 .preset-btn {
   padding: 6px 12px;
@@ -1509,12 +1550,37 @@ onMounted(async () => {
   color: var(--violet);
   font-weight: 600;
 }
-.cooldown-custom {
-  flex: 1;
-  min-width: 64px;
-  width: auto;
+.cooldown-custom-wrap {
+  position: relative;
+  flex: 0 0 108px;
+  min-width: 0;
+}
+.cooldown-custom-wrap .cooldown-custom {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
   font-size: 0.8rem;
-  padding: 6px 10px;
+  padding: 0 36px 0 10px;
+  font-variant-numeric: tabular-nums;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.cooldown-custom::-webkit-inner-spin-button,
+.cooldown-custom::-webkit-outer-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+.cooldown-unit {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  pointer-events: none;
+}
+.cooldown-hint {
+  margin: 0;
 }
 .ml-8 { margin-left: 8px; }
 

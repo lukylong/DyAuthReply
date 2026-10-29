@@ -271,6 +271,7 @@ jobs:
           node scripts/client/test_quick_auth_state.mjs
           node scripts/client/test_browser_component_management.mjs
           node scripts/client/test_card_deletion.mjs
+          node scripts/client/test_rule_cooldown.mjs
           node scripts/client/test_client_audit_regressions.mjs
           node scripts/client/test_diagnostics_presentation.mjs
           node scripts/client/test_reply_log_chinese.mjs

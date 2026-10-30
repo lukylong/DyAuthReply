@@ -22,6 +22,7 @@
   "windows_compat": {
     "version": "152.0.7977.169",
     "sources": [
+      "https://gz-1349751149.cos.ap-guangzhou.myqcloud.com/app/chrome-for-testing/{version}/chrome-{version}-{platform}.zip",
       "https://gh-proxy.com/https://github.com/lukylong/DyAuthReply-dist/releases/download/browser-components/chrome-{version}-{platform}.zip",
       "https://ghfast.top/https://github.com/lukylong/DyAuthReply-dist/releases/download/browser-components/chrome-{version}-{platform}.zip",
       "https://storage.googleapis.com/chrome-for-testing-public/{version}/{platform}/chrome-{platform}.zip"

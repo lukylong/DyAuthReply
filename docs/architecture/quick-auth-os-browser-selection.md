@@ -26,8 +26,9 @@ Windows build 使用 sysinfo 读取注册表 CurrentBuildNumber。已确认故�
 
 - 标准 pin 和 `windows_compat` 的版本、来源、长度及 SHA256 独立维护。
 - 兼容包来自 Google 官方 CfT 地址；兼容版本为 152.0.7977.169，而非较早的 152.0.7977.82。
+- 用户 COS 对象路径为 `app/chrome-for-testing/{version}/chrome-{version}-{platform}.zip`，与标准版的目录形式分别配置。
 - 兼容包原始字节发布在公共分发仓 `browser-components` 资源页，不将该页设为 latest，不修改 `client-latest` 更新清单。
-- 兼容来源依次使用 gh-proxy.com、ghfast.top、Google 官方源；每个来源必须通过同一固定长度和 SHA256 校验。
+- 兼容来源依次使用用户 COS、gh-proxy.com、ghfast.top、Google 官方源；每个来源必须通过同一固定长度和 SHA256 校验。
 - `pin_quick_auth_component.mjs --available` / `--check` 覆盖两组 pin；`--profile windows_compat` 可单独验证兼容包；更新标准 pin 保留兼容 pin。
 
 ## 可见反馈与上报

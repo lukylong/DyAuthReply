@@ -546,15 +546,15 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.55'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.56'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    '回复间隔新增 6 小时、12 小时快捷选项，移除 30 分钟快捷项\n'
-    '自定义间隔按小时填写，支持小数：0.5 小时等于 30 分钟\n'
-    '优化冷却时间排版，自定义输入与快捷选项同排，减少占位\n'
-    '已有回复间隔保持不变，升级保留账号、规则和聊天数据\n'
-    '浏览器扩展本版无改动（扩展更新至 2.3.4 后保持不变）'
+    '安装和修复内置浏览器时，自动按 Windows 系统版本选择组件\n'
+    'Windows 10 使用 152 兼容版，Windows 11 使用原 155 标准版，macOS 不变\n'
+    '兼容组件优先从国内 COS 下载，并校验完整安装包\n'
+    '已有组件需在设置中的内置浏览器点击修复重装，完成后重新快捷登录\n'
+    '保留账号、登录资料和回复规则；浏览器扩展本版无改动（扩展更新至 2.3.4 后保持不变）'
 )

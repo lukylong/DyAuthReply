@@ -30,9 +30,12 @@ pub async fn native_request(
     method: String,
     body: Option<String>,
     admin_token: Option<String>,
+    skip_browser_input: Option<bool>,
 ) -> Result<NativeResponse, String> {
     require_local(&window)?;
-    if crate::browser_input::needs_english_input(&path, &method) {
+    if crate::browser_input::needs_english_input(&path, &method)
+        && !skip_browser_input.unwrap_or(false)
+    {
         return crate::input_policy::start_after_attempt(
             crate::browser_input::prepare(&window),
             || host.request(path, method, body, admin_token),
@@ -45,6 +48,14 @@ pub async fn native_request(
         .await;
     }
     host.request(path, method, body, admin_token).await
+}
+
+#[tauri::command]
+pub async fn prepare_quick_auth_input(
+    window: WebviewWindow,
+) -> Result<crate::browser_input::InputPreparation, String> {
+    require_local(&window)?;
+    Ok(crate::browser_input::report(&window).await)
 }
 #[tauri::command]
 pub async fn native_request_image(

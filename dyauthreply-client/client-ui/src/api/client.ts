@@ -67,7 +67,7 @@ export function isAdminLoggedIn(): boolean {
   return Boolean(getAdminToken());
 }
 
-async function request<T>(path: string, init?: RequestInit, admin = false): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, admin = false, skipBrowserInput = false): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(init?.headers as Record<string, string> | undefined),
@@ -83,6 +83,7 @@ async function request<T>(path: string, init?: RequestInit, admin = false): Prom
     const response = await invoke<{ status: number; body: string }>('native_request', {
       path: `/api/client/v1${path}`, method: init?.method || 'GET', body: init?.body ?? null,
       adminToken: admin ? getAdminToken() : null,
+      skipBrowserInput,
     });
     res = new Response(response.status === 204 ? null : response.body, { status: response.status });
   } else {
@@ -598,6 +599,12 @@ export interface QuickAuthSession {
   progress_fresh?: boolean;
   account?: QuickAuthAccount | null;
   component: QuickAuthComponent;
+  input_preparation?: QuickAuthInputPreparation;
+}
+
+export interface QuickAuthInputPreparation {
+  state: 'ready' | 'manual' | 'unconfirmed' | 'not_applicable';
+  message: string;
 }
 
 export function getQuickAuthComponent() {
@@ -630,11 +637,25 @@ export function uninstallQuickAuthComponent() {
   });
 }
 
-export function startQuickAuth(mode: QuickAuthMode, targetAccountId?: string) {
-  return request<QuickAuthSession>('/douyin/quick-auth/start', {
+export async function startQuickAuth(mode: QuickAuthMode, targetAccountId?: string, automaticInput = true) {
+  let preparation: QuickAuthInputPreparation | undefined;
+  if (isTauriRuntime()) {
+    if (automaticInput) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        preparation = await invoke<QuickAuthInputPreparation>('prepare_quick_auth_input');
+      } catch {
+        preparation = { state: 'unconfirmed', message: '输入法准备未完成，仍会尝试打开浏览器；若仍闪退，可使用手动模式重试。' };
+      }
+    } else {
+      preparation = { state: 'manual', message: '手动模式：已跳过自动切换，保留你当前选择的输入法。请确认任务栏为 ENG。' };
+    }
+  }
+  const session = await request<QuickAuthSession>('/douyin/quick-auth/start', {
     method: 'POST',
     body: JSON.stringify({ mode, target_account_id: targetAccountId || null }),
-  });
+  }, false, true);
+  return { ...session, input_preparation: preparation };
 }
 
 export function getQuickAuthSession(sessionId: string) {

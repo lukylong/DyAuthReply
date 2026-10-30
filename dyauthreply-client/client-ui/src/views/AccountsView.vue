@@ -27,6 +27,7 @@ import {
   type QuickAuthMode,
   type QuickAuthComponent,
   type QuickAuthSession,
+  type QuickAuthInputPreparation,
 } from '../api/client';
 import { useClientLicense } from '../composables/useClientLicense';
 import { useClientRealtime } from '../composables/useClientRealtime';
@@ -49,6 +50,9 @@ const showQuickAuth = ref(false);
 const quickAuth = ref<QuickAuthSession | null>(null);
 const quickAuthError = ref('');
 const quickAuthBusy = ref(false);
+const quickAuthAutomaticInput = ref(true);
+const quickAuthInputStatus = ref<QuickAuthInputPreparation | undefined>();
+const windowsClient = inTauriRuntime() && /Windows/i.test(navigator.userAgent);
 const quickComponent = ref<QuickAuthComponent | null>(null);
 const quickPendingTarget = ref<DouyinAccount | undefined>();
 const quickAuthTarget = ref<DouyinAccount | undefined>();
@@ -88,7 +92,9 @@ function stopComponentRepair() {
 }
 
 async function beginQuickAuth(account?: DouyinAccount) {
-  quickAuth.value = await startQuickAuth(quickAuthMode(account), account?.id);
+  quickAuthInputStatus.value = undefined;
+  quickAuth.value = await startQuickAuth(quickAuthMode(account), account?.id, quickAuthAutomaticInput.value);
+  quickAuthInputStatus.value = quickAuth.value.input_preparation;
   startQuickAuthRepair();
 }
 
@@ -168,6 +174,7 @@ async function openQuickAuth(account?: DouyinAccount) {
     return;
   }
   quickAuthBusy.value = true;
+  quickAuthInputStatus.value = undefined;
   stopQuickAuthRepair();
   stopComponentRepair();
   quickAuthError.value = '';
@@ -621,7 +628,14 @@ onMounted(async () => {
       @close="closeQuickAuth"
     >
       <div class="quick-auth-content">
-        <p class="msg-box">Windows 客户端会尝试切换到英文（美国）键盘；切换未确认也会继续打开浏览器。若仍闪退，请手动选择 ENG 后重试。保留登录资料，不修改系统默认语言。</p>
+        <div v-if="windowsClient" class="msg-box">
+          <label class="input-mode-choice">
+            <input v-model="quickAuthAutomaticInput" type="checkbox" :disabled="quickAuthBusy || (!!quickAuth && !quickAuthTerminal)" />
+            启动前尝试切换英文（美国）键盘
+          </label>
+          <p>切换失败不会阻止启动。手动选好 ENG 后，可取消勾选再重试；不修改系统默认语言，不删除登录资料。</p>
+          <p v-if="quickAuthInputStatus" role="status">{{ quickAuthInputStatus.message }}</p>
+        </div>
         <div v-if="!quickAuth && quickComponent?.state !== 'ready'" class="component-install-card">
           <LoaderCircle v-if="quickComponent?.state === 'installing'" class="quick-spinner" :size="34" />
           <KeyRound v-else :size="34" />
@@ -1166,6 +1180,25 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.input-mode-choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.input-mode-choice input {
+  width: 16px;
+  height: 16px;
+  accent-color: #526cf0;
+}
+
+.input-mode-choice ~ p {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .component-install-card {

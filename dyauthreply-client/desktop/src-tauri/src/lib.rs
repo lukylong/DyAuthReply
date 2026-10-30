@@ -400,6 +400,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             backend_status,
             native_request,
+            prepare_quick_auth_input,
             native_request_image,
             native_restart,
             native_reload_configuration,

@@ -4,6 +4,34 @@ pub fn needs_english_input(path: &str, method: &str) -> bool {
     method == "POST" && path == "/api/client/v1/douyin/quick-auth/start"
 }
 
+#[derive(serde::Serialize)]
+pub struct InputPreparation {
+    pub state: &'static str,
+    pub message: String,
+}
+
+pub async fn report(window: &tauri::WebviewWindow) -> InputPreparation {
+    if !cfg!(target_os = "windows") {
+        return InputPreparation {
+            state: "not_applicable",
+            message: String::new(),
+        };
+    }
+    match prepare(window).await {
+        Ok(()) => InputPreparation {
+            state: "ready",
+            message: "启动前已确认英文键盘；账号登录进度请以下方状态为准".into(),
+        },
+        Err(error) => {
+            eprintln!("[quick-auth] input preparation unconfirmed: {error}");
+            InputPreparation {
+                state: "unconfirmed",
+                message: format!("未确认英文键盘，仍会尝试启动浏览器。{error}"),
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub async fn prepare(window: &tauri::WebviewWindow) -> Result<(), String> {
     use crate::windows_input;

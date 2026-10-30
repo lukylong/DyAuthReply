@@ -11,7 +11,7 @@
 | macOS arm64/x64 | 安装/修复发起时 | 原标准版及原归档摘要不变 |
 | Windows build 缺失、异常或 < 10240 | 下载前返回明确原因 | 不猜测版本、不下载不适配包 |
 
-Windows build 使用 sysinfo 读取注册表 CurrentBuildNumber。BF-202402272109 的 19045.3803 对应 build 19045，选择兼容版。Server 2016/2019/2022 使用对应低 build 的兼容包；Server 2025 使用标准包。这里不增加 Win7/8、Windows x86 或原生 Windows ARM 安装包支持。
+Windows build 使用 sysinfo 读取注册表 CurrentBuildNumber。已确认故障样本的 19045.3803 对应 build 19045，选择兼容版。Server 2016/2019/2022 使用对应低 build 的兼容包；Server 2025 使用标准包。这里不增加 Win7/8、Windows x86 或原生 Windows ARM 安装包支持。
 
 ## 不变的行为
 
@@ -42,7 +42,7 @@ Windows build 使用 sysinfo 读取注册表 CurrentBuildNumber。BF-20240227210
 - Rust 单测覆盖 build 10240、17763、19045、20348、21999、22000、22631、26100，未知/异常/旧系统拒绝，以及 macOS pin 不受影响。
 - Windows Server 2022 实机 CI 应选择 152；较新的 Windows runner 应选择 155，下载后检查真实 Browser.getVersion。
 - Windows CI 运行真实 Rust 选择器，核对 sysinfo 注册表 build；覆盖三个隔离空白配置及 PowerShell 诊断器。
-- 兼容版本完整登录、账号识别及凭证校验仍需受影响 Win10 实机验收。CI 空白页成功不等同于已解决 BF 的退出码 3。
+- 兼容版本完整登录、账号识别及凭证校验仍需受影响 Win10 实机验收。CI 空白页成功不等同于已解决故障样本的退出码 3。
 
 ## 发布边界
 

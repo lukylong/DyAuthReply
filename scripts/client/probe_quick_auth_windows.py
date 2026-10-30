@@ -36,8 +36,20 @@ def production_args() -> list[str]:
     return args
 
 
+def select_windows_pin(pin: dict, build: int) -> tuple[dict, str]:
+    if type(build) is not int or build < 10240:
+        raise ValueError("A supported Windows build is required before selecting a component")
+    if build < 22000:
+        return pin["windows_compat"], "windows_compat"
+    return pin, "standard"
+
+
 def download_browser(output: Path) -> tuple[Path, dict]:
-    pin = json.loads((ROOT / "dyauthreply-client/agent/quick-auth-component.json").read_text(encoding="utf-8"))
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion") as key:
+        build = int(winreg.QueryValueEx(key, "CurrentBuildNumber")[0])
+    manifest = json.loads((ROOT / "dyauthreply-client/agent/quick-auth-component.json").read_text(encoding="utf-8"))
+    pin, variant = select_windows_pin(manifest, build)
     expected = pin["platforms"]["win64"]
     archive = output / "browser.zip"
     attempts = []
@@ -74,7 +86,8 @@ def download_browser(output: Path) -> tuple[Path, dict]:
     browser = managed / "chrome-win64/chrome.exe"
     if not browser.is_file():
         raise RuntimeError("Pinned archive has no browser executable")
-    return browser, {"version": pin["version"], "archive_sha256": expected["sha256"], "sources": attempts}
+    return browser, {"version": pin["version"], "variant": variant, "windows_build": build,
+                     "archive_sha256": expected["sha256"], "sources": attempts}
 
 
 def run_case(browser: Path, output: Path, name: str, profile: Path, verbose: bool = False) -> dict:
@@ -152,7 +165,7 @@ def main() -> int:
         report["cases"].append(run_case(browser, output, "production", output / "agent-v2/quick-auth/sessions" / str(uuid.uuid4())))
         report["cases"].append(run_case(browser, output, "unicode-spaces", output / "用户 目录/快捷登录/sessions" / str(uuid.uuid4())))
         report["cases"].append(run_case(browser, output, "diagnostic-logging", output / "diagnostic-profile", verbose=True))
-        report["passed"] = all(case["ready"] for case in report["cases"])
+        report["passed"] = all(case["ready"] and case.get("browser") == "Chrome/" + component["version"] for case in report["cases"])
     except Exception as error:
         report["error"] = str(error)
         report["passed"] = False

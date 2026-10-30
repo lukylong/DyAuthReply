@@ -305,6 +305,8 @@ impl Broker {
                     .join("components/chromium/previous.json")
                     .is_file(),
                 managed_installed: self.root.join("components/chromium").exists(),
+                recommended_version: None,
+                selection_reason: None,
             }
         } else {
             component::status(&self.root)
@@ -329,6 +331,15 @@ impl Broker {
             view.state = "failed";
             view.install_required = true;
             view.message = message;
+        }
+        match installer::selected_component() {
+            Ok(selected) => {
+                view.selection_reason = Some(selected.selection_reason());
+                view.recommended_version = Some(selected.version);
+            }
+            Err(error) => {
+                view.selection_reason = Some(format!("系统适配信息：{error}"));
+            }
         }
         view
     }
@@ -368,6 +379,10 @@ impl Broker {
     async fn begin_install(self: &Arc<Self>, force: bool) -> Result<ComponentView> {
         let operation = self.reserve_component()?;
         self.require_browser_closed().await?;
+        let selected = installer::selected_component()?;
+        let selection_reason = selected.selection_reason();
+        tracing::info!(version = %selected.version, classification = selected.variant, reason = %selection_reason,
+            "quick-auth component selected for system");
         {
             let mut phase = self
                 .install
@@ -376,12 +391,12 @@ impl Broker {
                 .map_err(|_| anyhow::anyhow!("快捷登录组件状态异常"))?;
             anyhow::ensure!(phase.state != "installing", "快捷登录组件正在安装");
             phase.state = "installing";
-            phase.message = if force {
-                "正在重新下载并修复内置浏览器"
+            let action = if force {
+                "正在重新下载并修复"
             } else {
-                "正在下载快捷登录组件"
-            }
-            .into();
+                "正在下载并安装"
+            };
+            phase.message = format!("{selection_reason}：{action} {}", selected.version);
             self.install.downloaded.store(0, Ordering::Relaxed);
             self.install.total.store(0, Ordering::Relaxed);
         }

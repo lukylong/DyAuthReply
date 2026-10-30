@@ -150,6 +150,25 @@ jobs:
       - name: Launch exact pinned component with production flags
         shell: pwsh
         run: python scripts/client/probe_quick_auth_windows.py --output "$env:RUNNER_TEMP/quick-auth-probe"
+      - name: Install Rust selector test prerequisites
+        if: matrix.os == 'windows-2022'
+        shell: pwsh
+        run: choco install nasm llvm -y --no-progress
+      - name: Setup Rust selector tests
+        if: matrix.os == 'windows-2022'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Reuse native Agent dependencies
+        if: matrix.os == 'windows-2022'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dyauthreply-client/agent
+          shared-key: client-build-x86_64-pc-windows-msvc
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Verify actual Rust selector against Windows registry build
+        if: matrix.os == 'windows-2022'
+        run: cargo test --locked --manifest-path dyauthreply-client/agent/Cargo.toml --lib quick_auth:: -- --nocapture
       - name: Verify user diagnostic script with Windows PowerShell
         shell: powershell
         run: |

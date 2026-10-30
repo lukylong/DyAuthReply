@@ -23,6 +23,8 @@ pub struct ComponentView {
     pub progress_percent: Option<u8>,
     pub can_rollback: bool,
     pub managed_installed: bool,
+    pub recommended_version: Option<String>,
+    pub selection_reason: Option<String>,
 }
 
 #[derive(Clone)]
@@ -66,6 +68,8 @@ pub fn resolve(root: &Path) -> Result<ResolvedComponent> {
                 progress_percent: None,
                 can_rollback: root.join("components/chromium/previous.json").is_file(),
                 managed_installed: root.join("components/chromium").exists(),
+                recommended_version: None,
+                selection_reason: None,
             },
         });
     }
@@ -93,6 +97,8 @@ pub fn status(root: &Path) -> ComponentView {
             progress_percent: None,
             can_rollback: root.join("components/chromium/previous.json").is_file(),
             managed_installed: root.join("components/chromium").exists(),
+            recommended_version: None,
+            selection_reason: None,
         },
     }
 }
@@ -149,6 +155,8 @@ pub(crate) fn managed_from(root: &Path, manifest_path: &Path) -> Result<Resolved
             progress_percent: None,
             can_rollback: root.join("components/chromium/previous.json").is_file(),
             managed_installed: true,
+            recommended_version: None,
+            selection_reason: None,
         },
     })
 }

@@ -18,5 +18,19 @@
       "sha256": "4966d9df2c8ed9be606ff0fc8877b2e800def164fbad63fed6a1d93222ad9dbf",
       "size": 207516446
     }
+  },
+  "windows_compat": {
+    "version": "152.0.7977.169",
+    "sources": [
+      "https://gh-proxy.com/https://github.com/lukylong/DyAuthReply-dist/releases/download/browser-components/chrome-{version}-{platform}.zip",
+      "https://ghfast.top/https://github.com/lukylong/DyAuthReply-dist/releases/download/browser-components/chrome-{version}-{platform}.zip",
+      "https://storage.googleapis.com/chrome-for-testing-public/{version}/{platform}/chrome-{platform}.zip"
+    ],
+    "platforms": {
+      "win64": {
+        "sha256": "22754a905ae59f32ca47008df0a6d32fd435ecef7f368c716ae189fb6b964d71",
+        "size": 203021602
+      }
+    }
   }
 }

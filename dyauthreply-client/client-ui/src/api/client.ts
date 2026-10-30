@@ -562,6 +562,8 @@ export interface QuickAuthComponent {
   progress_percent?: number | null;
   can_rollback: boolean;
   managed_installed?: boolean;
+  recommended_version?: string | null;
+  selection_reason?: string | null;
 }
 
 export interface QuickAuthCompleteness {

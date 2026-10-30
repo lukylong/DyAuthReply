@@ -39,6 +39,12 @@ onBeforeUnmount(manager.dispose);
       <div><dt>组件来源</dt><dd>{{ state.component?.source === 'development_browser' ? '系统浏览器（仅开发环境）' : 'D 助手内置组件' }}</dd></div>
     </dl>
     <p v-if="state.component" class="component-message">{{ state.component.message }}</p>
+    <p v-if="state.component?.selection_reason" class="component-message">
+      {{ state.component.selection_reason }}<template v-if="state.component.recommended_version">：{{ state.component.recommended_version }}</template>。
+      <template v-if="state.component.source === 'managed' && state.component.recommended_version && state.component.version && state.component.version !== state.component.recommended_version">
+        当前安装版本不同，点击“修复重装”会自动换成适配版本，保留账号和登录资料。
+      </template>
+    </p>
     <p class="browser-note">“文件校验正常”表示程序文件完整，不代表浏览器一定能成功启动。打开后立即退出时，请先尝试修复重装。</p>
     <div v-if="state.component?.state === 'installing'" class="browser-progress" aria-live="polite">
       <progress :value="state.component.progress_percent == null ? undefined : progress" max="100" aria-label="浏览器下载进度" />

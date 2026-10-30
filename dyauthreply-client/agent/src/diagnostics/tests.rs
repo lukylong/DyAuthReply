@@ -35,6 +35,30 @@ fn capture(shared: &Arc<Shared>, emit: impl FnOnce()) {
 }
 
 #[test]
+fn system_selected_browser_version_is_reported_without_login_data() {
+    let shared = Arc::new(Shared::new());
+    shared.enabled.store(true, Ordering::Release);
+    capture(&shared, || {
+        tracing::info!(target: "dy_agent::quick_auth",
+            version = "152.0.7977.169", classification = "windows_compat",
+            reason = "检测到 Windows build 19045，自动选择兼容版浏览器",
+            cookie = "PRIVATE_COOKIE", profile = "PRIVATE_PROFILE",
+            "quick-auth component selected for system");
+    });
+    let events = shared.take();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].fields["version"], "152.0.7977.169");
+    assert_eq!(events[0].fields["classification"], "windows_compat");
+    assert!(events[0].fields["reason"]
+        .as_str()
+        .unwrap()
+        .contains("19045"));
+    let encoded = serde_json::to_string(&events).unwrap();
+    assert!(!encoded.contains("PRIVATE_COOKIE"));
+    assert!(!encoded.contains("PRIVATE_PROFILE"));
+}
+
+#[test]
 fn nothing_is_captured_until_enabled_and_disabling_discards_the_buffer() {
     let shared = Arc::new(Shared::new());
     capture(

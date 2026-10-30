@@ -36,6 +36,21 @@ test('same-version repair uses repair API, never install short circuit', async (
   assert(!h.manager.can('install')); assert(h.manager.can('repair'));
   await h.manager.act('repair'); assert.deepEqual(h.calls, ['repair']); h.manager.dispose();
 });
+test('repair keeps the backend system recommendation and switches to the returned installed version', async () => {
+  const recommendation = { recommended_version: '152.0.7977.169', selection_reason: '检测到 Windows build 19045，自动选择兼容版浏览器' };
+  const h = harness({ ...view(), version: '155.0.8059.79', ...recommendation });
+  await h.manager.refresh();
+  assert.equal(h.manager.state.component.recommended_version, recommendation.recommended_version);
+  h.api.repair = async () => { h.calls.push('repair'); return { ...view('installing'), ...recommendation }; };
+  await h.manager.act('repair');
+  assert.deepEqual(h.calls, ['repair']);
+  assert.equal(h.manager.state.component.selection_reason, recommendation.selection_reason);
+  h.api.status = async () => ({ ...view(), version: recommendation.recommended_version, ...recommendation });
+  await h.tick();
+  assert.equal(h.manager.state.component.version, recommendation.recommended_version);
+  assert.equal(h.manager.state.component.state, 'ready');
+  h.manager.dispose();
+});
 test('active login and in-progress install block all destructive actions', async () => {
   for (const mode of ['login', 'install']) {
     const h = harness(view(mode === 'install' ? 'installing' : 'ready'));
@@ -79,6 +94,9 @@ test('settings and failed quick login expose management entry, uninstall require
   const panel = read('components/BrowserComponentPanel.vue');
   assert(panel.includes('title="卸载内置浏览器？"')); assert(panel.includes('确认卸载')); assert(panel.includes('confirmUninstall = true'));
   assert(!panel.includes('startQuickAuth'));
+  assert(panel.includes('state.component.recommended_version'));
+  assert(panel.includes('state.component.selection_reason'));
+  assert(panel.includes('点击“修复重装”会自动换成适配版本'));
   const api = read('api/client.ts');
   for (const action of ['repair', 'uninstall']) assert(api.includes(`/douyin/quick-auth/component/${action}`));
 });

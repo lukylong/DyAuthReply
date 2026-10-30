@@ -88,6 +88,11 @@ async fn install(root: &Path, progress: Progress, force: bool) -> Result<Resolve
     result
 }
 
+pub(super) fn selected_component() -> Result<sources::PinnedSpec> {
+    let (platform, _) = platform_contract()?;
+    sources::pinned(platform)
+}
+
 fn cleanup_stages(component: &Path) -> Result<()> {
     for entry in std::fs::read_dir(component)? {
         let entry = entry?;
@@ -665,6 +670,9 @@ mod tests {
         .unwrap();
         assert!(reusable(root.path(), "1.0.0", false).is_some());
         assert!(reusable(root.path(), "1.0.0", true).is_none());
+        // A newly selected system-specific version must not reuse an existing
+        // (otherwise healthy) browser for a different system profile.
+        assert!(reusable(root.path(), "2.0.0", false).is_none());
         assert!(!component.join("previous.json").exists());
         std::fs::write(&archive, b"invalid archive").unwrap();
         assert!(publish(root.path(), &stage, &archive, &spec, "0".repeat(64)).is_err());

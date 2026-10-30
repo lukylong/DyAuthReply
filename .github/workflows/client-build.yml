@@ -237,6 +237,19 @@ jobs:
       - name: Add Rust cross-compilation target
         run: rustup target add ${{ matrix.rust_target }}
 
+      - name: Verify Windows input layout preflight on a real desktop
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          rustc --edition 2021 --test dyauthreply-client/desktop/src-tauri/src/windows_input.rs -o "$env:RUNNER_TEMP/input-tests.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Input unit test compilation failed' }
+          & "$env:RUNNER_TEMP/input-tests.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Input unit tests failed' }
+          rustc --edition 2021 scripts/client/test_windows_input.rs -o "$env:RUNNER_TEMP/input-smoke.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Input smoke compilation failed' }
+          & "$env:RUNNER_TEMP/input-smoke.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Input smoke failed' }
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
@@ -270,6 +283,7 @@ jobs:
           node scripts/client/test_send_status_presentation.mjs
           node scripts/client/test_quick_auth_state.mjs
           node scripts/client/test_browser_component_management.mjs
+          node scripts/client/test_browser_input.mjs
           node scripts/client/test_card_deletion.mjs
           node scripts/client/test_rule_cooldown.mjs
           node scripts/client/test_client_audit_regressions.mjs

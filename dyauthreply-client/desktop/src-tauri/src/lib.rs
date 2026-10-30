@@ -1,6 +1,9 @@
+mod browser_input;
 mod native_commands;
 mod native_host;
 mod native_ws;
+#[cfg(target_os = "windows")]
+mod windows_input;
 use native_commands::*;
 use native_host::NativeHost;
 use std::{

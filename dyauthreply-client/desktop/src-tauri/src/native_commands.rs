@@ -32,6 +32,9 @@ pub async fn native_request(
     admin_token: Option<String>,
 ) -> Result<NativeResponse, String> {
     require_local(&window)?;
+    if crate::browser_input::needs_english_input(&path, &method) {
+        crate::browser_input::prepare(&window).await?;
+    }
     host.request(path, method, body, admin_token).await
 }
 #[tauri::command]

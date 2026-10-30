@@ -621,6 +621,7 @@ onMounted(async () => {
       @close="closeQuickAuth"
     >
       <div class="quick-auth-content">
+        <p class="msg-box">Windows 客户端会在启动前切换到英文（美国）键盘，避免部分输入法导致浏览器闪退；不修改系统默认语言，不删除登录资料。</p>
         <div v-if="!quickAuth && quickComponent?.state !== 'ready'" class="component-install-card">
           <LoaderCircle v-if="quickComponent?.state === 'installing'" class="quick-spinner" :size="34" />
           <KeyRound v-else :size="34" />
@@ -688,6 +689,11 @@ onMounted(async () => {
           {{ quickAuth.message }}
         </p>
 
+        <div v-if="!quickAuth && quickAuthError && quickComponent?.state === 'ready'" class="actions">
+          <button type="button" class="btn-glass btn-primary-glass" :disabled="quickAuthBusy" @click="retryQuickAuth">
+            {{ quickAuthBusy ? '正在重新打开...' : '重新打开登录窗口' }}
+          </button>
+        </div>
         <div v-if="quickAuth" class="actions">
           <button type="button" class="btn-glass" :disabled="quickAuthBusy || quickAuth.state === 'importing'" @click="closeQuickAuth">
             {{ quickAuth?.state === 'completed' ? '关闭' : '取消登录' }}

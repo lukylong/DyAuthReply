@@ -35,11 +35,6 @@ extern "system" {
     fn PostMessageW(hwnd: Handle, message: u32, wparam: usize, lparam: isize) -> i32;
 }
 
-#[link(name = "imm32")]
-extern "system" {
-    fn ImmIsIME(layout: Handle) -> i32;
-}
-
 #[link(name = "kernel32")]
 extern "system" {
     fn GetCurrentThreadId() -> u32;
@@ -72,9 +67,10 @@ fn english_language(layout: usize) -> bool {
 }
 
 fn english_keyboard(layout: Handle) -> bool {
-    // LANGID includes regional English variants and aliased HKLs. Sogou's
-    // English typing mode remains a Chinese IME and is not a plain keyboard.
-    english_language(layout as usize) && unsafe { ImmIsIME(layout) == 0 }
+    // Windows CI reports ImmIsIME(0x04090409) == TRUE for the standard US
+    // layout under TSF. Do not use that legacy classification as a gate.
+    // Sogou's English typing mode still has a Chinese LANGID, unlike ENG.
+    english_language(layout as usize)
 }
 
 pub fn begin(window: usize) -> Result<Pending, String> {

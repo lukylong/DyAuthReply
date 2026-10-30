@@ -26,7 +26,8 @@ test('manual English is respected without exact KLID name validation', () => {
   const source = read('dyauthreply-client/desktop/src-tauri/src/windows_input.rs');
   assert(!source.includes('GetKeyboardLayoutNameW'));
   assert(source.indexOf('if english_keyboard(GetKeyboardLayout(focus_thread))') < source.indexOf('let layout ='));
-  assert(source.includes('ImmIsIME(layout) == 0'));
+  assert(!source.includes('fn ImmIsIME('));
+  assert(source.includes('english_language(layout as usize)'));
   assert(source.includes('GetForegroundWindow() != hwnd'));
   assert(source.includes('window_thread != GetCurrentThreadId()'));
   assert(source.includes('GetKeyboardLayout(pending.focus_thread)'));

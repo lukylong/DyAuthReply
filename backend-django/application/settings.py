@@ -546,15 +546,15 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.57'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.58'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    'Windows 快捷登录启动前自动切换至英文（美国）键盘，减少部分输入法导致的浏览器闪退\n'
-    '检查切换结果后再打开浏览器；准备失败时提示手动切换并支持重试\n'
-    '不修改系统默认语言，不卸载输入法，不删除登录资料；macOS 启动流程不变\n'
-    '沿用现有内置浏览器，无需为本次修复重新下载浏览器组件\n'
+    '修复 0.1.57 英文键盘校验误拦截，手动切换 ENG 后可正常发起浏览器启动\n'
+    '输入法自动切换改为尽力尝试；未确认或失败也继续启动，不再阻断快捷登录\n'
+    '已处于英文键盘时不重复切换；真实浏览器错误仍正常反馈\n'
+    '覆盖安装即可，无需重装浏览器，保留账号和登录资料\n'
     '浏览器扩展本版无改动（扩展更新至 2.3.4 后保持不变）'
 )

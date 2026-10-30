@@ -621,7 +621,7 @@ onMounted(async () => {
       @close="closeQuickAuth"
     >
       <div class="quick-auth-content">
-        <p class="msg-box">Windows 客户端会在启动前切换到英文（美国）键盘，避免部分输入法导致浏览器闪退；不修改系统默认语言，不删除登录资料。</p>
+        <p class="msg-box">Windows 客户端会尝试切换到英文（美国）键盘；切换未确认也会继续打开浏览器。若仍闪退，请手动选择 ENG 后重试。保留登录资料，不修改系统默认语言。</p>
         <div v-if="!quickAuth && quickComponent?.state !== 'ready'" class="component-install-card">
           <LoaderCircle v-if="quickComponent?.state === 'installing'" class="quick-spinner" :size="34" />
           <KeyRound v-else :size="34" />

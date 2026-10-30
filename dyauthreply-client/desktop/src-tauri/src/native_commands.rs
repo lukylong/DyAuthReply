@@ -33,7 +33,16 @@ pub async fn native_request(
 ) -> Result<NativeResponse, String> {
     require_local(&window)?;
     if crate::browser_input::needs_english_input(&path, &method) {
-        crate::browser_input::prepare(&window).await?;
+        return crate::input_policy::start_after_attempt(
+            crate::browser_input::prepare(&window),
+            || host.request(path, method, body, admin_token),
+            |warning| {
+                eprintln!(
+                    "[quick-auth] input preparation advisory: {warning}; continuing browser launch"
+                )
+            },
+        )
+        .await;
     }
     host.request(path, method, body, admin_token).await
 }

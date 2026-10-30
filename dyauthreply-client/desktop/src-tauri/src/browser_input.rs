@@ -13,10 +13,18 @@ pub async fn prepare(window: &tauri::WebviewWindow) -> Result<(), String> {
     let (send, receive) = tokio::sync::oneshot::channel();
     window
         .run_on_main_thread(move || {
+            // If UI dispatch timed out, do not change input later after the
+            // compatibility attempt was abandoned and the browser was started.
+            if send.is_closed() {
+                return;
+            }
             let _ = send.send(windows_input::begin(hwnd));
         })
         .map_err(|e| e.to_string())?;
-    let pending = receive.await.map_err(|e| e.to_string())??;
+    let pending = tokio::time::timeout(std::time::Duration::from_secs(2), receive)
+        .await
+        .map_err(|_| "英文键盘准备超时".to_string())?
+        .map_err(|e| e.to_string())??;
     // Let the focused WebView process handle WM_INPUTLANGCHANGEREQUEST before
     // the Agent is asked to spawn Chrome. A successful PostMessage is not proof.
     for _ in 0..20 {

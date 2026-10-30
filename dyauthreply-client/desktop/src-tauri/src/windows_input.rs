@@ -28,12 +28,16 @@ extern "system" {
     fn GetWindowThreadProcessId(hwnd: Handle, process: *mut u32) -> u32;
     fn GetKeyboardLayout(thread: u32) -> Handle;
     fn GetKeyboardLayoutList(count: i32, layouts: *mut Handle) -> i32;
-    fn GetKeyboardLayoutNameW(name: *mut u16) -> i32;
     fn GetGUIThreadInfo(thread: u32, info: *mut GuiThreadInfo) -> i32;
     fn IsChild(parent: Handle, child: Handle) -> i32;
     fn LoadKeyboardLayoutW(name: *const u16, flags: u32) -> Handle;
     fn ActivateKeyboardLayout(layout: Handle, flags: u32) -> Handle;
     fn PostMessageW(hwnd: Handle, message: u32, wparam: usize, lparam: isize) -> i32;
+}
+
+#[link(name = "imm32")]
+extern "system" {
+    fn ImmIsIME(layout: Handle) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -45,20 +49,32 @@ extern "system" {
 pub struct Pending {
     window: usize,
     focus: usize,
-    layout: usize,
     window_thread: u32,
     focus_thread: u32,
 }
 
 fn error(operation: &str) -> String {
-    format!(
-        "登录前切换英文键盘失败（{operation}，{}）；请在任务栏选择 ENG（英语·美国）后重试，无需重装浏览器",
-        std::io::Error::last_os_error()
-    )
+    let error = std::io::Error::last_os_error();
+    let detail = if error.raw_os_error() == Some(0) {
+        "系统未提供具体错误码".to_string()
+    } else {
+        error.to_string()
+    };
+    format!("英文键盘准备未确认（{operation}，{detail}）；仍将尝试打开浏览器")
 }
 
 fn focus_error() -> String {
-    "请先回到 D助手窗口，再点击重新打开登录窗口；为避免干扰其他应用，本次未启动浏览器".into()
+    "客户端输入焦点已变化，跳过自动切换，仍将尝试打开浏览器".into()
+}
+
+fn english_language(layout: usize) -> bool {
+    layout != 0 && (layout & 0x3ff) == 0x09
+}
+
+fn english_keyboard(layout: Handle) -> bool {
+    // LANGID includes regional English variants and aliased HKLs. Sogou's
+    // English typing mode remains a Chinese IME and is not a plain keyboard.
+    english_language(layout as usize) && unsafe { ImmIsIME(layout) == 0 }
 }
 
 pub fn begin(window: usize) -> Result<Pending, String> {
@@ -92,6 +108,17 @@ pub fn begin(window: usize) -> Result<Pending, String> {
         if window_thread == 0 || focus_thread == 0 {
             return Err(error("读取窗口线程"));
         }
+        let pending = Pending {
+            window,
+            focus: focus as usize,
+            window_thread,
+            focus_thread,
+        };
+        // Respect a manual ENG choice. Do not reactivate or name-check another
+        // thread's layout after the user has already selected English.
+        if english_keyboard(GetKeyboardLayout(focus_thread)) {
+            return Ok(pending);
+        }
         // Windows 8+ may activate the current system input language here.
         // Intentionally omit REORDER, SETFORPROCESS, SUBSTITUTE and any SPI
         // default-language mutation. Keep English for browser startup; restoring
@@ -113,23 +140,13 @@ pub fn begin(window: usize) -> Result<Pending, String> {
         if layout.is_null() || ActivateKeyboardLayout(layout, 0).is_null() {
             return Err(error("激活英文键盘"));
         }
-        let mut name = [0u16; 9];
-        if GetKeyboardLayoutNameW(name.as_mut_ptr()) == 0 || name != US_KLID {
-            return Err(error("校验英文键盘"));
-        }
         if GetForegroundWindow() != hwnd {
             return Err(focus_error());
         }
         if PostMessageW(focus, WM_INPUTLANGCHANGEREQUEST, 0, layout as isize) == 0 {
             return Err(error("通知输入焦点"));
         }
-        Ok(Pending {
-            window,
-            focus: focus as usize,
-            layout: layout as usize,
-            window_thread,
-            focus_thread,
-        })
+        Ok(pending)
     }
 }
 
@@ -162,10 +179,7 @@ pub fn confirmed(pending: &Pending) -> Result<bool, String> {
         {
             return Err(focus_error());
         }
-        Ok(
-            GetKeyboardLayout(pending.window_thread) as usize == pending.layout
-                && GetKeyboardLayout(pending.focus_thread) as usize == pending.layout,
-        )
+        Ok(english_keyboard(GetKeyboardLayout(pending.focus_thread)))
     }
 }
 
@@ -185,5 +199,15 @@ mod tests {
     #[test]
     fn us_klid_is_a_keyboard_not_sogou_english_mode() {
         assert_eq!(String::from_utf16(&US_KLID[..8]).unwrap(), "00000409");
+    }
+
+    #[test]
+    fn english_layout_handles_need_not_have_one_exact_name_or_value() {
+        for layout in [0x0409_0409, 0x0809_0809, 0xf123_0409] {
+            assert!(english_language(layout));
+        }
+        for layout in [0, 0x0804_0804, 0xe020_0804, 0x040c_040c] {
+            assert!(!english_language(layout));
+        }
     }
 }

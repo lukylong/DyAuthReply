@@ -250,6 +250,15 @@ jobs:
           & "$env:RUNNER_TEMP/input-smoke.exe"
           if ($LASTEXITCODE -ne 0) { throw 'Input smoke failed' }
 
+      - name: Verify advisory input errors never block browser launch
+        shell: bash
+        run: |
+          set -euo pipefail
+          suffix=""
+          if [ "$RUNNER_OS" = "Windows" ]; then suffix=".exe"; fi
+          rustc --edition 2021 --test dyauthreply-client/desktop/src-tauri/src/input_policy.rs -o "$RUNNER_TEMP/input-policy-tests$suffix"
+          "$RUNNER_TEMP/input-policy-tests$suffix"
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:

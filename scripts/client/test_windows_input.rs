@@ -85,6 +85,15 @@ fn main() {
         assert_ne!(GetKeyboardLayoutNameW(name.as_mut_ptr()), 0);
         assert_eq!(&name[..8], &wide("00000409")[..8]);
         println!("MODIFIED_INPUT=00000409 CONFIRMED=true");
+        // A manually chosen regional English layout must remain untouched.
+        let english_uk = LoadKeyboardLayoutW(wide("00000809").as_ptr(), 1);
+        assert!(!english_uk.is_null());
+        assert!(!ActivateKeyboardLayout(english_uk, 0).is_null());
+        let manual = GetKeyboardLayout(0);
+        let prepared = windows_input::begin(window as usize).unwrap();
+        assert!(windows_input::confirmed(&prepared).unwrap());
+        assert_eq!(GetKeyboardLayout(0), manual);
+        println!("MANUAL_ENGLISH_PRESERVED=true");
         // Repeated starts are idempotent, and an unrelated/background window is rejected.
         assert!(windows_input::confirmed(&windows_input::begin(window as usize).unwrap()).unwrap());
         let before_reject = GetKeyboardLayout(0);

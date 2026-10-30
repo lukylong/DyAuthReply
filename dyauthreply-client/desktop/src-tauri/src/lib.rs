@@ -1,4 +1,5 @@
 mod browser_input;
+mod input_policy;
 mod native_commands;
 mod native_host;
 mod native_ws;

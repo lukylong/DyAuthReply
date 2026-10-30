@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def production_args() -> list[str]:
-    source = (ROOT / "dyauthreply-client/agent/src/quick_auth/mod.rs").read_text()
+    source = (ROOT / "dyauthreply-client/agent/src/quick_auth/mod.rs").read_text(encoding="utf-8")
     block = re.search(r"const BROWSER_ARGS:.*?= &\[(.*?)\];", source, re.S)
     if not block:
         raise RuntimeError("BROWSER_ARGS was not found")
@@ -37,7 +37,7 @@ def production_args() -> list[str]:
 
 
 def download_browser(output: Path) -> tuple[Path, dict]:
-    pin = json.loads((ROOT / "dyauthreply-client/agent/quick-auth-component.json").read_text())
+    pin = json.loads((ROOT / "dyauthreply-client/agent/quick-auth-component.json").read_text(encoding="utf-8"))
     expected = pin["platforms"]["win64"]
     archive = output / "browser.zip"
     attempts = []
@@ -100,7 +100,7 @@ def run_case(browser: Path, output: Path, name: str, profile: Path, verbose: boo
                     break
                 if active.is_file():
                     try:
-                        lines = active.read_text().splitlines()
+                        lines = active.read_text(encoding="utf-8").splitlines()
                         port = int(lines[0])
                         if not (0 < port < 65536 and lines[1].startswith("/devtools/browser/")):
                             raise RuntimeError("Unexpected DevTools endpoint")
@@ -126,7 +126,7 @@ def run_case(browser: Path, output: Path, name: str, profile: Path, verbose: boo
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
             child.wait(timeout=10)
         if stderr.exists():
-            result["stderr_tail"] = stderr.read_text(errors="replace")[-16000:]
+            result["stderr_tail"] = stderr.read_text(encoding="utf-8", errors="replace")[-16000:]
         try:
             shutil.rmtree(profile)
             result["profile_removed"] = True

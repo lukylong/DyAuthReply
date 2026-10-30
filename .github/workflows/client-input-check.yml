@@ -1,0 +1,26 @@
+name: Client input compatibility check
+on:
+  workflow_dispatch:
+jobs:
+  input:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.98.1'
+      - name: Test exact native helper and advisory launch policy
+        shell: pwsh
+        run: |
+          rustc --edition 2021 --test dyauthreply-client/desktop/src-tauri/src/windows_input.rs -o "$env:RUNNER_TEMP/input-tests.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Compile failed' }
+          & "$env:RUNNER_TEMP/input-tests.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+          rustc --edition 2021 scripts/client/test_windows_input.rs -o "$env:RUNNER_TEMP/input-smoke.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Compile failed' }
+          & "$env:RUNNER_TEMP/input-smoke.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Native smoke failed' }
+          rustc --edition 2021 --test dyauthreply-client/desktop/src-tauri/src/input_policy.rs -o "$env:RUNNER_TEMP/policy.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Compile failed' }
+          & "$env:RUNNER_TEMP/policy.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Policy tests failed' }

@@ -58,6 +58,7 @@ const profile = arg('--profile');
 if (profile && !['standard', 'windows_compat'].includes(profile)) throw new Error(`invalid profile ${profile}`);
 const check = process.argv.includes('--check');
 const available = process.argv.includes('--available');
+if (profile && !check && !available) throw new Error('--profile applies only to --check/--available; use --windows-compat-version to update the compatibility pin');
 if (check || available) {
   const sets = [
     { name: 'standard', pin: configured, platforms: PLATFORMS },

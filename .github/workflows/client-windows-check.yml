@@ -168,7 +168,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Verify actual Rust selector against Windows registry build
         if: matrix.os == 'windows-2022'
-        run: cargo test --locked --manifest-path dyauthreply-client/agent/Cargo.toml --lib quick_auth:: -- --nocapture
+        run: |
+          cargo test --locked --manifest-path dyauthreply-client/agent/Cargo.toml --lib quick_auth:: -- --nocapture
       - name: Verify user diagnostic script with Windows PowerShell
         shell: powershell
         run: |

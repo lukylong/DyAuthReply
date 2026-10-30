@@ -10,6 +10,7 @@ New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $report = [ordered]@{ login_attempted = $false; account_data_changed = $false; sandbox_disabled = $false; browser_ready = $false }
 $profile = Join-Path $env:TEMP ('DAssistant-browser-probe-' + [guid]::NewGuid().ToString())
 $process = $null
+$started = $false
 $stdoutTask = $null
 $stderrTask = $null
 
@@ -67,6 +68,7 @@ try {
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $start
     $null = $process.Start()
+    $started = $true
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
     $deadline = (Get-Date).AddSeconds(20)
@@ -90,10 +92,12 @@ try {
 } catch {
     $report.error = Redact-LocalText $_.Exception.Message
 } finally {
-    if ($process -and -not $process.HasExited) {
+    if ($started -and -not $process.HasExited) {
         # Kill only the disposable blank browser created by this script.
+        $ErrorActionPreference = 'Continue'
         & taskkill.exe /PID $process.Id /T /F 2>&1 | Out-Null
         $null = $process.WaitForExit(10000)
+        $ErrorActionPreference = 'Stop'
     }
     foreach ($item in @(@('stdout', $stdoutTask), @('stderr', $stderrTask))) {
         if ($item[1] -and $item[1].Wait(3000)) {

@@ -27,6 +27,7 @@ extern "system" {
     fn GetForegroundWindow() -> Handle;
     fn GetWindowThreadProcessId(hwnd: Handle, process: *mut u32) -> u32;
     fn GetKeyboardLayout(thread: u32) -> Handle;
+    fn GetKeyboardLayoutList(count: i32, layouts: *mut Handle) -> i32;
     fn GetKeyboardLayoutNameW(name: *mut u16) -> i32;
     fn GetGUIThreadInfo(thread: u32, info: *mut GuiThreadInfo) -> i32;
     fn IsChild(parent: Handle, child: Handle) -> i32;
@@ -98,7 +99,17 @@ pub fn begin(window: usize) -> Result<Pending, String> {
         if GetForegroundWindow() != hwnd {
             return Err(focus_error());
         }
-        let layout = LoadKeyboardLayoutW(US_KLID.as_ptr(), KLF_ACTIVATE);
+        // Reuse US if installed: WebView2 can own keyboard focus in another
+        // process, in which case LoadKeyboardLayout may have no effect. The
+        // focused window receives the same language request as the taskbar.
+        let mut layouts = [std::ptr::null_mut(); 256];
+        let count = GetKeyboardLayoutList(layouts.len() as i32, layouts.as_mut_ptr());
+        let existing = layouts[..(count.max(0) as usize).min(layouts.len())]
+            .iter()
+            .copied()
+            .find(|layout| *layout as usize & 0xffff_ffff == 0x0409_0409);
+        let layout =
+            existing.unwrap_or_else(|| LoadKeyboardLayoutW(US_KLID.as_ptr(), KLF_ACTIVATE));
         if layout.is_null() || ActivateKeyboardLayout(layout, 0).is_null() {
             return Err(error("激活英文键盘"));
         }

@@ -10,6 +10,10 @@ on:
         description: 'Release tag whose Windows installer to smoke test'
         required: false
         default: 'client-latest'
+      quick_auth_only:
+        description: 'Only probe the pinned quick-auth browser; no login or publication'
+        type: boolean
+        default: false
   push:
     branches:
       - 'windows-check/**'
@@ -24,6 +28,7 @@ env:
 
 jobs:
   agent-on-windows:
+    if: ${{ inputs.quick_auth_only != true }}
     name: Native Agent on Windows
     runs-on: windows-latest
     steps:
@@ -88,6 +93,7 @@ jobs:
           Write-Output 'WINDOWS_AGENT_RUNTIME_PASS=1'
 
   installer-on-windows:
+    if: ${{ inputs.quick_auth_only != true }}
     name: Published installer on Windows
     runs-on: windows-latest
     steps:
@@ -128,3 +134,28 @@ jobs:
           $left = Get-Process -Name 'dy-agent' -ErrorAction SilentlyContinue
           Write-Output "SIDECAR_AFTER_SHELL_KILL=$(@($left).Count)"
           Write-Output 'WINDOWS_INSTALLER_RUNTIME_PASS=1'
+
+  quick-auth-on-windows:
+    name: Quick-auth browser (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Launch exact pinned component with production flags
+        shell: pwsh
+        run: python scripts/client/probe_quick_auth_windows.py --output "$env:RUNNER_TEMP/quick-auth-probe"
+      - name: Retain bounded blank-browser diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quick-auth-browser-${{ matrix.os }}
+          retention-days: 3
+          path: |
+            ${{ runner.temp }}/quick-auth-probe/report.json
+            ${{ runner.temp }}/quick-auth-probe/*.log

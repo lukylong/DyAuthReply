@@ -53,10 +53,11 @@ pub(super) struct FrontierOwner {
 }
 impl ManualService {
     pub(super) async fn maintain_frontier(&self, work: &WorkEnvelope) -> Result<()> {
-        if self
-            .inner
-            .frontier_stopping
-            .load(std::sync::atomic::Ordering::Acquire)
+        if self.creator_held(work.account_id.as_str())
+            || self
+                .inner
+                .frontier_stopping
+                .load(std::sync::atomic::Ordering::Acquire)
         {
             return Ok(());
         }
@@ -211,10 +212,11 @@ impl ManualService {
             .runtime
             .update_inbound_state(&work.account_id, work.fence(), InboundState::HttpDegraded)
             .await;
-        if !self
-            .inner
-            .frontier_stopping
-            .load(std::sync::atomic::Ordering::Acquire)
+        if !self.creator_held(work.account_id.as_str())
+            && !self
+                .inner
+                .frontier_stopping
+                .load(std::sync::atomic::Ordering::Acquire)
         {
             let _ = self.reconcile(work.account_id.to_string()).await;
         }

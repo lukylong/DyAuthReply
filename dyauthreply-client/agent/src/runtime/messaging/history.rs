@@ -35,6 +35,7 @@ impl ManualService {
         account: &str,
         conversation: &str,
     ) -> Result<bool> {
+        let _transport = self.native_transport(account).await?;
         // A credential replacement or removal cannot race the final projection.
         let _configuration = self
             .inner

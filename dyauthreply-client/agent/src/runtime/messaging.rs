@@ -216,7 +216,7 @@ pub struct ReceiveProcessing {
 enum SendAdmission {
     Proceed,
     Deferred,
-    Cancel,
+    Cancel(&'static str),
 }
 struct SegmentContext<'a> {
     work: &'a WorkEnvelope,
@@ -226,6 +226,7 @@ struct SegmentContext<'a> {
     control: tokio::sync::watch::Receiver<AccountControl>,
 }
 struct AccountSlot {
+    transport_gate: Arc<tokio::sync::RwLock<()>>,
     credential_generation: u64,
     canonical_sec_uid: String,
     frontier: Mutex<Option<frontier::FrontierOwner>>,
@@ -250,6 +251,7 @@ impl AccountSlot {
         signer: NativeSigner,
     ) -> Self {
         Self {
+            transport_gate: Arc::new(tokio::sync::RwLock::new(())),
             credential_generation,
             canonical_sec_uid: credentials.expected_sec_uid.clone(),
             frontier: Mutex::new(None),
@@ -657,6 +659,7 @@ impl ManualService {
             }
         }
         let slot = self.slot(id).context("account not loaded")?;
+        let _transport = self.native_transport(id).await?;
         let _read = slot.profile_read.lock().await;
         if !force {
             if let Some((value, at)) = self.inner.workbench.profile_snapshot(id)? {
@@ -714,6 +717,7 @@ impl ManualService {
         } {
             return Ok(page);
         }
+        let _transport = self.native_transport(id).await?;
         let _read = slot.profile_read.lock().await;
         if let Some(page) = {
             let cache = slot.works_cache.lock().await;
@@ -810,6 +814,7 @@ impl ManualService {
         if due.is_empty() {
             return Ok(());
         }
+        let _transport = self.native_transport(account).await?;
         let session = self.profile_session(account)?;
         let own = session.credentials.expected_sec_uid.clone();
         for (conversation, platform, short_id) in due {
@@ -845,6 +850,7 @@ impl ManualService {
     /// # Errors
     /// Reports missing scopes, platform failures and verified response mismatches.
     pub async fn refresh_peer(&self, account: &str, conversation: &str) -> Result<()> {
+        let _transport = self.native_transport(account).await?;
         let slot = self.slot(account).context("account not loaded")?;
         let _read = slot.profile_read.lock().await;
         let peer = self.inner.workbench.peer_scope(account, conversation)?;
@@ -1086,6 +1092,10 @@ impl ManualService {
     /// # Errors
     /// Returns validation, entitlement, capacity or durable-store errors.
     pub async fn submit(&self, input: ManualRequest) -> Result<CommandStatus> {
+        anyhow::ensure!(
+            !self.creator_held(&input.account_id),
+            "该账号正在创作者平台人工接管，客户端未发送；请结束平台窗口后再手动发送"
+        );
         let route = input.route()?;
         let id = AccountId::new(input.account_id.clone())?;
         let slot = self.slot(&id).context("账号未加载到 Rust 服务")?;
@@ -1860,7 +1870,9 @@ impl ManualService {
 
     fn send_admission(&self, work: &WorkEnvelope, route: &Route) -> Result<SendAdmission> {
         if self.creator_held(work.account_id.as_str()) {
-            return Ok(SendAdmission::Cancel);
+            return Ok(SendAdmission::Cancel(
+                "该账号正在创作者平台人工接管，客户端未发送；请结束平台窗口后再手动发送",
+            ));
         }
         if work.kind != WorkKind::AutomaticReply {
             return Ok(SendAdmission::Proceed);
@@ -1882,7 +1894,7 @@ impl ManualService {
             )
             || route.expires_at_ms.is_none_or(|deadline| now > deadline)
         {
-            return Ok(SendAdmission::Cancel);
+            return Ok(SendAdmission::Cancel("自动回复已停用或已过期，未继续发送"));
         }
         if policy.silent(engine.timezone_name(), now)? {
             return Ok(SendAdmission::Deferred);
@@ -1929,10 +1941,8 @@ impl ManualService {
             match self.send_admission(&work, &route)? {
                 SendAdmission::Proceed => {}
                 SendAdmission::Deferred => return Ok(()),
-                SendAdmission::Cancel => {
-                    return self
-                        .cancel_tail(&work, "自动回复已停用或已过期，未继续发送")
-                        .await
+                SendAdmission::Cancel(reason) => {
+                    return self.cancel_tail(&work, reason).await;
                 }
             }
             anyhow::ensure!(
@@ -2277,6 +2287,18 @@ impl WorkExecutor for ManualService {
     ) -> ExecutionFuture {
         let service = self.clone();
         Box::pin(async move {
+            let Ok(_transport) = service.native_transport(work.account_id.as_str()).await else {
+                return if work.kind == WorkKind::ManualSend
+                    && service
+                        .cancel_prepared_if_current(&work)
+                        .await
+                        .unwrap_or(false)
+                {
+                    ExecutionOutcome::Finished
+                } else {
+                    ExecutionOutcome::RecoveryNeeded
+                };
+            };
             let result = match work.kind {
                 WorkKind::ManualSend | WorkKind::AutomaticReply => {
                     service.run_send(work.clone(), control).await

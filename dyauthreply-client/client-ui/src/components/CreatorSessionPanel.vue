@@ -78,21 +78,21 @@ onUnmounted(() => { alive = false; sequence += 1; clearTimeout(timer); });
 <template>
   <section class="creator-panel" aria-labelledby="creator-title">
     <div class="creator-heading">
-      <div><h4 id="creator-title">创作者平台</h4><p>复用当前账号登录态，免扫码进入私信</p></div>
+      <div><h4 id="creator-title">抖音网页私信</h4><p>使用已验证的普通网页私信入口，打开期间客户端暂停收发</p></div>
       <ExternalLink :size="20" aria-hidden="true" />
     </div>
     <template v-if="confirmation && !active">
-      <div class="creator-confirm" role="alertdialog" aria-label="确认进入创作者平台">
-        <strong>{{ account.auto_reply_enabled ? '进入前暂停此账号自动回复？' : '进入此账号的创作者平台？' }}</strong>
-        <p>人工操作期间暂停此账号自动回复，其他账号继续运行。关闭浏览器或点击结束后，自动回复仍保持关闭；需要继续时，请在账号列表手动开启。</p>
+      <div class="creator-confirm" role="alertdialog" aria-label="确认进入抖音网页私信">
+        <strong>{{ account.auto_reply_enabled ? '进入前暂停此账号自动回复？' : '进入此账号的抖音网页私信？' }}</strong>
+        <p>人工操作期间暂停此账号的客户端收发连接，其他账号继续运行。关闭浏览器或点击结束后，自动回复仍保持关闭；需要继续时，请在账号列表手动开启。</p>
         <div class="creator-actions">
           <button class="btn-secondary" type="button" :disabled="busy" @click="confirmation = false">取消</button>
-          <button class="btn-primary" type="button" :disabled="!available" @click="open">{{ busy ? '正在打开…' : '确认并免扫码进入' }}</button>
+          <button class="btn-primary" type="button" :disabled="!available" @click="open">{{ busy ? '正在打开…' : '确认并进入平台' }}</button>
         </div>
       </div>
     </template>
     <button v-else-if="!active" class="btn-primary creator-open" type="button" :disabled="!available" @click="confirmation = true">
-      <ExternalLink :size="15" />免扫码进入平台
+      <ExternalLink :size="15" />进入抖音网页私信
     </button>
     <div v-else-if="mine" class="creator-active">
       <p aria-live="polite"><LoaderCircle v-if="session?.state !== 'open'" :size="15" class="spin" />{{ session?.message }}</p>
@@ -101,7 +101,7 @@ onUnmounted(() => { alive = false; sequence += 1; clearTimeout(timer); });
     <p v-else class="creator-note">另一账号正在使用创作者窗口，请先结束该窗口。</p>
     <p v-if="mine && !active" class="creator-result" :class="{ warning: session?.state === 'needs_attention' }" role="status">{{ session?.message }}</p>
     <p v-if="error" class="creator-error" role="alert">{{ error }}</p>
-    <p class="creator-note">可直接关闭浏览器；系统只校验凭证，不会自动开启自动回复。</p>
+    <p class="creator-note">首次使用需登录当前账号，之后复用完整浏览器环境；发送消息使用普通网页私信，不使用创作者平台发送通道。请通过“结束窗口”同步并交还会话；自动回复仍需手动开启。</p>
   </section>
 </template>
 

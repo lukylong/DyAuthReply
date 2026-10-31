@@ -2,6 +2,36 @@
 use super::{ManualService, Result, WorkKind};
 
 impl ManualService {
+    pub(super) async fn native_transport(
+        &self,
+        id: &str,
+    ) -> Result<tokio::sync::OwnedRwLockReadGuard<()>> {
+        let gate = self.slot(id)?.transport_gate.clone().read_owned().await;
+        anyhow::ensure!(
+            !self.creator_held(id),
+            "此账号的收发连接已交给浏览器，请先结束平台窗口"
+        );
+        Ok(gate)
+    }
+
+    async fn quiesce_creator_transport(&self, id: &str) -> Result<()> {
+        let slot = self.slot(id)?;
+        // The hold was published first. Drain all admitted HTTP/send work before opening a browser.
+        let _drain = slot.transport_gate.write().await;
+        let owner = slot.frontier.lock().await.take();
+        if let Some(mut owner) = owner {
+            owner.commands.send_replace(None);
+            if tokio::time::timeout(std::time::Duration::from_secs(5), &mut owner.join)
+                .await
+                .is_err()
+            {
+                owner.join.abort();
+                let _ = owner.join.await;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn creator_held(&self, id: &str) -> bool {
         self.inner
             .creator_holds
@@ -46,6 +76,10 @@ impl ManualService {
             self.release_creator_hold(id);
             return Err(error);
         }
+        if let Err(error) = self.quiesce_creator_transport(id).await {
+            self.release_creator_hold(id);
+            return Err(error);
+        }
         Ok(original)
     }
 
@@ -80,6 +114,9 @@ impl ManualService {
             Err(error) => Err(error),
         };
         self.release_creator_hold(id);
+        if result.is_ok() {
+            let _ = self.reconcile(id.to_owned()).await;
+        }
         result
     }
 }
@@ -170,6 +207,126 @@ mod tests {
         )
         .unwrap();
         (root, service, runtime, id)
+    }
+
+    #[tokio::test]
+    async fn browser_handover_joins_the_socket_owner_and_rejects_new_manual_messages() {
+        let (_root, service, runtime, id) = fixture(false);
+        let (commands, mut receiver) = tokio::sync::watch::channel(Some(1));
+        let (closed, closed_rx) = tokio::sync::oneshot::channel();
+        let join = tokio::spawn(async move {
+            while receiver.borrow_and_update().is_some() {
+                receiver.changed().await.unwrap();
+            }
+            let _ = closed.send(());
+        });
+        *service.slot(id.as_str()).unwrap().frontier.lock().await =
+            Some(super::super::frontier::FrontierOwner { commands, join });
+        service
+            .inner
+            .creator_holds
+            .lock()
+            .unwrap()
+            .insert(id.clone(), false);
+        service.quiesce_creator_transport(&id).await.unwrap();
+        closed_rx.await.unwrap();
+        assert!(service
+            .slot(id.as_str())
+            .unwrap()
+            .frontier
+            .lock()
+            .await
+            .is_none());
+        let error = service
+            .submit(super::super::ManualRequest {
+                request_id: Uuid::new_v4(),
+                account_id: id.clone(),
+                conversation_id: "0:1:1:2".into(),
+                conversation_short_id: "12345".into(),
+                text: "fixture".into(),
+            })
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("客户端未发送"));
+        service.release_creator_hold(&id);
+        runtime.drain().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn browser_handover_drains_native_work_and_blocks_all_new_transport() {
+        let (_root, service, runtime, id) = fixture(false);
+        let admitted = service.native_transport(&id).await.unwrap();
+        service
+            .inner
+            .creator_holds
+            .lock()
+            .unwrap()
+            .insert(id.clone(), false);
+        let task = tokio::spawn({
+            let s = service.clone();
+            let id = id.clone();
+            async move { s.quiesce_creator_transport(&id).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !task.is_finished(),
+            "handover must wait for admitted native requests"
+        );
+        drop(admitted);
+        task.await.unwrap().unwrap();
+        assert!(service.native_transport(&id).await.is_err());
+        service.release_creator_hold(&id);
+        assert!(service.native_transport(&id).await.is_ok());
+        runtime.drain().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_send_pause_and_creator_hold_have_distinct_admission() {
+        let (_root, service, runtime, id) = fixture(false);
+        let request = super::super::ManualRequest {
+            request_id: Uuid::new_v4(),
+            account_id: id.clone(),
+            conversation_id: "0:1:1:2".into(),
+            conversation_short_id: "12345".into(),
+            text: "fixture".into(),
+        };
+        let route = request.route().unwrap();
+        let work = crate::runtime::model::WorkEnvelope::new(
+            crate::runtime::model::AccountId::new(&id).unwrap(),
+            "fixture",
+            WorkKind::ManualSend,
+            crate::runtime::model::WorkFence {
+                actor_generation: 1,
+                credential_generation: 1,
+                lease_epoch: 1,
+            },
+            0,
+        );
+        assert!(matches!(
+            service.send_admission(&work, &route).unwrap(),
+            super::super::SendAdmission::Proceed
+        ));
+        service
+            .inner
+            .creator_holds
+            .lock()
+            .unwrap()
+            .insert(id.clone(), false);
+        let super::super::SendAdmission::Cancel(reason) =
+            service.send_admission(&work, &route).unwrap()
+        else {
+            panic!("hold must block manual send");
+        };
+        assert!(reason.contains("人工接管"));
+        assert!(!reason.contains("自动回复已停用"));
+        service.release_creator_hold(&id);
+        assert!(matches!(
+            service.send_admission(&work, &route).unwrap(),
+            super::super::SendAdmission::Proceed
+        ));
+        runtime.drain().await.unwrap();
     }
 
     #[tokio::test]

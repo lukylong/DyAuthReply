@@ -6,6 +6,7 @@ pub mod creator;
 mod installer;
 #[cfg(test)]
 mod live_probe;
+mod profiles;
 mod sources;
 
 use crate::onboarding::Importer;
@@ -246,7 +247,9 @@ impl Drop for Broker {
                 let _ = child.wait();
             }
         }
-        let _ = std::fs::remove_dir_all(&session.profile);
+        if !profiles::retained(&session.profile) {
+            let _ = std::fs::remove_dir_all(&session.profile);
+        }
     }
 }
 
@@ -612,26 +615,46 @@ impl Broker {
             anyhow::ensure!(child_running(&session.child)?, "登录窗口已关闭，请重新登录");
             session.begin_import(now_ms()?)?
         };
+        let resources = {
+            let mut state = self.state.lock().await;
+            let session = current_mut(&mut state, session_id)?;
+            session.cancel.send_replace(true);
+            session.resources()
+        };
         self.importer.notify_quick_auth(session_id);
+        self.close_resources(&resources).await?;
         let result = match self.importer.import_bundle(target, bundle).await {
             Ok(result) => result,
             Err(error) => {
                 let mut state = self.state.lock().await;
                 let session = current_mut(&mut state, session_id)?;
-                session.view.state = "awaiting_confirmation";
-                session.view.message = format!("导入失败：{error}");
+                session.secret = None;
+                session.view.state = "failed";
+                session.view.message = format!("导入失败，请重新快捷登录：{error}");
                 drop(state);
                 self.importer.notify_quick_auth(session_id);
                 return Err(error);
             }
         };
+        let profile_saved = profiles::bind(
+            &self.root,
+            &resources.2,
+            result["id"].as_str().context("导入账号编号缺失")?,
+            result["sec_uid"].as_str().context("导入账号身份缺失")?,
+            result["generation"].as_u64().context("导入凭证版本缺失")?,
+        );
+        // Cleanup respects the retained marker and never copies/moves a browser profile.
         self.cleanup(session_id).await;
         {
             let mut state = self.state.lock().await;
             let session = current_mut(&mut state, session_id)?;
             session.secret = None;
             session.view.state = "completed";
-            session.view.message = "账号已导入，登录窗口已关闭".into();
+            session.view.message = if profile_saved.is_ok() {
+                "账号已导入，完整浏览器环境已保留，登录窗口已关闭".into()
+            } else {
+                "账号已导入，但浏览器环境绑定失败，下次进入平台需要重新登录".into()
+            };
         }
         self.importer.notify_quick_auth(session_id);
         let mut response = result;
@@ -916,6 +939,19 @@ impl Broker {
         }
     }
 
+    async fn close_resources(
+        &self,
+        (child, browser_ws, _profile): &SessionResources,
+    ) -> Result<()> {
+        let ws = browser_ws.lock().ok().and_then(|guard| guard.clone());
+        if let Some(ws) = ws {
+            let _ = close_browser(&ws).await;
+        }
+        let child = child.clone();
+        tokio::task::spawn_blocking(move || stop_child(&child)).await??;
+        Ok(())
+    }
+
     async fn cleanup_resources(&self, (child, browser_ws, profile): SessionResources) {
         let ws = browser_ws.lock().ok().and_then(|guard| guard.clone());
         if let Some(ws) = ws {
@@ -1002,6 +1038,10 @@ async fn launch(
     browser_ws_slot: &Arc<StdMutex<Option<String>>>,
 ) -> Result<Launched> {
     create_private_dir(profile)?;
+    let active = profile.join("DevToolsActivePort");
+    if active.exists() {
+        std::fs::remove_file(&active)?;
+    }
     let mut command = Command::new(executable);
     command
         .arg(format!("--user-data-dir={}", profile.display()))
@@ -1126,7 +1166,7 @@ async fn close_browser(raw: &str) -> Result<()> {
     Ok(())
 }
 
-fn stop_child_and_remove(child: &Arc<StdMutex<Option<Child>>>, profile: &Path) -> Result<()> {
+fn stop_child(child: &Arc<StdMutex<Option<Child>>>) -> Result<()> {
     let mut owned = child
         .lock()
         .map_err(|_| anyhow::anyhow!("浏览器进程状态异常"))?
@@ -1143,7 +1183,12 @@ fn stop_child_and_remove(child: &Arc<StdMutex<Option<Child>>>, profile: &Path) -
             let _ = child.wait();
         }
     }
-    if profile.is_dir() {
+    Ok(())
+}
+
+fn stop_child_and_remove(child: &Arc<StdMutex<Option<Child>>>, profile: &Path) -> Result<()> {
+    stop_child(child)?;
+    if profile.is_dir() && !profiles::retained(profile) {
         std::fs::remove_dir_all(profile)?;
     }
     Ok(())

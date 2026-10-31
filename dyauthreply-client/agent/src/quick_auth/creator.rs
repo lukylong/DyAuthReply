@@ -1,5 +1,5 @@
-//! On-demand creator window: reuse the stored session, never initiate QR login.
-use super::{child_running, component, launch, now_ms, Broker, CdpClient};
+//! Exclusive browser handover using the account's original complete Chromium profile.
+use super::{child_running, component, launch, now_ms, profiles, Broker, CdpClient};
 use crate::{
     protocol::{
         account_session::NativeAccountSession,
@@ -11,7 +11,6 @@ use crate::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use std::{
     io::Write,
     path::{Path, PathBuf},
@@ -21,17 +20,10 @@ use std::{
 };
 use tokio::sync::watch;
 
-const URL: &str = "https://creator.douyin.com/creator-micro/data/following/chat";
-const HOSTS: [&str; 3] = ["www.douyin.com", "creator.douyin.com", "imapi.douyin.com"];
-const AUTH_NAMES: [&str; 7] = [
-    "sessionid",
-    "sessionid_ss",
-    "sid_tt",
-    "sid_guard",
-    "uid_tt",
-    "bd_ticket_guard_server_data",
-    "bd_ticket_guard_ts_sign_id",
-];
+// Creator remains an identity/login bootstrap only. Its IM SDK (aid 2906)
+// returned 8101/raw=1 with sender-only IDs in the controlled account comparison.
+const LOGIN_URL: &str = "https://creator.douyin.com/creator-micro/data/following/chat";
+const WEB_MESSAGES_URL: &str = "https://www.douyin.com/chat?isPopup=1";
 const PAGE_IDENTITY: &str = r"(async () => {
   if(location.origin!=='https://creator.douyin.com') return {wrong_origin:true};
   const c=new AbortController(),t=setTimeout(()=>c.abort(),4000);
@@ -71,7 +63,7 @@ impl Drop for Session {
                 let _ = child.wait();
             }
         }
-        if !self.profile.as_os_str().is_empty() {
+        if !self.profile.as_os_str().is_empty() && !profiles::retained(&self.profile) {
             let _ = std::fs::remove_dir_all(&self.profile);
         }
     }
@@ -96,50 +88,6 @@ pub(super) fn recover(root: &Path) -> Option<Session> {
         child: Arc::new(StdMutex::new(None)),
         profile: PathBuf::new(),
         finish,
-    })
-}
-
-fn cookie_pairs(raw: &str) -> BTreeMap<String, String> {
-    raw.split(';')
-        .filter_map(|p| p.trim().split_once('='))
-        .filter(|(name, value)| !name.is_empty() && !value.is_empty())
-        .map(|(name, value)| (name.into(), value.into()))
-        .collect()
-}
-
-fn restore_cookies(source: &CredentialImport) -> Result<Value> {
-    let credentials = AccountCredentials::from_state(source.clone())?;
-    let mut cookies = Vec::new();
-    for host in HOSTS {
-        let pairs = cookie_pairs(&credentials.cookie_header(host));
-        anyhow::ensure!(
-            pairs.contains_key("sessionid"),
-            "现有凭证缺少登录会话，请先更新凭证"
-        );
-        for (name, value) in pairs {
-            // Legacy imports retain scoped wire headers, not original cookie attributes.
-            // Host-only root-path restoration avoids bleeding data into unrelated origins.
-            cookies.push(json!({"name":name,"value":value,"domain":host,"path":"/","secure":true}));
-        }
-    }
-    anyhow::ensure!(cookies.len() <= 1536, "账号 Cookie 数量异常");
-    Ok(json!(cookies))
-}
-
-fn auth_changed(expected: &BTreeMap<String, String>, observed: &Value) -> bool {
-    let Some(cookies) = observed["cookies"].as_array() else {
-        return true;
-    };
-    AUTH_NAMES.iter().any(|name| {
-        let values: Vec<_> = cookies
-            .iter()
-            .filter(|c| c["name"] == *name)
-            .filter_map(|c| c["value"].as_str())
-            .collect();
-        match expected.get(*name) {
-            Some(value) => values.is_empty() || values.iter().any(|v| *v != value),
-            None => !values.is_empty(),
-        }
     })
 }
 
@@ -174,39 +122,6 @@ async fn browser_identity(cdp: &mut CdpClient) -> Result<Value> {
         .context("平台身份读取失败")
 }
 
-async fn browser_auth_changed(cdp: &mut CdpClient, source: &CredentialImport) -> Result<bool> {
-    let credentials = AccountCredentials::from_state(source.clone())?;
-    for host in HOSTS {
-        let observed = cdp
-            .command(
-                "Network.getCookies",
-                json!({"urls":[format!("https://{host}/")]}),
-            )
-            .await?;
-        if auth_changed(&cookie_pairs(&credentials.cookie_header(host)), &observed) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum FinishAction {
-    Reuse,
-    Capture,
-    Pause,
-}
-
-fn finish_action(original_valid: bool, browser_available: bool, changed: bool) -> FinishAction {
-    if original_valid {
-        FinishAction::Reuse
-    } else if browser_available && changed {
-        FinishAction::Capture
-    } else {
-        FinishAction::Pause
-    }
-}
-
 struct CreatorRun<'a> {
     id: &'a str,
     source: &'a CredentialImport,
@@ -222,7 +137,7 @@ impl Broker {
         self.creator.lock().await.as_ref().map(|s| s.view.clone())
     }
 
-    /// Starts a bounded, disposable browser using the existing authenticated session.
+    /// Opens the original account browser, or establishes it through an interactive login.
     /// # Errors
     /// Rejects concurrent browsers, missing consent, expired licensing and foreign identities.
     pub async fn creator_start(self: &Arc<Self>, id: String, confirmed: bool) -> Result<View> {
@@ -231,8 +146,9 @@ impl Broker {
         self.require_browser_closed().await?;
         let service = self.importer.creator_service()?;
         let source = service.registry().load(&id)?;
-        restore_cookies(&source)?;
         let generation = service.loaded_generation(&id).context("账号尚未加载")?;
+        let saved_profile =
+            profiles::lookup(&self.root, &id, &source.expected_sec_uid, generation)?;
         let resolved = component::resolve(&self.root)?;
         let original = service.begin_creator_hold(&id, confirmed).await?;
         let session_id = uuid::Uuid::new_v4().to_string();
@@ -240,7 +156,11 @@ impl Broker {
             session_id: session_id.clone(),
             account_id: id.clone(),
             state: "launching".into(),
-            message: "正在复用现有登录态打开创作者平台，无需扫码".into(),
+            message: if saved_profile.is_some() {
+                "正在打开此账号保存的完整浏览器环境".into()
+            } else {
+                "首次建立账号浏览器环境，请在网页中登录此账号；之后可复用".into()
+            },
             original_auto_reply: original,
             auto_reply_restored: false,
             credentials_updated: false,
@@ -251,7 +171,8 @@ impl Broker {
             let _ = service.finish_creator_hold(&id).await;
             return Err(error);
         }
-        let profile = self.root.join("quick-auth/sessions").join(&session_id);
+        let profile = saved_profile
+            .unwrap_or_else(|| self.root.join("quick-auth/sessions").join(&session_id));
         let (finish, stopped) = watch::channel(false);
         let child = Arc::new(StdMutex::new(None));
         let ws = Arc::new(StdMutex::new(None));
@@ -280,7 +201,17 @@ impl Broker {
             broker
                 .creator_update(&session_id, "closing", "正在关闭窗口并校验托管凭证")
                 .await;
-            broker.cleanup_resources((child, ws, profile)).await;
+            // Close and join Chromium BEFORE any native verification, import or reconnection.
+            let resources = (child, ws, profile.clone());
+            let result = match broker.close_resources(&resources).await {
+                Ok(()) => {
+                    broker
+                        .publish_creator_result(&profile, &source, result)
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            broker.cleanup_resources(resources).await;
             broker
                 .complete_creator(&session_id, &service, &id, result)
                 .await;
@@ -382,11 +313,41 @@ impl Broker {
         self.importer.notify_quick_auth("creator");
     }
 
+    async fn publish_creator_result(
+        &self,
+        profile: &Path,
+        source: &CredentialImport,
+        result: Result<Option<String>>,
+    ) -> Result<bool> {
+        let bundle = result?;
+        let Some(bundle) = bundle else {
+            return Ok(false);
+        };
+        let response = self
+            .importer
+            .import_creator_bundle(source.account_id.clone(), bundle)
+            .await?;
+        profiles::bind(
+            &self.root,
+            profile,
+            &source.account_id,
+            &source.expected_sec_uid,
+            response["generation"]
+                .as_u64()
+                .context("同步凭证版本缺失")?,
+        )?;
+        anyhow::ensure!(
+            response["_runtime_reload"] != true,
+            "新凭证已保存，请重启客户端后继续"
+        );
+        Ok(true)
+    }
+
     async fn run_creator(
         &self,
         run: CreatorRun<'_>,
         mut finish: watch::Receiver<bool>,
-    ) -> Result<bool> {
+    ) -> Result<Option<String>> {
         let CreatorRun {
             id,
             source,
@@ -398,24 +359,32 @@ impl Broker {
         } = run;
         let launched = launch(executable, profile, child, ws).await?;
         let mut cdp = CdpClient::connect(&launched.page_ws).await?;
-        if let Err(error) = initialize_creator(&mut cdp, source, child, &finish).await {
-            if *finish.borrow() || cdp.is_closed() || !child_running(child)? {
-                return Ok(false); // Completion still verifies stored credentials before resuming.
-            }
-            return Err(error);
-        }
+        close_restored_pages(&mut cdp).await?;
+        self.creator_update(
+            id,
+            "awaiting_login",
+            "正在校验此账号的完整浏览器环境；如显示登录页，请登录当前账号",
+        )
+        .await;
+        initialize_creator(&mut cdp, source, child, &finish).await?;
+        // Retain even if the user closes directly; rebinding to native generation happens only after import.
+        profiles::bind(
+            &self.root,
+            profile,
+            &source.account_id,
+            &source.expected_sec_uid,
+            generation,
+        )?;
         self.creator_update(
             id,
             "open",
-            "已免扫码进入当前账号；结束后自动回复保持关闭，需要时请在账号列表手动开启",
+            "已打开抖音网页私信，客户端收发连接已暂停；结束时同步并交还会话",
         )
         .await;
-        let mut changed = false;
-        let mut identity_check = tokio::time::Instant::now();
         let maximum = tokio::time::Instant::now() + Duration::from_hours(4);
         loop {
             if !child_running(child)? || cdp.is_closed() {
-                break;
+                return Ok(None);
             }
             anyhow::ensure!(
                 tokio::time::Instant::now() < maximum,
@@ -426,92 +395,41 @@ impl Broker {
                 service.loaded_generation(&source.account_id) == Some(generation),
                 "托管凭证版本已变化，请重新进入平台"
             );
-            match browser_auth_changed(&mut cdp, source).await {
-                Ok(value) => changed |= value,
-                Err(_) if !child_running(child)? || cdp.is_closed() => {
-                    break;
-                }
-                Err(_) => anyhow::bail!("浏览器凭证状态读取失败"),
-            }
-            if identity_check.elapsed() >= Duration::from_secs(30) || *finish.borrow() {
-                let identity = match browser_identity(&mut cdp).await {
-                    Ok(value) => value,
-                    Err(_) if cdp.is_closed() || !child_running(child)? => break,
-                    Err(error) => return Err(error),
-                };
-                anyhow::ensure!(
-                    check_identity(&identity, &source.expected_sec_uid)?,
-                    "平台登录态已失效"
-                );
-                identity_check = tokio::time::Instant::now();
-            }
             if *finish.borrow() {
                 self.creator_update(
                     id,
-                    "closing",
-                    "正在校验现有托管凭证，关闭浏览器不会直接判定登录失效",
+                    "syncing",
+                    "正在同步当前浏览器登录态；关闭窗口后再恢复客户端连接",
                 )
                 .await;
-                let verified = verify_original(&service, &source.account_id).await;
-                match finish_action(
-                    verified.is_ok(),
-                    child_running(child)? && !cdp.is_closed(),
-                    changed,
-                ) {
-                    FinishAction::Reuse => return Ok(false),
-                    FinishAction::Pause => return verified.map(|()| false),
-                    FinishAction::Capture => {
-                        let result = self.synchronize_creator(id, source, &mut cdp).await;
-                        // User closing a collection window cancels collection, not their old session.
-                        // The outer completion path checks the stored credentials again after cleanup.
-                        return match result {
-                            Err(_) if cdp.is_closed() || !child_running(child)? => Ok(false),
-                            other => other,
-                        };
-                    }
-                }
+                return self.capture_creator(source, &mut cdp).await.map(Some);
             }
+            // Do not poll using a second native session while the browser owns the account.
             tokio::select! { () = tokio::time::sleep(Duration::from_secs(3)) => {}, _ = finish.changed() => {} }
         }
-        Ok(false)
     }
-    async fn synchronize_creator(
+
+    async fn capture_creator(
         &self,
-        id: &str,
         source: &CredentialImport,
         cdp: &mut CdpClient,
-    ) -> Result<bool> {
-        self.creator_update(
-            id,
-            "syncing",
-            "现有凭证校验未通过，正在尝试从当前窗口恢复；直接关窗将结束同步并再次校验原凭证",
-        )
-        .await;
+    ) -> Result<String> {
         cdp.initialize().await?;
         let limit = tokio::time::Instant::now() + Duration::from_secs(120);
-        let bundle = loop {
+        loop {
             anyhow::ensure!(
                 tokio::time::Instant::now() < limit,
-                "现有凭证校验未通过且同步超时，请稍后重试或更新登录态"
+                "同步超时；浏览器环境已保留，请重新进入平台后结束同步"
             );
             if let Some(candidate) = cdp.collect().await?.candidate {
                 anyhow::ensure!(
                     candidate.identity.sec_uid == source.expected_sec_uid,
                     "同步账号身份不匹配"
                 );
-                break candidate.bundle;
+                return Ok(candidate.bundle);
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
-        };
-        let response = self
-            .importer
-            .import_creator_bundle(source.account_id.clone(), bundle)
-            .await?;
-        anyhow::ensure!(
-            response["_runtime_reload"] != true,
-            "新凭证已保存，请重启本地服务后手动开启自动回复"
-        );
-        Ok(true)
+        }
     }
 }
 
@@ -524,24 +442,17 @@ async fn initialize_creator(
     cdp.command("Network.enable", json!({})).await?;
     cdp.command("Page.enable", json!({})).await?;
     cdp.command("Runtime.enable", json!({})).await?;
-    cdp.command(
-        "Network.setUserAgentOverride",
-        json!({"userAgent":source.user_agent}),
-    )
-    .await?;
-    cdp.command(
-        "Network.setCookies",
-        json!({"cookies":restore_cookies(source)?}),
-    )
-    .await?;
-    cdp.navigate(URL).await?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    // No setCookies or UA impersonation: reuse the original profile unchanged.
+    cdp.navigate(LOGIN_URL).await?;
+    let deadline = tokio::time::Instant::now() + super::SESSION_TIMEOUT;
     loop {
         if *finish.borrow() {
             anyhow::bail!("已取消打开平台，请确认凭证后手动恢复");
         }
         if let Ok(identity) = browser_identity(cdp).await {
-            if check_identity(&identity, &source.expected_sec_uid)? {
+            if identity["wrong_origin"] != true
+                && check_identity(&identity, &source.expected_sec_uid)?
+            {
                 break;
             }
         }
@@ -551,9 +462,39 @@ async fn initialize_creator(
         );
         anyhow::ensure!(
             tokio::time::Instant::now() < deadline,
-            "现有登录态未通过平台校验，请更新凭证后重试"
+            "等待登录超时，请重新进入平台完成登录"
         );
         tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    // Use the official ordinary-web IM entry without rewriting its requests,
+    // cookies, signing fields or platform decisions. Identity alone never proves delivery.
+    cdp.navigate(WEB_MESSAGES_URL).await?;
+    cdp.command("Page.bringToFront", json!({})).await?;
+    Ok(())
+}
+
+// This endpoint belongs to the browser process launched for this account only.
+// Avoid reconnecting restored background IM tabs on every persistent-profile open.
+fn restored_page_ids(value: &Value, keep: &str) -> Vec<String> {
+    value["targetInfos"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|t| t["type"] == "page")
+        .filter_map(|t| t["targetId"].as_str())
+        .filter(|id| !id.is_empty() && *id != keep)
+        .map(str::to_owned)
+        .collect()
+}
+async fn close_restored_pages(cdp: &mut CdpClient) -> Result<()> {
+    let current = cdp.command("Target.getTargetInfo", json!({})).await?;
+    let keep = current["targetInfo"]["targetId"]
+        .as_str()
+        .context("当前浏览器页面缺失")?;
+    let targets = cdp.command("Target.getTargets", json!({})).await?;
+    for id in restored_page_ids(&targets, keep) {
+        cdp.command("Target.closeTarget", json!({"targetId":id}))
+            .await?;
     }
     Ok(())
 }
@@ -577,63 +518,91 @@ async fn verify_original(service: &ManualService, id: &str) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
-    fn closing_with_changed_cookies_reuses_still_valid_credentials() {
-        assert_eq!(finish_action(true, false, true), FinishAction::Reuse);
-        assert_eq!(finish_action(true, true, true), FinishAction::Reuse);
-        assert_eq!(finish_action(true, false, false), FinishAction::Reuse);
-        assert_eq!(finish_action(true, true, false), FinishAction::Reuse);
-    }
-
-    #[test]
-    fn expired_credentials_require_live_recovery_or_remain_paused() {
-        assert_eq!(finish_action(false, true, true), FinishAction::Capture);
-        assert_eq!(finish_action(false, false, true), FinishAction::Pause);
-        assert_eq!(finish_action(false, false, false), FinishAction::Pause);
-        assert_eq!(finish_action(false, true, false), FinishAction::Pause);
-    }
-
-    #[test]
-    fn restored_cookies_are_host_scoped_and_never_exposed_in_views() {
-        let source = CredentialImport {
-            account_id: "sample".into(),
-            expected_sec_uid: "self".into(),
-            user_agent: "Chrome/152.0".into(),
-            storage_state: json!({"cookies":[{"name":"sessionid","value":"SYNTHETIC"}],"_bd_ticket":{}}),
-        };
-        let cookies = restore_cookies(&source).unwrap();
+    fn restored_tabs_are_pruned_without_closing_current_page_or_workers() {
+        let targets = json!({"targetInfos":[
+            {"type":"page","targetId":"current"},
+            {"type":"page","targetId":"old-chat"},
+            {"type":"page","targetId":"old-capture"},
+            {"type":"service_worker","targetId":"worker"}
+        ]});
         assert_eq!(
-            cookies
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|c| c["name"] == "sessionid")
-                .count(),
-            3
+            restored_page_ids(&targets, "current"),
+            vec!["old-chat", "old-capture"]
         );
-        for c in cookies.as_array().unwrap() {
-            assert!(HOSTS.contains(&c["domain"].as_str().unwrap()));
-            assert_eq!(c["path"], "/");
+    }
+
+    #[tokio::test]
+    async fn account_identity_is_verified_before_entering_ordinary_web_chat() {
+        use futures_util::{SinkExt, StreamExt};
+        for scope in ["self", "other"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("ws://{}/devtools/page/test", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let mut methods = Vec::new();
+                let mut urls = Vec::new();
+                while let Some(Ok(message)) = socket.next().await {
+                    let Ok(text) = message.to_text() else {
+                        break;
+                    };
+                    let request: Value = serde_json::from_str(text).unwrap();
+                    let method = request["method"].as_str().unwrap().to_owned();
+                    if method == "Page.navigate" {
+                        urls.push(request["params"]["url"].as_str().unwrap().to_owned());
+                    }
+                    let result = if method == "Runtime.evaluate" {
+                        json!({"result":{"value":{"sec_uid":scope}}})
+                    } else {
+                        json!({})
+                    };
+                    methods.push(method);
+                    if socket
+                        .send(tokio_tungstenite::tungstenite::Message::Text(
+                            json!({"id":request["id"],"result":result})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                (methods, urls)
+            });
+            let mut cdp = CdpClient::connect(&endpoint).await.unwrap();
+            let source = CredentialImport {
+                account_id: "test".into(),
+                expected_sec_uid: "self".into(),
+                user_agent: String::new(),
+                storage_state: json!({}),
+            };
+            let (_finish, finished) = watch::channel(false);
+            let result =
+                initialize_creator(&mut cdp, &source, &Arc::new(StdMutex::new(None)), &finished)
+                    .await;
+            drop(cdp);
+            let (methods, urls) = server.await.unwrap();
+            if scope == "self" {
+                assert!(result.is_ok());
+                assert_eq!(urls, vec![LOGIN_URL, WEB_MESSAGES_URL]);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(urls, vec![LOGIN_URL]);
+            }
+            assert!(!methods
+                .iter()
+                .any(|m| m == "Network.setCookies" || m == "Network.setUserAgentOverride"));
         }
     }
+
     #[test]
-    fn identity_mismatch_and_cookie_rotation_fail_closed() {
+    fn persistent_profile_requires_the_expected_account_identity() {
         assert!(check_identity(&json!({"sec_uid":"other"}), "self").is_err());
         assert!(!check_identity(&json!({"sec_uid":""}), "self").unwrap());
         assert!(check_identity(&json!({"sec_uid":"self"}), "self").unwrap());
-        let expected = cookie_pairs("sessionid=old; bd_ticket_guard_server_data=old-ticket");
-        assert!(!auth_changed(
-            &expected,
-            &json!({"cookies":[{"name":"sessionid","value":"old"},{"name":"bd_ticket_guard_server_data","value":"old-ticket"}]})
-        ));
-        assert!(auth_changed(
-            &expected,
-            &json!({"cookies":[{"name":"sessionid","value":"new"}]})
-        ));
-        assert!(auth_changed(
-            &expected,
-            &json!({"cookies":[{"name":"sessionid","value":"old"},{"name":"sessionid","value":"new","domain":".douyin.com"}]})
-        ));
-        assert!(auth_changed(&expected, &json!({"cookies":[]})));
+        assert!(check_identity(&json!({"wrong_origin":true}), "self").is_err());
     }
     #[test]
     fn interrupted_session_is_recovered_without_auto_resume() {

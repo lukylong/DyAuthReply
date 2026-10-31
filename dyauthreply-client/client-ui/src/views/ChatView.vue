@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { useRoute } from 'vue-router';
 import { ImageOff, MessagesSquare, Mic, Smile, Video } from 'lucide-vue-next';
 import {
   getWorkerCommandStatus,
+  getLocalConversation,
   listAccounts,
   listConversations,
   listMessages,
@@ -16,6 +18,13 @@ import {
 import { useClientLicense } from '../composables/useClientLicense';
 import { useClientRealtime } from '../composables/useClientRealtime';
 
+const route = useRoute();
+let linkedConversation: ConversationItem | null = null;
+let linkedConversationRequest: Promise<ConversationItem> | null = null;
+let linkedUnavailable = false;
+const linkedError = ref('');
+const linkedAccount = typeof route.query.account === 'string' ? route.query.account : '';
+const linkedId = typeof route.query.conversation === 'string' ? route.query.conversation : '';
 const accounts = ref<DouyinAccount[]>([]);
 const activeAccountId = ref('');
 const conversations = ref<ConversationItem[]>([]);
@@ -83,6 +92,7 @@ let convSearchTimer: ReturnType<typeof setTimeout> | null = null;
 let convSig = '';
 let msgSig = '';
 let conversationsRequest = 0;
+let fetchedConversationCount = 0;
 let chatDisposed = false;
 
 // 缺失真实昵称的会话：自动调 refresh-user 拉取抖音真实昵称/头像后重渲染。
@@ -495,6 +505,7 @@ function resetConversationScope() {
   loadingMoreConvs.value = false;
   conversationSyncing.value = false;
   conversations.value = [];
+  fetchedConversationCount = 0;
   activeConversationId.value = '';
   messages.value = [];
   convPage.value = 1;
@@ -518,12 +529,27 @@ async function loadConversations(silent = false, append = false) {
   const current = () => !chatDisposed && request === conversationsRequest &&
     accountId === activeAccountId.value && keyword === convKeyword.value.trim();
   const page = append ? convPage.value + 1 : 1;
-  const pageSize = !append && silent ? Math.max(CONV_PAGE_SIZE, conversations.value.length) : CONV_PAGE_SIZE;
+  const pageSize = !append && silent ? Math.max(CONV_PAGE_SIZE, fetchedConversationCount) : CONV_PAGE_SIZE;
   loadingMoreConvs.value = append;
   loadingConversations.value = !silent && !append;
   conversationSyncing.value = silent;
   try {
     const res = await listConversations(accountId, { page, page_size: pageSize, keyword: keyword || undefined });
+    if (!current()) return;
+    if (!append && !keyword && linkedAccount === accountId && linkedId && !linkedConversation) {
+      linkedConversationRequest ??= getLocalConversation(accountId, linkedId);
+      try {
+        const target = await linkedConversationRequest;
+        if (!current()) return;
+        linkedConversation = target;
+        activeConversationId.value = target.id;
+      } catch {
+        if (current()) {
+          linkedUnavailable = true;
+          linkedError.value = '该留资的原会话已不在本地，来源消息仍可在客户留资中查看';
+        }
+      }
+    }
     if (!current()) return;
     if (append) {
       const rows = [...conversations.value];
@@ -537,14 +563,17 @@ async function loadConversations(silent = false, append = false) {
       conversations.value = sortConversations(rows);
       convSig = conversationsSignature(conversations.value);
       convPage.value = page;
+      fetchedConversationCount += res.items.length;
     } else {
-      const items = sortConversations(res.items);
+      fetchedConversationCount = res.items.length;
+      const pinned = !keyword && linkedAccount === accountId ? linkedConversation : null;
+      const items = sortConversations(pinned && !res.items.some(c => c.id === pinned.id) ? [...res.items, pinned] : res.items);
       const sig = conversationsSignature(items);
       if (sig !== convSig) {
         convSig = sig;
         conversations.value = items;
       }
-      convPage.value = Math.max(1, Math.ceil(items.length / CONV_PAGE_SIZE));
+      convPage.value = Math.max(1, Math.ceil(res.items.length / CONV_PAGE_SIZE));
     }
     convTotal.value = res.total;
     convHasMore.value = res.has_more;
@@ -553,7 +582,7 @@ async function loadConversations(silent = false, append = false) {
       messages.value = [];
       msgSig = '';
     }
-    if (!activeConversationId.value && conversations.value.length > 0) {
+    if (!activeConversationId.value && conversations.value.length > 0 && !(!keyword && linkedAccount === accountId && linkedUnavailable)) {
       activeConversationId.value = conversations.value[0].id;
     }
     if (!silent && !append) {
@@ -597,7 +626,11 @@ async function loadAccounts() {
     await ensureStatus();
     accounts.value = await listAccounts();
     if (!activeAccountId.value && accounts.value.length > 0) {
-      activeAccountId.value = accounts.value[0].id;
+      if (linkedAccount && !accounts.value.some(a => a.id === linkedAccount)) {
+        linkedError.value = '该留资对应的账号当前未托管，请先恢复账号；留资来源仍可查看';
+      } else {
+        activeAccountId.value = linkedAccount || accounts.value[0].id;
+      }
     }
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
@@ -986,7 +1019,8 @@ onUnmounted(() => {
       <div v-if="!activeConversation" class="chat-empty">
         <MessagesSquare class="empty-icon" :size="40" />
         <h3>私信对话看板</h3>
-        <p class="hint">请在左侧选择具体客户以查阅消息并进行手动交互</p>
+        <p v-if="linkedError" class="hint" role="status">{{ linkedError }}</p>
+        <p v-else class="hint">请在左侧选择具体客户以查阅消息并进行手动交互</p>
       </div>
       <template v-else>
         <header class="chat-head">

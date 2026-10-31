@@ -6,6 +6,7 @@ import {
   History,
   LayoutDashboard,
   MessageCircle,
+  Phone,
   Settings2,
   ShieldCheck,
   SlidersHorizontal,
@@ -266,6 +267,9 @@ const { onHiddenAdminClick } = useHiddenAdminEntry(() => {
         </RouterLink>
         <RouterLink to="/chat" class="nav-item">
           <MessageCircle class="icon" :size="18" />私信工作台
+        </RouterLink>
+        <RouterLink to="/leads" class="nav-item">
+          <Phone class="icon" :size="18" />客户留资
         </RouterLink>
         <RouterLink to="/rules" class="nav-item">
           <Settings2 class="icon" :size="18" />自动回复规则

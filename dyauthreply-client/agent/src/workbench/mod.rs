@@ -1,4 +1,4 @@
-//! Disposable, bounded chat projection. Send claims and leases live in `CoreStore`;
+//! Bounded chat projection plus durable customer-lead jobs. Send claims and leases live in `CoreStore`;
 //! cached peer metadata may resolve a notice's recipient, never authorize a send.
 use crate::runtime::inbound::InboundEvent;
 use anyhow::{Context, Result};
@@ -16,12 +16,15 @@ pub mod api;
 mod content;
 pub(crate) use content::reply_match_text;
 mod import;
+pub mod leads;
+mod leads_api;
 pub(crate) mod media;
 #[cfg(test)]
 mod tests;
 
 pub struct Workbench {
     db: Mutex<Connection>,
+    lead_path: std::path::PathBuf,
     revision: AtomicU64,
     pub(crate) changed: tokio::sync::broadcast::Sender<Value>,
     pub(crate) sockets: std::sync::Arc<tokio::sync::Semaphore>,
@@ -83,6 +86,7 @@ impl Workbench {
         db.pragma_update(None, "max_page_count", 32768)?;
         db.execute_batch(SCHEMA)?;
         add_media_columns(&db)?;
+        leads::initialize(&db)?;
         // Group chats were projected before direct-message filtering existed;
         // their platform IDs are bare digits, unlike `0:1:uid:uid` single chats.
         db.execute_batch(
@@ -93,6 +97,7 @@ impl Workbench {
         db.pragma_update(None, "user_version", 1)?;
         Ok(Self {
             db: Mutex::new(db),
+            lead_path: root.join("customer-leads.sqlite3"),
             revision: AtomicU64::new(0),
             changed: tokio::sync::broadcast::channel(128).0,
             sockets: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
@@ -273,7 +278,7 @@ impl Workbench {
         let due: Vec<String> = {
             let mut q = tx.prepare(
                 "SELECT id FROM conversations WHERE account_id=?1 AND peer<>'' AND peer NOT LIKE 'fallback\\_%' ESCAPE '\\'
-                 AND coalesce(json_extract(data,'$.peer_nickname'),'') IN ('',peer,?2)
+                 AND (coalesce(json_extract(data,'$.peer_nickname'),'') IN ('',peer,?2) OR coalesce(json_extract(data,'$.peer_unique_id'),'')='')
                  AND coalesce(json_extract(data,'$.peer_profile_attempt_ms'),0) <= ?3
                  ORDER BY updated DESC,id LIMIT ?4",
             )?;

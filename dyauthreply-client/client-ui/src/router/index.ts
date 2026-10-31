@@ -30,6 +30,12 @@ const router = createRouter({
       meta: { wide: true },
     },
     {
+      path: '/leads',
+      name: 'leads',
+      component: () => import('../views/LeadsView.vue'),
+      meta: { wide: true },
+    },
+    {
       path: '/rules',
       name: 'rules',
       component: () => import('../views/RulesView.vue'),

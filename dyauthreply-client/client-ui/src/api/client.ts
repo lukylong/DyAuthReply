@@ -1456,3 +1456,45 @@ export function finishCreatorSession(sessionId: string) {
     method: 'POST', body: '{}',
   });
 }
+
+// Customer leads stay on the local native agent; no cloud upload.
+export interface CustomerLead {
+  id: string; account_id: string; account_name: string; peer_id: string;
+  nickname: string; douyin_id: string; phone: string; remark: string; first_at: string;
+  last_at: string; count: number; conversation_id: string;
+}
+export interface LeadFilters {
+  account?: string; keyword?: string; from_ms?: number; to_ms?: number; page?: number;
+}
+export interface LeadStatus {
+  enabled: boolean; since_ms: number; pending: number;
+  accounts: Array<{ id: string; nickname: string }>;
+}
+export interface LeadSource { remark: string; content: string; message_at: string; extracted_at: string; message_id: string }
+function leadQuery(filters: LeadFilters): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') query.set(key, String(value));
+  return query.toString();
+}
+export function listCustomerLeads(filters: LeadFilters) {
+  return request<{ items: CustomerLead[]; total: number; page: number; page_size: number }>(`/douyin/leads?${leadQuery(filters)}`);
+}
+export function getLeadStatus() { return request<LeadStatus>('/douyin/leads/status'); }
+export function setLeadCollection(enabled: boolean) {
+  return request<LeadStatus>('/douyin/leads/settings', { method: 'POST', body: JSON.stringify({ enabled }) });
+}
+export function scanLeadHistory(account = '') {
+  return request<{ queued: number }>('/douyin/leads/scan', { method: 'POST', body: JSON.stringify({ account }) });
+}
+export function exportCustomerLeads(filters: LeadFilters) {
+  return request<{ csv: string; total: number }>(`/douyin/leads/export?${leadQuery(filters)}`);
+}
+export function getLeadSources(id: string, page = 1) {
+  return request<{ items: LeadSource[]; total: number }>(`/douyin/leads/${encodeURIComponent(id)}/sources?page=${page}`);
+}
+export function deleteCustomerLead(id: string) {
+  return request<{ deleted: number }>(`/douyin/leads/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+export function getLocalConversation(account: string, conversation: string) {
+  return request<ConversationItem>(`/douyin/account/${encodeURIComponent(account)}/conversation/${encodeURIComponent(conversation)}`);
+}

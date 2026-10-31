@@ -546,15 +546,11 @@ BASE_URL = (
 # ================================================= #
 # 客户端「检查更新」请求服务端 /api/client-auth/app-version 获取最新版本信息。
 # 每次发版后更新 DOWNLOAD_LATEST_VERSION（或用环境变量覆盖），客户端据此提示升级。
-DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.60'
+DOWNLOAD_LATEST_VERSION = os.environ.get('DOWNLOAD_LATEST_VERSION') or '0.1.61'
 # 是否强制更新（true 时客户端弹窗不提供「稍后」）
 DOWNLOAD_FORCE_UPDATE = os.environ.get('DOWNLOAD_FORCE_UPDATE', 'false').lower() == 'true'
 # 更新说明（支持用 \n 分隔多行）
 DOWNLOAD_RELEASE_NOTES = os.environ.get(
     'DOWNLOAD_RELEASE_NOTES',
-    'Windows 快捷登录显示英文键盘准备结果，与浏览器登录状态分开提示\n'
-    '新增手动模式：取消自动切换选项后重试，完全保留当前输入法\n'
-    '自动准备只执行一次，失败仍继续启动；保持 0.1.59 的非阻断修复\n'
-    '覆盖安装即可，无需重装浏览器，保留账号和登录资料\n'
-    '浏览器扩展本版无改动（扩展更新至 2.3.4 后保持不变）'
+    '## D助手 0.1.61 / 浏览器扩展 2.3.4\n\n- 新增客户留资：自动提取收到的私信手机号，记录客户昵称、抖音号、接收账号、首次及最近时间。\n- 手机号前方的文字自动记为备注，已有记录自动补注；重复消息去重，纯号码不会清空已有备注。\n- 支持搜索筛选、来源查看、复制、CSV导出、删除、暂停采集及手动扫描本地历史。\n- 留资数据独立保存在本机，不随聊天缓存清理；顶部紧凑排版，固定表头与分页。\n- 保留0.1.60 Windows快捷登录及输入法兼容行为，本次不混入尚未实机验证的输入法排查改动。\n- 覆盖安装保留账号、登录资料、聊天和规则；浏览器扩展更新至 2.3.4 后保持不变。\n'
 )

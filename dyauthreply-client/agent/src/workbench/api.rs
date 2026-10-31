@@ -62,7 +62,8 @@ pub fn router(service: Arc<ManualService>, db: Arc<Workbench>, token: String) ->
             get(command).options(options),
         )
         .route("/ws/client/douyin/", get(socket))
-        .with_state(App { service, db });
+        .with_state(App { service, db: db.clone() })
+        .merge(super::leads_api::router(db));
     crate::runtime::messaging::api::secure_router(router, token)
 }
 async fn options() -> StatusCode {

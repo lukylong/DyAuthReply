@@ -989,6 +989,13 @@ impl ManualService {
                     Ok((Ok(_), _)) => {}
                     _ => tracing::warn!("native audit synchronization pending"),
                 }
+                let leads = service.workbench();
+                if !matches!(
+                    tokio::task::spawn_blocking(move || leads.process_lead_jobs()).await,
+                    Ok(Ok(_))
+                ) {
+                    tracing::warn!("customer lead extraction pending; durable jobs retained");
+                }
                 if tick.is_multiple_of(240) {
                     let db = service.workbench();
                     let audit = service.audit();
